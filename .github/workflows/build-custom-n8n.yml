@@ -2,7 +2,7 @@ name: Build & Push custom n8n (GHCR)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "master" ]
     tags: [ "v*", "release-**" ]
   workflow_dispatch:
 
