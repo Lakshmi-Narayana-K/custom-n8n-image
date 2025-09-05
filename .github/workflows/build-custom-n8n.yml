@@ -1,4 +1,4 @@
-name: Build custom n8n image
+name: Build custom n8n (precompile -> image)
 
 on:
   push:
@@ -24,21 +24,28 @@ jobs:
           node-version: 22
           cache: 'pnpm'
 
-      # Corepack makes pnpm available
-      - name: Enable Corepack
+      # Corepack makes pnpm available, if it's not available we use this to install it
+      - name: Install pnpm
         run: |
           corepack enable
-          corepack prepare pnpm@latest --activate
-          echo "NODE_OPTIONS=--max-old-space-size=8192" >> $GITHUB_ENV
+          corepack prepare pnpm@9.12.3 --activate
+          pnpm --version  # To verify pnpm installation
 
-      - name: Install deps
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Build the app for Docker
+      # Build artifacts for Docker (this will generate the compiled folder)
       - name: Build artifacts for Docker
         run: |
-          pnpm build
-          node scripts/prepare.mjs || true
+          if pnpm -w -s run | grep -q "^build:docker"; then
+            pnpm build:docker
+          else
+            pnpm build
+            # Some versions use this to create ./compiled
+            node scripts/prepare.mjs || true
+          fi
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
 
       - name: Verify compiled folder
         run: test -d compiled && ls -la compiled
@@ -49,7 +56,7 @@ jobs:
           name: n8n-compiled
           path: compiled
 
-  # 2) Build the Docker image
+  # 2) Build the final Docker image (no pnpm build inside)
   image:
     needs: compile
     runs-on: ubuntu-latest
@@ -89,6 +96,7 @@ jobs:
             org.opencontainers.image.source=${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      # Build and push the final Docker image using the combined Dockerfile
       - name: Build & Push
         uses: docker/build-push-action@v6
         with:
