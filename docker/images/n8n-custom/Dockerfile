@@ -52,4 +52,28 @@ FROM node:${NODE_VERSION}-alpine AS runtime
 # parity with docker/images/n8n-base/Dockerfile (fonts & tools come from base image there)
 RUN apk add --no-cache bash tini jq tzdata ca-certificates libc6-compat
 
-ENV N
+ENV NODE_ENV=production \
+  NODE_ICU_DATA=/usr/local/lib/node_modules/full-icu \
+  N8N_PORT=5678 \
+  N8N_HOST=0.0.0.0 \
+  N8N_LOG_LEVEL=info \
+  N8N_DIAGNOSTICS_ENABLED=false
+
+WORKDIR /home/node
+USER node
+
+# Copy built workspace to runtime
+COPY --from=builder --chown=node:node /home/node /usr/local/lib/node_modules/n8n
+
+# Link CLI entry
+USER root
+RUN ln -s /usr/local/lib/node_modules/n8n/packages/cli/bin/n8n /usr/local/bin/n8n \
+  && mkdir -p /home/node/.n8n && chown -R node:node /home/node/.n8n
+USER node
+
+# Entry + port
+COPY --chown=node:node docker/images/n8n-custom/docker-entrypoint.sh /docker-entrypoint.sh
+EXPOSE 5678
+
+ENTRYPOINT ["tini","--","/docker-entrypoint.sh"]
+CMD ["n8n","start"]
