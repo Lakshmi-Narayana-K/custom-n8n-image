@@ -1,4 +1,4 @@
-name: Build custom n8n (precompile -> image)
+name: Build custom n8n image
 
 on:
   push:
@@ -13,10 +13,6 @@ jobs:
   # 1) Compile the app outside Docker to ./compiled
   compile:
     runs-on: ubuntu-latest
-    env:
-      TURBO_TELEMETRY_DISABLED: "1"
-      NODE_OPTIONS: --max-old-space-size=8192
-      PNPM_STORE_DIR: ~/.pnpm-store
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,44 +22,26 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: 'pnpm'
 
-      # Install pnpm (inherits version from package.json "packageManager")
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-
-      - name: Cache pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.PNPM_STORE_DIR }}
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-store-${{ runner.os }}-
-
-      - name: Configure pnpm
+      # Corepack makes pnpm available
+      - name: Enable Corepack
         run: |
-          pnpm config set store-dir $PNPM_STORE_DIR
-          pnpm -v
-          node -v
+          corepack enable
+          corepack prepare pnpm@latest --activate
+          echo "NODE_OPTIONS=--max-old-space-size=8192" >> $GITHUB_ENV
 
       - name: Install deps
         run: pnpm install --frozen-lockfile
 
-      # Produce ./compiled for the Docker runtime image
+      # Build the app for Docker
       - name: Build artifacts for Docker
         run: |
-          if pnpm -w -s run | grep -q "^build:docker"; then
-            pnpm build:docker
-          else
-            pnpm build
-            node scripts/prepare.mjs || true
-          fi
+          pnpm build
+          node scripts/prepare.mjs || true
 
       - name: Verify compiled folder
-        run: |
-          test -d compiled
-          ls -la compiled
+        run: test -d compiled && ls -la compiled
 
       - name: Upload compiled artifacts
         uses: actions/upload-artifact@v4
@@ -71,7 +49,7 @@ jobs:
           name: n8n-compiled
           path: compiled
 
-  # 2) Build the final Docker image (no pnpm build inside)
+  # 2) Build the Docker image
   image:
     needs: compile
     runs-on: ubuntu-latest
@@ -115,7 +93,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/images/n8n-custom/Dockerfile
+          file: docker/images/n8n/Dockerfile
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
