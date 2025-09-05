@@ -13,38 +13,37 @@ jobs:
   # 1) Compile the app outside Docker to ./compiled
   compile:
     runs-on: ubuntu-latest
+    env:
+      TURBO_TELEMETRY_DISABLED: "1"
+      NODE_OPTIONS: --max-old-space-size=8192
+      PNPM_STORE_DIR: ~/.pnpm-store
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # Node 22
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
       # Install pnpm (inherits version from package.json "packageManager")
-      # IMPORTANT: Do NOT set 'version:' here, to avoid conflicts with packageManager.
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           run_install: false
 
-      # Cache pnpm store for speed
-      - name: Use pnpm store cache
+      - name: Cache pnpm store
         uses: actions/cache@v4
         with:
-          path: ~/.pnpm-store
+          path: ${{ env.PNPM_STORE_DIR }}
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: |
             pnpm-store-${{ runner.os }}-
 
-      - name: Configure env + pnpm
+      - name: Configure pnpm
         run: |
-          echo "TURBO_TELEMETRY_DISABLED=1" >> $GITHUB_ENV
-          echo "NODE_OPTIONS=--max-old-space-size=8192" >> $GITHUB_ENV
-          pnpm config set store-dir ~/.pnpm-store
+          pnpm config set store-dir $PNPM_STORE_DIR
           pnpm -v
           node -v
 
@@ -60,8 +59,6 @@ jobs:
             pnpm build
             node scripts/prepare.mjs || true
           fi
-        env:
-          NODE_OPTIONS: --max-old-space-size=8192
 
       - name: Verify compiled folder
         run: |
