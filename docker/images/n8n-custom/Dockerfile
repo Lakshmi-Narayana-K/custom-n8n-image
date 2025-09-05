@@ -25,14 +25,10 @@ COPY --chown=node:node pnpm-workspace.yaml turbo.json package.json pnpm-lock.yam
 COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node packages ./packages
 COPY --chown=node:node patches ./patches
-# (optional but harmless if present)
-COPY --chown=node:node tsconfig.base.json tsconfig.json* ./
 
 # enable pnpm via corepack (needs root to write /usr/local/bin)
 USER root
 RUN corepack enable
-# Let corepack honor the version specified in package.json's "packageManager"
-# (n8n currently uses pnpm v10; no need to pin manually)
 USER node
 
 # install & build
