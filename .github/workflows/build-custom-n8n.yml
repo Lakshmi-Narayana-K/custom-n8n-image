@@ -24,11 +24,11 @@ jobs:
         with:
           node-version: 22
 
-      # Install pnpm explicitly (avoid Corepack quirks)
+      # Install pnpm (inherits version from package.json "packageManager")
+      # IMPORTANT: Do NOT set 'version:' here, to avoid conflicts with packageManager.
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9.12.3
           run_install: false
 
       # Cache pnpm store for speed
