@@ -7,7 +7,7 @@ ARG NODE_VERSION=22
 FROM n8nio/base:${NODE_VERSION} AS builder
 
 ENV NODE_ENV=production
-# keep RAM usage friendlier during builds
+# friendlier RAM usage during builds
 ENV NODE_OPTIONS="--max_old_space_size=2048"
 
 # system deps
@@ -17,15 +17,22 @@ RUN apk add --no-cache libc6-compat jq git openssh
 WORKDIR /home/node
 USER node
 
-# copy workspace (order keeps cache efficient)
-COPY --chown=node:node turbo.json package.json pnpm-lock.yaml .npmrc* ./
+# ---- copy root workspace files FIRST (for correct pnpm behavior & caching) ----
+# IMPORTANT: pnpm-workspace.yaml carries catalogs used by overrides
+COPY --chown=node:node pnpm-workspace.yaml turbo.json package.json pnpm-lock.yaml .npmrc* ./
+
+# rest of the monorepo
 COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node packages ./packages
 COPY --chown=node:node patches ./patches
+# (optional but harmless if present)
+COPY --chown=node:node tsconfig.base.json tsconfig.json* ./
 
 # enable pnpm via corepack (needs root to write /usr/local/bin)
 USER root
-RUN corepack enable && corepack prepare pnpm@8 --activate
+RUN corepack enable
+# Let corepack honor the version specified in package.json's "packageManager"
+# (n8n currently uses pnpm v10; no need to pin manually)
 USER node
 
 # install & build
@@ -41,7 +48,7 @@ RUN rm -rf node_modules \
   && find . -type f -name "*.ts" -o -name "*.js.map" -delete \
   && rm -rf patches .npmrc *.yaml node_modules/.cache
 
-# ---- customization hooks (uncomment + point to your files if needed) ----
+# ---- customization hooks (uncomment & point to your files if needed) ----
 # COPY --chown=node:node docker/images/n8n-custom/custom-nodes/ packages/nodes-base/nodes/custom/
 # COPY --chown=node:node docker/images/n8n-custom/branding/ packages/editor-ui/src/public/
 
