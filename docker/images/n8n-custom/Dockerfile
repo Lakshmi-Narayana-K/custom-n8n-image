@@ -1,82 +1,71 @@
-# =========================
-# Custom n8n (build from source, CI-friendly)
-# =========================
+# Runtime-only custom image that expects ./compiled in the build context
 ARG NODE_VERSION=22
+ARG N8N_VERSION=snapshot
+ARG LAUNCHER_VERSION=1.3.0
+ARG TARGETPLATFORM
 
-# ---------- builder ----------
-FROM n8nio/base:${NODE_VERSION} AS builder
+# = STAGE 1: Base system (same as your n8n image)
+FROM n8nio/base:${NODE_VERSION} AS system-deps
 
+# = STAGE 2: App artifact processor (just receives compiled/)
+FROM alpine:3.22.0 AS app-artifact-processor
+# CI job places ./compiled here in the build context
+COPY ./compiled /app/
+
+# ---- Optional customizations on compiled output (branding, static, etc.)
+# COPY docker/images/n8n-custom/branding/ /app/node_modules/n8n/packages/frontend/editor-ui/dist/
+# COPY docker/images/n8n-custom/custom-nodes/ /app/node_modules/n8n/packages/nodes-base/dist/nodes/custom/
+
+# = STAGE 3: Task Runner launcher (same as your n8n image)
+FROM alpine:3.22.0 AS launcher-downloader
+ARG TARGETPLATFORM
+ARG LAUNCHER_VERSION
+RUN set -e; \
+  case "$TARGETPLATFORM" in \
+  "linux/amd64") ARCH_NAME="amd64" ;; \
+  "linux/arm64") ARCH_NAME="arm64" ;; \
+  *) echo "Unsupported platform: $TARGETPLATFORM" && exit 1 ;; \
+  esac; \
+  mkdir /launcher-temp && cd /launcher-temp; \
+  wget -q "https://github.com/n8n-io/task-runner-launcher/releases/download/${LAUNCHER_VERSION}/task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz"; \
+  wget -q "https://github.com/n8n-io/task-runner-launcher/releases/download/${LAUNCHER_VERSION}/task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz.sha256"; \
+  echo "$(cat task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz.sha256) task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz" > checksum.sha256; \
+  sha256sum -c checksum.sha256; \
+  mkdir -p /launcher-bin; \
+  tar xzf task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz -C /launcher-bin; \
+  cd / && rm -rf /launcher-temp
+
+# = STAGE 4: Final runtime
+FROM system-deps AS runtime
+ARG N8N_VERSION
+ARG N8N_RELEASE_TYPE=dev
 ENV NODE_ENV=production
-# friendlier RAM usage during builds
-ENV NODE_OPTIONS="--max_old_space_size=2048"
-
-# system deps
-USER root
-RUN apk add --no-cache libc6-compat jq git openssh
-
+ENV N8N_RELEASE_TYPE=${N8N_RELEASE_TYPE}
+ENV NODE_ICU_DATA=/usr/local/lib/node_modules/full-icu
+ENV SHELL=/bin/sh
 WORKDIR /home/node
+
+# copy compiled app + launcher
+COPY --from=app-artifact-processor /app /usr/local/lib/node_modules/n8n
+COPY --from=launcher-downloader /launcher-bin/* /usr/local/bin/
+
+# entrypoint + runners config (reuse your existing files if you want)
+COPY docker/images/n8n/docker-entrypoint.sh /docker-entrypoint.sh
+COPY docker/images/n8n/n8n-task-runners.json /etc/n8n-task-runners.json
+
+# Rebuild native deps and link CLI
+RUN cd /usr/local/lib/node_modules/n8n && \
+  npm rebuild sqlite3 && \
+  ln -s /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n && \
+  mkdir -p /home/node/.n8n && chown -R node:node /home/node
+
+# (Optional) PDF rendering support – same as your n8n Dockerfile
+RUN cd /usr/local/lib/node_modules/n8n/node_modules/pdfjs-dist && npm install @napi-rs/canvas
+
+EXPOSE 5678/tcp
 USER node
-
-# ---- copy root workspace files FIRST (for correct pnpm behavior & caching) ----
-# IMPORTANT: pnpm-workspace.yaml carries catalogs used by overrides
-COPY --chown=node:node pnpm-workspace.yaml turbo.json package.json pnpm-lock.yaml .npmrc* ./
-
-# rest of the monorepo
-COPY --chown=node:node scripts ./scripts
-COPY --chown=node:node packages ./packages
-COPY --chown=node:node patches ./patches
-
-# enable pnpm via corepack (needs root to write /usr/local/bin)
-USER root
-RUN corepack enable
-USER node
-
-# install & build
-RUN pnpm install --frozen-lockfile
-RUN pnpm build
-
-# slim to production deps
-RUN rm -rf node_modules \
-  && jq 'del(.pnpm.patchedDependencies)' package.json > package.tmp.json && mv package.tmp.json package.json \
-  && jq '{name: .name, version: .version}' packages/editor-ui/package.json > packages/editor-ui/package.json.tmp && mv packages/editor-ui/package.json.tmp packages/editor-ui/package.json \
-  && jq '{name: .name, version: .version}' packages/cli/package.json > packages/cli/package.json.tmp && mv packages/cli/package.json.tmp packages/cli/package.json \
-  && pnpm install --prod --no-optional \
-  && find . -type f -name "*.ts" -o -name "*.js.map" -delete \
-  && rm -rf patches .npmrc *.yaml node_modules/.cache
-
-# ---- customization hooks (uncomment & point to your files if needed) ----
-# COPY --chown=node:node docker/images/n8n-custom/custom-nodes/ packages/nodes-base/nodes/custom/
-# COPY --chown=node:node docker/images/n8n-custom/branding/ packages/editor-ui/src/public/
-
-# ---------- runner ----------
-FROM node:${NODE_VERSION}-alpine AS runtime
-
-# minimal runtime deps
-RUN apk add --no-cache bash tini jq tzdata ca-certificates libc6-compat \
-  && npm i -g full-icu@1.5.0
-
-ENV NODE_ENV=production \
-  NODE_ICU_DATA=/usr/local/lib/node_modules/full-icu \
-  N8N_PORT=5678 \
-  N8N_HOST=0.0.0.0 \
-  N8N_LOG_LEVEL=info \
-  N8N_DIAGNOSTICS_ENABLED=false
-
-WORKDIR /home/node
-USER node
-
-# copy built workspace into runtime
-COPY --from=builder --chown=node:node /home/node /usr/local/lib/node_modules/n8n
-
-# link CLI and ensure data dir exists/owned
-USER root
-RUN ln -s /usr/local/lib/node_modules/n8n/packages/cli/bin/n8n /usr/local/bin/n8n \
-  && mkdir -p /home/node/.n8n && chown -R node:node /home/node/.n8n
-USER node
-
-# entrypoint + port
-COPY --chown=node:node docker/images/n8n-custom/docker-entrypoint.sh /docker-entrypoint.sh
-EXPOSE 5678
-
 ENTRYPOINT ["tini","--","/docker-entrypoint.sh"]
-CMD ["n8n","start"]
+LABEL org.opencontainers.image.title="custom-n8n" \
+  org.opencontainers.image.description="Custom n8n runtime built from precompiled artifacts" \
+  org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+  org.opencontainers.image.version=${N8N_VERSION}
