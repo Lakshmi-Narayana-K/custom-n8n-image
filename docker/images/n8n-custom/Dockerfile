@@ -4,7 +4,7 @@ ARG N8N_VERSION=snapshot
 ARG LAUNCHER_VERSION=1.3.0
 ARG TARGETPLATFORM
 
-# = STAGE 1: Base system (same as your n8n image)
+# = STAGE 1: Base system (same as upstream n8n image)
 FROM n8nio/base:${NODE_VERSION} AS system-deps
 
 # = STAGE 2: App artifact processor (just receives compiled/)
@@ -13,10 +13,12 @@ FROM alpine:3.22.0 AS app-artifact-processor
 COPY ./compiled /app/
 
 # ---- Optional customizations on compiled output (branding, static, etc.)
+# Example: overwrite built UI assets
 # COPY docker/images/n8n-custom/branding/ /app/node_modules/n8n/packages/frontend/editor-ui/dist/
+# Example: add extra nodes that were prebuilt into dist (advanced)
 # COPY docker/images/n8n-custom/custom-nodes/ /app/node_modules/n8n/packages/nodes-base/dist/nodes/custom/
 
-# = STAGE 3: Task Runner launcher (same as your n8n image)
+# = STAGE 3: Task Runner launcher (same as upstream)
 FROM alpine:3.22.0 AS launcher-downloader
 ARG TARGETPLATFORM
 ARG LAUNCHER_VERSION
@@ -35,7 +37,7 @@ RUN set -e; \
   tar xzf task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz -C /launcher-bin; \
   cd / && rm -rf /launcher-temp
 
-# = STAGE 4: Final runtime
+# = STAGE 4: Final runtime (matches your existing docker/images/n8n)
 FROM system-deps AS runtime
 ARG N8N_VERSION
 ARG N8N_RELEASE_TYPE=dev
@@ -49,22 +51,23 @@ WORKDIR /home/node
 COPY --from=app-artifact-processor /app /usr/local/lib/node_modules/n8n
 COPY --from=launcher-downloader /launcher-bin/* /usr/local/bin/
 
-# entrypoint + runners config (reuse your existing files if you want)
+# reuse upstream entrypoint & runners config
 COPY docker/images/n8n/docker-entrypoint.sh /docker-entrypoint.sh
 COPY docker/images/n8n/n8n-task-runners.json /etc/n8n-task-runners.json
 
-# Rebuild native deps and link CLI
+# rebuild native deps and link CLI
 RUN cd /usr/local/lib/node_modules/n8n && \
   npm rebuild sqlite3 && \
   ln -s /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n && \
   mkdir -p /home/node/.n8n && chown -R node:node /home/node
 
-# (Optional) PDF rendering support – same as your n8n Dockerfile
+# (Optional) PDF rendering support – same as upstream
 RUN cd /usr/local/lib/node_modules/n8n/node_modules/pdfjs-dist && npm install @napi-rs/canvas
 
 EXPOSE 5678/tcp
 USER node
 ENTRYPOINT ["tini","--","/docker-entrypoint.sh"]
+
 LABEL org.opencontainers.image.title="custom-n8n" \
   org.opencontainers.image.description="Custom n8n runtime built from precompiled artifacts" \
   org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \

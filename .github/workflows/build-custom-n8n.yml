@@ -18,39 +18,55 @@ jobs:
         with:
           submodules: recursive
 
+      # Node 22
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'pnpm'
 
-      # Corepack makes pnpm available
-      - name: Enable Corepack
+      # Install pnpm explicitly (avoid Corepack quirks)
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.3
+          run_install: false
+
+      # Cache pnpm store for speed
+      - name: Use pnpm store cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.pnpm-store
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+
+      - name: Configure env + pnpm
         run: |
-          corepack enable
-          corepack prepare pnpm@9.12.3 --activate
           echo "TURBO_TELEMETRY_DISABLED=1" >> $GITHUB_ENV
           echo "NODE_OPTIONS=--max-old-space-size=8192" >> $GITHUB_ENV
+          pnpm config set store-dir ~/.pnpm-store
+          pnpm -v
+          node -v
 
       - name: Install deps
         run: pnpm install --frozen-lockfile
 
-      # n8n added a helper for Docker builds; if not present in your version,
-      # fall back to: pnpm build && pnpm --filter n8n build:docker
+      # Produce ./compiled for the Docker runtime image
       - name: Build artifacts for Docker
         run: |
           if pnpm -w -s run | grep -q "^build:docker"; then
             pnpm build:docker
           else
             pnpm build
-            # Some versions use this to create ./compiled
             node scripts/prepare.mjs || true
           fi
         env:
           NODE_OPTIONS: --max-old-space-size=8192
 
       - name: Verify compiled folder
-        run: test -d compiled && ls -la compiled
+        run: |
+          test -d compiled
+          ls -la compiled
 
       - name: Upload compiled artifacts
         uses: actions/upload-artifact@v4
@@ -98,7 +114,6 @@ jobs:
             org.opencontainers.image.source=${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-      # Use the runtime Dockerfile that copies ./compiled (see below)
       - name: Build & Push
         uses: docker/build-push-action@v6
         with:
