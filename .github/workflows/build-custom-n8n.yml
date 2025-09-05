@@ -18,15 +18,17 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup Node (match repo)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: 22
           cache: 'pnpm'
 
-      - name: Enable Corepack + pnpm cache
+      # Corepack makes pnpm available
+      - name: Enable Corepack
         run: |
           corepack enable
+          corepack prepare pnpm@9.12.3 --activate
           echo "TURBO_TELEMETRY_DISABLED=1" >> $GITHUB_ENV
           echo "NODE_OPTIONS=--max-old-space-size=8192" >> $GITHUB_ENV
 
