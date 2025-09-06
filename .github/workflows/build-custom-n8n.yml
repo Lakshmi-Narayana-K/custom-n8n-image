@@ -1,20 +1,24 @@
-name: Build custom n8n (precompile -> image)
+name: Build n8n and Create Docker Image
 
 on:
+  workflow_dispatch:  # Manual trigger
   push:
-    branches: [ "master" ]
-    tags: [ "v*", "release-**" ]
-  workflow_dispatch:
+    branches: [ "master" ]  # Auto-trigger on push
 
 env:
-  IMAGE_NAME: custom-n8n
+  IMAGE_NAME: n8n-custom
+  IMAGE_TAG: latest
 
 jobs:
-  # 1) Compile the app outside Docker to ./compiled
-  compile:
+  # Job 1: Build the application (creates compiled folder)
+  build:
+    name: Build n8n Application
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
@@ -24,87 +28,85 @@ jobs:
           node-version: 22
           cache: 'pnpm'
 
-      # Corepack makes pnpm available, if it's not available we use this to install it
       - name: Install pnpm
         run: |
-          corepack enable
-          corepack prepare pnpm@9.12.3 --activate
-          pnpm --version  # To verify pnpm installation
+          npm install -g pnpm
+          pnpm --version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Build artifacts for Docker (this will generate the compiled folder)
-      - name: Build artifacts for Docker
-        run: |
-          if pnpm -w -s run | grep -q "^build:docker"; then
-            pnpm build:docker
-          else
-            pnpm build
-            # Some versions use this to create ./compiled
-            node scripts/prepare.mjs || true
-          fi
+      - name: Build n8n (creates compiled folder)
+        run: node scripts/build-n8n.mjs
         env:
           NODE_OPTIONS: --max-old-space-size=8192
 
-      - name: Verify compiled folder
-        run: test -d compiled && ls -la compiled
+      - name: Verify compiled folder exists
+        run: |
+          echo "Checking compiled folder..."
+          test -d compiled
+          echo "Compiled folder contents:"
+          ls -la compiled/
+          echo "Compiled folder size:"
+          du -sh compiled/
 
       - name: Upload compiled artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: n8n-compiled
-          path: compiled
+          name: n8n-compiled-${{ github.sha }}
+          path: compiled/
+          retention-days: 7
 
-  # 2) Build the final Docker image (no pnpm build inside)
-  image:
-    needs: compile
+  # Job 2: Build Docker image (depends on build job)
+  dockerize:
+    name: Build Docker Image
+    needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    timeout-minutes: 15
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Download compiled
+      - name: Download compiled artifacts
         uses: actions/download-artifact@v4
         with:
-          name: n8n-compiled
-          path: compiled
+          name: n8n-compiled-${{ github.sha }}
+          path: compiled/
 
-      - name: Set up Buildx
+      - name: Verify compiled folder
+        run: |
+          echo "Verifying compiled folder after download..."
+          test -d compiled
+          ls -la compiled/
+
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to GHCR
+      - name: Build Docker image
+        run: node scripts/dockerize-n8n.mjs
+        env:
+          IMAGE_BASE_NAME: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ github.sha }}
+
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha
-          labels: |
-            org.opencontainers.image.title=custom-n8n
-            org.opencontainers.image.source=${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Push Docker image
+        run: |
+          docker push ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker tag ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }} ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+          docker push ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
 
-      # Build and push the final Docker image using the combined Dockerfile
-      - name: Build & Push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/images/n8n/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Output image information
+        run: |
+          echo "✅ Docker image built and pushed successfully!"
+          echo "Image: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "Latest: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest"
+          echo ""
+          echo "To pull the image:"
+          echo "docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
