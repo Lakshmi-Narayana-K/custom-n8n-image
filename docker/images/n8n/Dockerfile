@@ -22,15 +22,12 @@ ENV N8N_RELEASE_TYPE=${N8N_RELEASE_TYPE}
 
 WORKDIR /home/node
 
-# Copy our custom compiled n8n to a new location
-COPY --from=app-artifact-processor /app /usr/local/lib/node_modules/n8n-custom
+# Copy our custom compiled n8n to a temporary location
+COPY --from=app-artifact-processor /app /tmp/custom-n8n
 
-# Create a new n8n directory and copy our custom version
-RUN mkdir -p /usr/local/lib/node_modules/n8n-new && \
-    cp -r /usr/local/lib/node_modules/n8n-custom/* /usr/local/lib/node_modules/n8n-new/ && \
-    rm -rf /usr/local/lib/node_modules/n8n-custom && \
-    rm -rf /usr/local/lib/node_modules/n8n && \
-    mv /usr/local/lib/node_modules/n8n-new /usr/local/lib/node_modules/n8n && \
+# Remove existing n8n and replace with our custom version
+RUN rm -rf /usr/local/lib/node_modules/n8n && \
+    mv /tmp/custom-n8n /usr/local/lib/node_modules/n8n && \
     chmod +x /usr/local/lib/node_modules/n8n/bin/n8n && \
     chown -R node:node /usr/local/lib/node_modules/n8n
 
