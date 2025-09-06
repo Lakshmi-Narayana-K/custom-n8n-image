@@ -56,11 +56,14 @@ COPY --from=launcher-downloader /launcher-bin/* /usr/local/bin/
 COPY docker/images/n8n/docker-entrypoint.sh /
 COPY docker/images/n8n/n8n-task-runners.json /etc/n8n-task-runners.json
 
-# Skip sqlite3 rebuild - use the pre-built version from compiled folder
+# Fix permissions and create symlink
 RUN cd /usr/local/lib/node_modules/n8n && \
-    ln -s /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n && \
+    chmod +x bin/n8n && \
+    ln -sf /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n && \
+    chmod +x /usr/local/bin/n8n && \
     mkdir -p /home/node/.n8n && \
-    chown -R node:node /home/node
+    chown -R node:node /home/node && \
+    chown -R node:node /usr/local/lib/node_modules/n8n
 
 # Install additional dependencies for specific modules (like pdfjs-dist)
 RUN cd /usr/local/lib/node_modules/n8n/node_modules/pdfjs-dist && npm install @napi-rs/canvas
