@@ -25,6 +25,9 @@ WORKDIR /home/node
 # Copy our custom compiled n8n to a safe location
 COPY --from=app-artifact-processor /app /opt/custom-n8n
 
+# Fix permissions for the n8n binary
+RUN chmod +x /opt/custom-n8n/bin/n8n
+
 # Create a custom entrypoint in a writable location
 RUN echo '#!/bin/sh' > /tmp/custom-entrypoint.sh && \
     echo 'export N8N_PATH=/opt/custom-n8n' >> /tmp/custom-entrypoint.sh && \
