@@ -1,18 +1,13 @@
-ARG NODE_VERSION=22
-ARG N8N_VERSION=snapshot
-ARG LAUNCHER_VERSION=1.3.0
-ARG TARGETPLATFORM
-
-# ==============================================================================
+# ============================================================================== 
 # STAGE 1: Application Artifact Processor
-# ==============================================================================
+# ============================================================================== 
 FROM alpine:3.22.0 AS app-artifact-processor
 
 COPY ./compiled /app/
 
-# ==============================================================================
+# ============================================================================== 
 # STAGE 2: Task Runner Launcher
-# ==============================================================================
+# ============================================================================== 
 FROM alpine:3.22.0 AS launcher-downloader
 ARG TARGETPLATFORM
 ARG LAUNCHER_VERSION
@@ -32,9 +27,9 @@ RUN set -e; \
     tar xzf task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz -C /launcher-bin; \
     cd / && rm -rf /launcher-temp
 
-# ==============================================================================
+# ============================================================================== 
 # STAGE 3: Final Runtime Image
-# ==============================================================================
+# ============================================================================== 
 FROM n8nio/base:${NODE_VERSION} AS runtime
 
 ARG N8N_VERSION
@@ -46,14 +41,20 @@ ENV SHELL=/bin/sh
 
 WORKDIR /home/node
 
-# Copy our custom compiled n8n (no conflicts!)
+# Copy the custom n8n application
 COPY --from=app-artifact-processor /app /usr/local/lib/node_modules/n8n
+
+# Copy the task runner binary
 COPY --from=launcher-downloader /launcher-bin/* /usr/local/bin/
-COPY docker/images/n8n/docker-entrypoint.sh /
+
+# Copy entrypoint script and task runners config
+COPY docker/images/n8n/docker-entrypoint.sh /docker-entrypoint.sh
 COPY docker/images/n8n/n8n-task-runners.json /etc/n8n-task-runners.json
 
-# Create symlink and set permissions
+# Ensure n8n is executable
 RUN ln -s /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n && \
+    chmod +x /usr/local/bin/n8n && \
+    chown node:node /usr/local/bin/n8n && \
     mkdir -p /home/node/.n8n && \
     chown -R node:node /home/node
 
