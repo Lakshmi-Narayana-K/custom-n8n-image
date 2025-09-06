@@ -27,7 +27,10 @@ ENV N8N_RELEASE_TYPE=${N8N_RELEASE_TYPE}
 
 WORKDIR /home/node
 
-# Copy our custom compiled n8n over the official one
+# Remove the existing n8n installation and copy our custom version
+RUN rm -rf /usr/local/lib/node_modules/n8n
+
+# Copy our custom compiled n8n
 COPY --from=app-artifact-processor /app /usr/local/lib/node_modules/n8n
 
 # Fix permissions
