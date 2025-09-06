@@ -6,5 +6,5 @@ COPY ./compiled /opt/custom-n8n
 # Set environment to use our custom version
 ENV N8N_PATH=/opt/custom-n8n
 
-# Override the entrypoint to use our custom n8n
-ENTRYPOINT ["/opt/custom-n8n/bin/n8n"]
+# Run with node instead of the binary
+ENTRYPOINT ["node", "/opt/custom-n8n/bin/n8n"]
