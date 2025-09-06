@@ -4,21 +4,16 @@ ARG LAUNCHER_VERSION=1.3.0
 ARG TARGETPLATFORM
 
 # ==============================================================================
-# STAGE 1: Use Official n8n Image as Base
-# ==============================================================================
-FROM n8nio/n8n:latest AS base
-
-# ==============================================================================
-# STAGE 2: Application Artifact Processor
+# STAGE 1: Application Artifact Processor
 # ==============================================================================
 FROM alpine:3.22.0 AS app-artifact-processor
 
 COPY ./compiled /app/
 
 # ==============================================================================
-# STAGE 3: Final Runtime Image
+# STAGE 2: Final Runtime Image (Start Fresh)
 # ==============================================================================
-FROM base AS runtime
+FROM n8nio/n8n:latest AS runtime
 
 ARG N8N_VERSION
 ARG N8N_RELEASE_TYPE=dev
@@ -27,15 +22,16 @@ ENV N8N_RELEASE_TYPE=${N8N_RELEASE_TYPE}
 
 WORKDIR /home/node
 
-# Change ownership of n8n directory to root, then remove it
-RUN chown -R root:root /usr/local/lib/node_modules/n8n && \
-    rm -rf /usr/local/lib/node_modules/n8n
+# Copy our custom compiled n8n to a new location
+COPY --from=app-artifact-processor /app /usr/local/lib/node_modules/n8n-custom
 
-# Copy our custom compiled n8n
-COPY --from=app-artifact-processor /app /usr/local/lib/node_modules/n8n
-
-# Fix permissions
-RUN chmod +x /usr/local/lib/node_modules/n8n/bin/n8n && \
+# Create a new n8n directory and copy our custom version
+RUN mkdir -p /usr/local/lib/node_modules/n8n-new && \
+    cp -r /usr/local/lib/node_modules/n8n-custom/* /usr/local/lib/node_modules/n8n-new/ && \
+    rm -rf /usr/local/lib/node_modules/n8n-custom && \
+    rm -rf /usr/local/lib/node_modules/n8n && \
+    mv /usr/local/lib/node_modules/n8n-new /usr/local/lib/node_modules/n8n && \
+    chmod +x /usr/local/lib/node_modules/n8n/bin/n8n && \
     chown -R node:node /usr/local/lib/node_modules/n8n
 
 EXPOSE 5678/tcp
