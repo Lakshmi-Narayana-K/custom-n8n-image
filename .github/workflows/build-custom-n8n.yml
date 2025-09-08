@@ -19,6 +19,7 @@ jobs:
         with:
           submodules: recursive
 
+      # Normalize entrypoint line endings
       - name: Normalize line endings
         run: |
           sudo apt-get update && sudo apt-get install -y dos2unix
@@ -49,11 +50,16 @@ jobs:
           ls -la compiled | head -n 100
           du -sh compiled
 
-      - name: Upload compiled artifacts
+      # >>> IMPORTANT: tar the folder to preserve pnpm symlinks <<<
+      - name: Pack compiled as tarball (preserve symlinks)
+        run: |
+          tar -czf compiled.tar.gz compiled
+
+      - name: Upload compiled.tar.gz
         uses: actions/upload-artifact@v4
         with:
-          name: n8n-compiled-${{ github.sha }}
-          path: compiled/
+          name: n8n-compiled-tar-${{ github.sha }}
+          path: compiled.tar.gz
           retention-days: 7
 
   dockerize:
@@ -73,11 +79,16 @@ jobs:
           sudo apt-get update && sudo apt-get install -y dos2unix
           dos2unix docker/images/n8n/docker-entrypoint.sh || true
 
-      - name: Download compiled artifacts
+      - name: Download compiled.tar.gz
         uses: actions/download-artifact@v4
         with:
-          name: n8n-compiled-${{ github.sha }}
-          path: compiled/
+          name: n8n-compiled-tar-${{ github.sha }}
+          path: .
+
+      - name: Extract compiled
+        run: |
+          tar -xzf compiled.tar.gz
+          ls -la compiled | head -n 50
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
