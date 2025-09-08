@@ -6,7 +6,7 @@ ARG LAUNCHER_VERSION=1.3.0
 ARG TARGETPLATFORM
 
 # ------------------------------------------------------------------------------
-# STAGE 1: bring in compiled artifact produced by CI (./compiled)
+# STAGE 1: bring in compiled artifact produced by CI (./compiled at repo root)
 # ------------------------------------------------------------------------------
 FROM alpine:3.22 AS app-artifact
 WORKDIR /app
@@ -49,31 +49,43 @@ ENV NODE_ENV=production \
 
 WORKDIR /home/node
 
-# app + launcher + entrypoint
+# App files + launcher + entrypoint/configs
 COPY --from=app-artifact /app /usr/local/lib/node_modules/n8n
 COPY --from=launcher /launcher-bin/* /usr/local/bin/
 COPY docker/images/n8n/docker-entrypoint.sh /
 COPY docker/images/n8n/n8n-task-runners.json /etc/n8n-task-runners.json
 
-# make sure entrypoint & n8n are executable and LF (not CRLF)
-RUN chmod +x /docker-entrypoint.sh && \
-    chmod +x /usr/local/lib/node_modules/n8n/bin/n8n && \
-    ln -sf /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n && \
-    mkdir -p /home/node/.n8n && chown -R node:node /home/node
+# Ensure scripts are executable, create data dir
+RUN set -eux; \
+    chmod +x /docker-entrypoint.sh; \
+    chmod +x /usr/local/lib/node_modules/n8n/bin/n8n; \
+    ln -sf /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n; \
+    mkdir -p /home/node/.n8n; \
+    chown -R node:node /home/node
 
-# native/binary bits the original image does
-# (these two lines matter; they avoid runtime native/ABI and pdf/canvas issues)
-RUN cd /usr/local/lib/node_modules/n8n && npm rebuild sqlite3
-RUN cd /usr/local/lib/node_modules/n8n/node_modules/pdfjs-dist && npm install @napi-rs/canvas
+# --- Native toolchain for sqlite3 rebuild ---
+RUN apk add --no-cache python3 make g++ \
+    && npm i -g prebuild-install node-gyp
 
-# libs needed by @napi-rs/canvas at runtime
+# Rebuild sqlite3 against this Node version
+RUN cd /usr/local/lib/node_modules/n8n && \
+    npm rebuild sqlite3 --build-from-source
+
+# Canvas dependency for pdfjs-dist
+RUN cd /usr/local/lib/node_modules/n8n/node_modules/pdfjs-dist && \
+    npm install @napi-rs/canvas
+
+# Runtime libs needed by @napi-rs/canvas
 RUN apk add --no-cache \
     cairo-dev jpeg-dev pango-dev musl-dev giflib-dev pixman-dev \
     pangomm-dev libjpeg-turbo-dev freetype-dev
 
+# (optional) clean up npm cache and build toolchain to slim image
+RUN rm -rf /root/.npm || true && \
+    apk del make g++ || true
+
 EXPOSE 5678
 USER node
-
 ENTRYPOINT ["tini", "--", "/docker-entrypoint.sh"]
 
 LABEL org.opencontainers.image.title="n8n" \
