@@ -19,7 +19,6 @@ jobs:
         with:
           submodules: recursive
 
-      # Ensure LF line endings
       - name: Normalize line endings
         run: |
           sudo apt-get update && sudo apt-get install -y dos2unix
@@ -90,13 +89,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push Docker image
+      - name: Build and Push Docker image (amd64)
         run: |
           docker buildx build \
             --platform linux/amd64 \
             --build-arg NODE_VERSION=20 \
             --build-arg N8N_VERSION=snapshot \
             --build-arg LAUNCHER_VERSION=1.3.0 \
+            -f docker/images/n8n/Dockerfile \
             -t ghcr.io/lakshmi-narayana-k/${{ env.IMAGE_NAME }}:${{ github.sha }} \
             -t ghcr.io/lakshmi-narayana-k/${{ env.IMAGE_NAME }}:latest \
             --push \
