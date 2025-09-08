@@ -11,5 +11,7 @@ if [ "$#" -gt 0 ]; then
   exec n8n "$@"
 else
   # Got started without arguments
+  # log
+  echo "Starting n8n with arguments: $@"
   exec n8n
 fi
