@@ -10,8 +10,9 @@ import {
 	N8nText,
 } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import { useRouter } from 'vue-router';
+import { ROLE } from '@n8n/api-types';
 
 defineProps<{ fullyExpanded: boolean; isCollapsed: boolean }>();
 
@@ -31,6 +32,18 @@ const userMenuItems = ref<IMenuItem[]>([
 		label: i18n.baseText('auth.signout'),
 	},
 ]);
+
+const updatedMemberItems = ref<IMenuItem[]>([]);
+
+const isMember = computed(() => {
+	const user = usersStore.currentUser as unknown as {
+		role?: string;
+		isDefaultUser?: boolean;
+	} | null;
+	if (!user) return false;
+	const userRole = user.isDefaultUser ? ROLE.Default : user.role;
+	return userRole === ROLE.Member;
+});
 
 const onLogout = () => {
 	void router.push({ name: VIEWS.SIGNOUT });
@@ -52,7 +65,7 @@ const onUserActionToggle = (action: string) => {
 
 <template>
 	<div ref="user" :class="$style.userArea">
-		<N8nPopoverReka side="right" align="end" :side-offset="16">
+		<N8nPopoverReka v-if="!isMember" side="right" align="end" :side-offset="16">
 			<template #content>
 				<div :class="$style.popover">
 					<N8nMenuItem
@@ -68,7 +81,7 @@ const onUserActionToggle = (action: string) => {
 				<div :class="$style.userAreaInner">
 					<div class="ml-3xs" data-test-id="main-sidebar-user-menu">
 						<!-- This dropdown is only enabled when sidebar is collapsed -->
-						<div :class="{ ['clickable']: isCollapsed }">
+						<div :class="{ ['clickable']: isCollapsed && !isMember }">
 							<N8nAvatar
 								:first-name="usersStore.currentUser?.firstName"
 								:last-name="usersStore.currentUser?.lastName"
@@ -96,6 +109,28 @@ const onUserActionToggle = (action: string) => {
 				</div>
 			</template>
 		</N8nPopoverReka>
+		<div v-else :class="$style.userAreaInner">
+			<div class="ml-3xs" data-test-id="main-sidebar-user-menu">
+				<div>
+					<N8nAvatar
+						:first-name="usersStore.currentUser?.firstName"
+						:last-name="usersStore.currentUser?.lastName"
+						size="small"
+					/>
+				</div>
+			</div>
+			<div
+				:class="{
+					['ml-2xs']: true,
+					[$style.userName]: true,
+					[$style.expanded]: fullyExpanded,
+				}"
+			>
+				<N8nText size="small" color="text-dark">
+					{{ usersStore.currentUser?.fullName }}
+				</N8nText>
+			</div>
+		</div>
 	</div>
 </template>
 
