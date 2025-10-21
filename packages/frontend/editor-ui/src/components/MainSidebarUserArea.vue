@@ -19,22 +19,9 @@ const i18n = useI18n();
 const router = useRouter();
 const usersStore = useUsersStore();
 
-const userMenuItems = ref<IMenuItem[]>([
-	{
-		id: 'settings',
-		icon: 'settings',
-		label: i18n.baseText('settings'),
-	},
-	{
-		id: 'logout',
-		icon: 'door-open',
-		label: i18n.baseText('auth.signout'),
-	},
-]);
+const userMenuItems = ref<IMenuItem[]>([]);
 
-const onLogout = () => {
-	void router.push({ name: VIEWS.SIGNOUT });
-};
+const onLogout = () => {};
 
 const onUserActionToggle = (action: string) => {
 	switch (action) {
@@ -91,7 +78,7 @@ const onUserActionToggle = (action: string) => {
 						data-test-id="user-menu"
 						:class="{ [$style.userActions]: true, [$style.expanded]: fullyExpanded }"
 					>
-						<N8nIconButton icon="ellipsis" text square type="tertiary" />
+						<!-- User actions menu disabled -->
 					</div>
 				</div>
 			</template>
