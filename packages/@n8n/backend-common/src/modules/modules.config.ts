@@ -7,6 +7,9 @@ export const MODULE_NAMES = [
 	'external-secrets',
 	'community-packages',
 	'data-table',
+	'mcp',
+	'chat-hub',
+	'provisioning',
 ] as const;
 
 export type ModuleName = (typeof MODULE_NAMES)[number];

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { useI18n } from '@n8n/i18n';
-import { type NodePanelType, type IRunDataDisplayMode } from '@/Interface';
-import { N8nIcon, N8nRadioButtons } from '@n8n/design-system';
+import type { IRunDataDisplayMode } from '@/Interface';
+import type { NodePanelType } from '@/features/nodes/ndv/ndv.types';
 import { computed, watch } from 'vue';
 
+import { N8nIcon, N8nRadioButtons } from '@n8n/design-system';
 const { compact, value, hasBinaryData, paneType, nodeGeneratesHtml, hasRenderableData } =
 	defineProps<{
 		compact: boolean;

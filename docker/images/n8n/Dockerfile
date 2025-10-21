@@ -1,8 +1,6 @@
-# syntax=docker/dockerfile:1
-
-ARG NODE_VERSION=20
+ARG NODE_VERSION=22.18.0
 ARG N8N_VERSION=snapshot
-ARG LAUNCHER_VERSION=1.3.0
+ARG LAUNCHER_VERSION=1.4.0
 ARG TARGETPLATFORM
 
 # --- Stage 1: compiled artifact from CI ---

@@ -14,7 +14,7 @@ import {
 	SPLIT_IN_BATCHES_NODE_TYPE,
 } from '@/constants';
 import type { IWorkflowDb } from '@/Interface';
-import { useNDVStore } from '@/stores/ndv.store';
+import { useNDVStore } from '@/features/nodes/ndv/ndv.store';
 import { useNodeTypesStore } from '@/stores/nodeTypes.store';
 import { useWorkflowsStore } from '@/stores/workflows.store';
 import { createTestingPinia } from '@pinia/testing';
@@ -210,6 +210,10 @@ describe('VirtualSchema.vue', () => {
 					DynamicScrollerItem: DynamicScrollerItemStub,
 					N8nIcon: true,
 					Notice: NoticeStub,
+					NodeIcon: {
+						template: '<node-icon-stub :node-type="nodeType.name" :size="size"></node-icon-stub>',
+						props: ['node-type', 'size'],
+					},
 				},
 			},
 			pinia,

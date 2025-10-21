@@ -1,7 +1,15 @@
 <script setup lang="ts">
+import CodeNodeEditor from '@/features/shared/editors/components/CodeNodeEditor/CodeNodeEditor.vue';
+import CssEditor from '@/features/shared/editors/components/CssEditor/CssEditor.vue';
+import ExpressionEditorModalInput from '@/components/ExpressionEditorModal/ExpressionEditorModalInput.vue';
+import HtmlEditor from '@/features/shared/editors/components/HtmlEditor/HtmlEditor.vue';
+import JsEditor from '@/features/shared/editors/components/JsEditor/JsEditor.vue';
+import JsonEditor from '@/features/shared/editors/components/JsonEditor/JsonEditor.vue';
+import NodeExecuteButton from '@/components/NodeExecuteButton.vue';
+import ParameterOptions from '@/components/ParameterOptions.vue';
+import SqlEditor from '@/features/shared/editors/components/SqlEditor/SqlEditor.vue';
 import { useFocusPanelStore } from '@/stores/focusPanel.store';
 import { useNodeTypesStore } from '@/stores/nodeTypes.store';
-import { N8nText, N8nInput, N8nResizeWrapper, N8nInfoTip } from '@n8n/design-system';
 import { computed, nextTick, ref, watch, toRef, useTemplateRef } from 'vue';
 import { useI18n } from '@n8n/i18n';
 import {
@@ -21,24 +29,36 @@ import {
 	type CodeNodeEditorLanguage,
 	type EditorType,
 	HTML_NODE_TYPE,
+	type INodeProperties,
 	isResourceLocatorValue,
 } from 'n8n-workflow';
-import { useEnvironmentsStore } from '@/stores/environments.ee.store';
+import { useEnvironmentsStore } from '@/features/settings/environments.ee/environments.store';
 import { htmlEditorEventBus } from '@/event-bus';
 import { hasFocusOnInput, isFocusableEl } from '@/utils/typesUtils';
 import type { INodeUi, ResizeData, TargetNodeParameterContext } from '@/Interface';
 import { useTelemetry } from '@/composables/useTelemetry';
 import { useActiveElement, useThrottleFn } from '@vueuse/core';
-import { useExecutionData } from '@/composables/useExecutionData';
+import { useExecutionData } from '@/features/execution/executions/composables/useExecutionData';
 import { useWorkflowsStore } from '@/stores/workflows.store';
-import ExperimentalNodeDetailsDrawer from '@/components/canvas/experimental/components/ExperimentalNodeDetailsDrawer.vue';
-import { useExperimentalNdvStore } from '@/components/canvas/experimental/experimentalNdv.store';
-import { useNDVStore } from '@/stores/ndv.store';
+import ExperimentalNodeDetailsDrawer from '@/features/workflows/canvas/experimental/components/ExperimentalNodeDetailsDrawer.vue';
+import { useExperimentalNdvStore } from '@/features/workflows/canvas/experimental/experimentalNdv.store';
+import { useNDVStore } from '@/features/nodes/ndv/ndv.store';
 import { useVueFlow } from '@vue-flow/core';
-import ExperimentalFocusPanelHeader from '@/components/canvas/experimental/components/ExperimentalFocusPanelHeader.vue';
+import ExperimentalFocusPanelHeader from '@/features/workflows/canvas/experimental/components/ExperimentalFocusPanelHeader.vue';
 import { useTelemetryContext } from '@/composables/useTelemetryContext';
-import { type ContextMenuAction } from '@/composables/useContextMenuItems';
+import { type ContextMenuAction } from '@/features/shared/contextMenu/composables/useContextMenuItems';
+import { type CanvasNode, CanvasNodeRenderType } from '@/features/workflows/canvas/canvas.types';
+import { useCanvasOperations } from '@/composables/useCanvasOperations';
 
+import {
+	N8nIcon,
+	N8nInfoTip,
+	N8nInput,
+	N8nRadioButtons,
+	N8nResizeWrapper,
+	N8nText,
+} from '@n8n/design-system';
+import { injectWorkflowState } from '@/composables/useWorkflowState';
 defineOptions({ name: 'FocusPanel' });
 
 const props = defineProps<{
@@ -60,6 +80,7 @@ const locale = useI18n();
 const nodeHelpers = useNodeHelpers();
 const focusPanelStore = useFocusPanelStore();
 const workflowsStore = useWorkflowsStore();
+const workflowState = injectWorkflowState();
 const nodeTypesStore = useNodeTypesStore();
 const telemetry = useTelemetry();
 const nodeSettingsParameters = useNodeSettingsParameters();
@@ -69,6 +90,7 @@ const ndvStore = useNDVStore();
 const deviceSupport = useDeviceSupport();
 const vueFlow = useVueFlow(workflowsStore.workflowId);
 const activeElement = useActiveElement();
+const { renameNode } = useCanvasOperations();
 
 useTelemetryContext({ view_shown: 'focus_panel' });
 
@@ -112,9 +134,11 @@ const node = computed<INodeUi | undefined>(() => {
 		return resolvedParameter.value?.node;
 	}
 
-	const selected = vueFlow.getSelectedNodes.value[0]?.id;
+	const selected: CanvasNode | undefined = vueFlow.getSelectedNodes.value[0];
 
-	return selected ? workflowsStore.allNodes.find((n) => n.id === selected) : undefined;
+	return selected?.data?.render.type === CanvasNodeRenderType.Default
+		? workflowsStore.allNodes.find((n) => n.id === selected.id)
+		: undefined;
 });
 const multipleNodesSelected = computed(() => vueFlow.getSelectedNodes.value.length > 1);
 
@@ -141,9 +165,9 @@ const hasNodeRun = computed(() => {
 	);
 });
 
-function getTypeOption<T>(optionName: string): T | undefined {
+function getTypeOption<T extends keyof NonNullable<INodeProperties['typeOptions']>>(optionName: T) {
 	return resolvedParameter.value
-		? getParameterTypeOption<T>(resolvedParameter.value.parameter, optionName)
+		? getParameterTypeOption(resolvedParameter.value.parameter, optionName)
 		: undefined;
 }
 
@@ -162,7 +186,7 @@ const editorLanguage = computed<CodeNodeEditorLanguage>(() => {
 	return getTypeOption('editorLanguage') ?? 'javaScript';
 });
 
-const editorRows = computed(() => getTypeOption<number>('rows'));
+const editorRows = computed(() => getTypeOption('rows'));
 
 const isToolNode = computed(() =>
 	resolvedParameter.value ? nodeTypesStore.isToolNode(resolvedParameter.value?.node.type) : false,
@@ -205,9 +229,23 @@ const targetNodeParameterContext = computed<TargetNodeParameterContext | undefin
 	};
 });
 
-const isNodeExecuting = computed(() => workflowsStore.isNodeExecuting(node.value?.name ?? ''));
+const isNodeExecuting = computed(() =>
+	workflowState.executingNode.isNodeExecuting(node.value?.name ?? ''),
+);
 
 const selectedNodeIds = computed(() => vueFlow.getSelectedNodes.value.map((n) => n.id));
+
+const emptyTitle = computed(() =>
+	experimentalNdvStore.isNdvInFocusPanelEnabled
+		? locale.baseText('nodeView.focusPanel.v2.noParameters.title')
+		: locale.baseText('nodeView.focusPanel.noParameters.title'),
+);
+
+const emptySubtitle = computed(() =>
+	experimentalNdvStore.isNdvInFocusPanelEnabled
+		? locale.baseText('nodeView.focusPanel.v2.noParameters.subtitle')
+		: locale.baseText('nodeView.focusPanel.noParameters.subtitle'),
+);
 
 const { resolvedExpression } = useResolvedExpression({
 	expression,
@@ -404,10 +442,26 @@ function onOpenNdv() {
 		ndvStore.setActiveNodeName(node.value.name, 'focus_panel');
 	}
 }
+
+function onRenameNode(value: string) {
+	if (node.value) {
+		void renameNode(node.value.name, value);
+	}
+}
 </script>
 
 <template>
-	<div v-if="focusPanelActive" ref="wrapper" :class="$style.wrapper" @keydown.stop>
+	<div
+		v-if="focusPanelActive"
+		ref="wrapper"
+		data-test-id="focus-panel"
+		:class="[
+			$style.wrapper,
+			'ignore-key-press-canvas',
+			{ [$style.isNdvInFocusPanelEnabled]: experimentalNdvStore.isNdvInFocusPanelEnabled },
+		]"
+		@keydown.stop
+	>
 		<N8nResizeWrapper
 			:width="focusPanelWidth"
 			:supported-directions="['left']"
@@ -423,11 +477,13 @@ function onOpenNdv() {
 					:node="node"
 					:parameter="resolvedParameter?.parameter"
 					:is-executable="isExecutable"
+					:read-only="isCanvasReadOnly"
 					@execute="onExecute"
 					@open-ndv="onOpenNdv"
 					@clear-parameter="closeFocusPanel"
+					@rename-node="onRenameNode"
 				/>
-				<div v-if="resolvedParameter" :class="$style.content">
+				<div v-if="resolvedParameter" :class="$style.content" data-test-id="focus-parameter">
 					<div v-if="!experimentalNdvStore.isNdvInFocusPanelEnabled" :class="$style.tabHeader">
 						<div :class="$style.tabHeaderText">
 							<N8nText color="text-dark" size="small">
@@ -576,37 +632,38 @@ function onOpenNdv() {
 					v-else-if="node && experimentalNdvStore.isNdvInFocusPanelEnabled"
 					:node="node"
 					:node-ids="selectedNodeIds"
+					:is-read-only="isReadOnly"
 					@open-ndv="onOpenNdv"
 					@context-menu-action="(action, nodeIds) => emit('contextMenuAction', action, nodeIds)"
 				/>
 				<div v-else :class="[$style.content, $style.emptyContent]">
-					<div :class="$style.emptyText">
-						<div :class="$style.focusParameterWrapper">
-							<div :class="$style.iconWrapper">
-								<N8nIcon :class="$style.forceHover" icon="panel-right" size="medium" />
-								<N8nIcon
-									:class="$style.pointerIcon"
-									icon="mouse-pointer"
-									color="text-dark"
-									size="large"
-								/>
-							</div>
-							<N8nIcon icon="ellipsis-vertical" size="small" color="text-base" />
-							<N8nRadioButtons
-								size="small"
-								:model-value="'expression'"
-								:disabled="true"
-								:options="[
-									{ label: locale.baseText('parameterInput.fixed'), value: 'fixed' },
-									{ label: locale.baseText('parameterInput.expression'), value: 'expression' },
-								]"
+					<div :class="$style.focusParameterWrapper">
+						<div :class="$style.iconWrapper">
+							<N8nIcon :class="$style.forceHover" icon="panel-right" size="medium" />
+							<N8nIcon
+								:class="$style.pointerIcon"
+								icon="mouse-pointer"
+								color="text-dark"
+								size="large"
 							/>
 						</div>
+						<N8nIcon icon="ellipsis-vertical" size="small" color="text-base" />
+						<N8nRadioButtons
+							size="small"
+							:model-value="'expression'"
+							:disabled="true"
+							:options="[
+								{ label: locale.baseText('parameterInput.fixed'), value: 'fixed' },
+								{ label: locale.baseText('parameterInput.expression'), value: 'expression' },
+							]"
+						/>
+					</div>
+					<div :class="$style.emptyText">
 						<N8nText color="text-base" size="medium" :bold="true">
-							{{ locale.baseText('nodeView.focusPanel.noParameters.title') }}
+							{{ emptyTitle }}
 						</N8nText>
 						<N8nText color="text-base" size="small">
-							{{ locale.baseText('nodeView.focusPanel.noParameters.subtitle') }}
+							{{ emptySubtitle }}
 						</N8nText>
 					</div>
 				</div>
@@ -620,8 +677,8 @@ function onOpenNdv() {
 	display: flex;
 	flex-direction: row;
 	flex-wrap: nowrap;
-	border-left: 1px solid var(--color-foreground-base);
-	background: var(--color-background-xlight);
+	border-left: 1px solid var(--color--foreground);
+	background: var(--color--background--light-3);
 	overflow-y: hidden;
 	height: 100%;
 	flex-grow: 0;
@@ -645,35 +702,39 @@ function onOpenNdv() {
 		justify-content: center;
 		align-items: center;
 
+		.isNdvInFocusPanelEnabled & {
+			flex-direction: column-reverse;
+		}
+
 		.emptyText {
-			margin: 0 var(--spacing-xl);
+			margin: 0 var(--spacing--xl);
 			display: flex;
 			flex-direction: column;
-			gap: var(--spacing-2xs);
+			gap: var(--spacing--2xs);
+		}
 
-			.focusParameterWrapper {
-				display: flex;
-				align-items: center;
-				justify-content: center;
-				gap: var(--spacing-2xs);
-				margin-bottom: var(--spacing-m);
+		.focusParameterWrapper {
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			gap: var(--spacing--2xs);
+			margin-block: var(--spacing--md);
 
-				.iconWrapper {
-					position: relative;
-					display: inline-block;
-				}
+			.iconWrapper {
+				position: relative;
+				display: inline-block;
+			}
 
-				.pointerIcon {
-					position: absolute;
-					top: 100%;
-					left: 50%;
-					transform: translate(-20%, -30%);
-					pointer-events: none;
-				}
+			.pointerIcon {
+				position: absolute;
+				top: 100%;
+				left: 50%;
+				transform: translate(-20%, -30%);
+				pointer-events: none;
+			}
 
-				:global([class*='_disabled_']) {
-					cursor: default !important;
-				}
+			:global([class*='_disabled_']) {
+				cursor: default !important;
 			}
 		}
 	}
@@ -682,18 +743,18 @@ function onOpenNdv() {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		border-bottom: 1px solid var(--color-foreground-base);
-		padding: var(--spacing-2xs);
+		border-bottom: 1px solid var(--color--foreground);
+		padding: var(--spacing--2xs);
 
 		.tabHeaderText {
 			display: flex;
-			gap: var(--spacing-4xs);
+			gap: var(--spacing--4xs);
 			align-items: baseline;
 		}
 
 		.buttonWrapper {
 			display: flex;
-			gap: var(--spacing-2xs);
+			gap: var(--spacing--2xs);
 			align-items: center;
 		}
 	}
@@ -702,8 +763,8 @@ function onOpenNdv() {
 		display: flex;
 		height: 100%;
 		flex-direction: column;
-		gap: var(--spacing-2xs);
-		padding: var(--spacing-2xs);
+		gap: var(--spacing--2xs);
+		padding: var(--spacing--2xs);
 
 		.parameterOptionsWrapper {
 			display: flex;
@@ -722,10 +783,10 @@ function onOpenNdv() {
 				display: flex;
 				height: 100%;
 				width: 100%;
-				font-size: var(--font-size-2xs);
+				font-size: var(--font-size--2xs);
 
 				:global(.cm-editor) {
-					background-color: var(--color-code-background);
+					background-color: var(--code--color--background);
 					width: 100%;
 				}
 			}
@@ -756,8 +817,8 @@ function onOpenNdv() {
 }
 
 .forceHover {
-	color: var(--color-button-secondary-hover-active-focus-font);
-	border-color: var(--color-button-secondary-hover-active-focus-border);
+	color: var(--button--color--text--secondary--hover-active-focus);
+	border-color: var(--button--border-color--secondary--hover-active-focus);
 	background-color: var(--color-button-secondary-hover-active-focus-background);
 }
 </style>

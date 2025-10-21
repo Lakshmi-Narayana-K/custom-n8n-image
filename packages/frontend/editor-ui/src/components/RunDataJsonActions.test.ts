@@ -6,7 +6,7 @@ import { waitFor, cleanup, fireEvent, within, screen } from '@testing-library/vu
 import RunDataJsonActions from './RunDataJsonActions.vue';
 import { nonExistingJsonPath, VIEWS } from '@/constants';
 import type { IWorkflowDb } from '@/Interface';
-import { useNDVStore } from '@/stores/ndv.store';
+import { useNDVStore } from '@/features/nodes/ndv/ndv.store';
 import { useNodeTypesStore } from '@/stores/nodeTypes.store';
 import { useWorkflowsStore } from '@/stores/workflows.store';
 
@@ -129,7 +129,6 @@ describe('RunDataJsonActions', () => {
 	beforeEach(cleanup);
 
 	beforeAll(() => {
-		document.body.innerHTML = '<div id="app-grid"></div>';
 		server = setupServer();
 	});
 
@@ -146,10 +145,9 @@ describe('RunDataJsonActions', () => {
 		const { pinia, activeNode } = await createPiniaWithActiveNode();
 		const renderComponent = createComponentRenderer(RunDataJsonActions, {
 			props: {
-				node: activeNode,
+				node: activeNode ?? undefined,
 				paneType: 'output',
 				pushRef: 'ref',
-				displayMode: 'json',
 				distanceFromActive: 0,
 				selectedJsonPath: nonExistingJsonPath,
 				jsonData: [
@@ -198,10 +196,9 @@ describe('RunDataJsonActions', () => {
 		const { pinia, activeNode } = await createPiniaWithActiveNode();
 		const renderComponent = createComponentRenderer(RunDataJsonActions, {
 			props: {
-				node: activeNode,
+				node: activeNode ?? undefined,
 				paneType: 'output',
 				pushRef: 'ref',
-				displayMode: 'json',
 				distanceFromActive: 0,
 				selectedJsonPath: nonExistingJsonPath,
 				jsonData: [
@@ -254,10 +251,9 @@ describe('RunDataJsonActions', () => {
 		const { pinia, activeNode } = await createPiniaWithActiveNode();
 		const renderComponent = createComponentRenderer(RunDataJsonActions, {
 			props: {
-				node: activeNode,
+				node: activeNode ?? undefined,
 				paneType: 'output',
 				pushRef: 'ref',
-				displayMode: 'json',
 				distanceFromActive: 0,
 				selectedJsonPath: '[0].name',
 				jsonData: [
@@ -297,10 +293,9 @@ describe('RunDataJsonActions', () => {
 		const { pinia, activeNode } = await createPiniaWithActiveNode();
 		const renderComponent = createComponentRenderer(RunDataJsonActions, {
 			props: {
-				node: activeNode,
+				node: activeNode ?? undefined,
 				paneType: 'output',
 				pushRef: 'ref',
-				displayMode: 'json',
 				distanceFromActive: 0,
 				selectedJsonPath: '[0].name',
 				jsonData: [
@@ -340,10 +335,9 @@ describe('RunDataJsonActions', () => {
 		const { pinia, activeNode } = await createPiniaWithActiveNode();
 		const renderComponent = createComponentRenderer(RunDataJsonActions, {
 			props: {
-				node: activeNode,
+				node: activeNode ?? undefined,
 				paneType: 'output',
 				pushRef: 'ref',
-				displayMode: 'json',
 				distanceFromActive: 0,
 				selectedJsonPath: '[0].name',
 				jsonData: [
