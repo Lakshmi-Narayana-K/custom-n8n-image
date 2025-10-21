@@ -10,6 +10,8 @@ import type { CommandGroup, CommandBarItem } from '../types';
 
 const ITEM_ID = {
 	WHATS_NEW: 'whats-new',
+	SETTINGS: 'settings',
+	SIGN_OUT: 'sign-out',
 	TEMPLATES: 'templates',
 	VARIABLES: 'variables',
 	INSIGHTS: 'insights',
@@ -181,7 +183,36 @@ export function useGenericCommands(): CommandGroup {
 			},
 			keywords: [i18n.baseText('mainSidebar.aboutN8n').toLowerCase()],
 		},
-		// Settings and Sign out disabled
+		{
+			id: ITEM_ID.SETTINGS,
+			title: i18n.baseText('settings'),
+			section: i18n.baseText('commandBar.sections.general'),
+			handler: () => {
+				void router.push({ name: VIEWS.SETTINGS });
+			},
+			icon: {
+				component: N8nIcon,
+				props: {
+					icon: 'cog',
+				},
+			},
+			keywords: [i18n.baseText('settings').toLowerCase()],
+		},
+		{
+			id: ITEM_ID.SIGN_OUT,
+			title: i18n.baseText('auth.signout'),
+			section: i18n.baseText('commandBar.sections.general'),
+			handler: () => {
+				void router.push({ name: VIEWS.SIGNOUT });
+			},
+			icon: {
+				component: N8nIcon,
+				props: {
+					icon: 'sign-out-alt',
+				},
+			},
+			keywords: [i18n.baseText('auth.signout').toLowerCase()],
+		},
 	]);
 
 	return {

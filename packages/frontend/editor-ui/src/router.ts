@@ -473,10 +473,7 @@ export const routes: RouteRecordRaw[] = [
 			telemetry: {
 				pageCategory: 'auth',
 			},
-			middleware: ['authenticated', 'custom'],
-			middlewareOptions: {
-				custom: () => false,
-			},
+			middleware: ['authenticated'],
 		},
 	},
 	{
@@ -529,12 +526,6 @@ export const routes: RouteRecordRaw[] = [
 				return { name: VIEWS.PERSONAL_SETTINGS };
 			}
 			return { name: VIEWS.USAGE };
-		},
-		meta: {
-			middleware: ['authenticated', 'custom'],
-			middlewareOptions: {
-				custom: () => false,
-			},
 		},
 		children: [
 			{
