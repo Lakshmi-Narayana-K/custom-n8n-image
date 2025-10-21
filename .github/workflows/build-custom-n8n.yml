@@ -112,3 +112,4 @@ jobs:
             -t ghcr.io/lakshmi-narayana-k/${{ env.IMAGE_NAME }}:latest \
             --push \
             .
+
