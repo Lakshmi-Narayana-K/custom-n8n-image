@@ -21,6 +21,7 @@ import { projectsRoutes } from '@/features/collaboration/projects/projects.route
 import { MfaRequiredError } from '@n8n/rest-api-client';
 import { useCalloutHelpers } from './composables/useCalloutHelpers';
 import { useRecentResources } from '@/features/shared/commandBar/composables/useRecentResources';
+import { ROLE } from '@n8n/api-types';
 
 const ChangePasswordView = async () =>
 	await import('@/features/core/auth/views/ChangePasswordView.vue');
@@ -473,7 +474,10 @@ export const routes: RouteRecordRaw[] = [
 			telemetry: {
 				pageCategory: 'auth',
 			},
-			middleware: ['authenticated'],
+			middleware: ['authenticated', 'role'],
+			middlewareOptions: {
+				role: [ROLE.Owner, ROLE.Admin],
+			},
 		},
 	},
 	{
