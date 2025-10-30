@@ -33,8 +33,6 @@ const userMenuItems = ref<IMenuItem[]>([
 	},
 ]);
 
-const updatedMemberItems = ref<IMenuItem[]>([]);
-
 const isMember = computed(() => {
 	const user = usersStore.currentUser as unknown as {
 		role?: string;
