@@ -64,6 +64,12 @@ RUN set -eux; \
     ln -sf /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n; \
     mkdir -p /home/node/.n8n && chown -R node:node /home/node
 
+# Build tools for native modules
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
+
+# Rebuild sqlite3 binding for the target platform/Node ABI
+RUN cd /usr/local/lib/node_modules/n8n && npm rebuild sqlite3 --update-binary
+
 # Canvas binding (should download prebuilt on glibc)
 RUN cd /usr/local/lib/node_modules/n8n/node_modules/pdfjs-dist && npm install @napi-rs/canvas
 
