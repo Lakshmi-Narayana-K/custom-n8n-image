@@ -1,7 +1,5 @@
-import type { Component } from 'vue';
 import type { NotificationOptions as ElementNotificationOptions } from 'element-plus';
 import type {
-	BannerName,
 	FrontendSettings,
 	IUserManagementSettings,
 	IVersionNotificationSettings,
@@ -115,7 +113,6 @@ declare global {
 			getVariant: (name: string) => string | boolean | undefined;
 			override: (name: string, value: string) => void;
 		};
-		Cypress: unknown;
 	}
 }
 
@@ -856,7 +853,8 @@ export type CloudUpdateLinkSourceType =
 	| 'insights'
 	| 'evaluations'
 	| 'ai-builder-sidebar'
-	| 'ai-builder-canvas';
+	| 'ai-builder-canvas'
+	| 'custom-roles';
 
 export type UTMCampaign =
 	| 'upgrade-custom-data-filter'
@@ -882,14 +880,8 @@ export type UTMCampaign =
 	| 'upgrade-debug'
 	| 'upgrade-insights'
 	| 'upgrade-evaluations'
-	| 'upgrade-builder';
-
-export type N8nBanners = {
-	[key in BannerName]: {
-		priority: number;
-		component: Component;
-	};
-};
+	| 'upgrade-builder'
+	| 'upgrade-custom-roles';
 
 export type AddedNode = {
 	type: string;
