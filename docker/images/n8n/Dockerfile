@@ -1,7 +1,5 @@
-ARG NODE_VERSION=22.18.0
+ARG NODE_VERSION=22.21.0
 ARG N8N_VERSION=snapshot
-ARG LAUNCHER_VERSION=1.4.0
-ARG TARGETPLATFORM
 
 # --- Stage 1: compiled artifact from CI ---
 FROM debian:bookworm-slim AS app-artifact
