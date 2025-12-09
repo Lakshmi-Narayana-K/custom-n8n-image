@@ -1,15 +1,18 @@
 <script lang="ts" setup>
-import { useGlobalEntityCreation } from '@/composables/useGlobalEntityCreation';
-import { VIEWS } from '@/constants';
-import { useProjectsStore } from '../projects.store';
-import { useSettingsStore } from '@/stores/settings.store';
+import { useGlobalEntityCreation } from '@/app/composables/useGlobalEntityCreation';
+import { VIEWS } from '@/app/constants';
+import { sourceControlEventBus } from '@/features/integrations/sourceControl.ee/sourceControl.eventBus';
 import { useUsersStore } from '@/features/settings/users/users.store';
-import type { ProjectListItem } from '../projects.types';
+import { useSettingsStore } from '@/app/stores/settings.store';
 import type { IMenuItem } from '@n8n/design-system/types';
 import { useI18n } from '@n8n/i18n';
-import { computed, onBeforeMount } from 'vue';
+import { computed, onBeforeMount, onBeforeUnmount } from 'vue';
+import { useProjectsStore } from '../projects.store';
+import type { ProjectListItem } from '../projects.types';
+import { CHAT_VIEW } from '@/features/ai/chatHub/constants';
 
-import { N8nButton, N8nMenuItem, N8nTooltip, N8nHeading } from '@n8n/design-system';
+import { N8nButton, N8nHeading, N8nMenuItem, N8nTooltip } from '@n8n/design-system';
+import { hasPermission } from '@/app/utils/rbac/permissions';
 
 type Props = {
 	collapsed: boolean;
@@ -28,6 +31,11 @@ const usersStore = useUsersStore();
 const isCreatingProject = computed(() => globalEntityCreation.isCreatingProject.value);
 const displayProjects = computed(() => globalEntityCreation.displayProjects.value);
 const isFoldersFeatureEnabled = computed(() => settingsStore.isFoldersFeatureEnabled);
+const isChatLinkAvailable = computed(
+	() =>
+		settingsStore.isChatFeatureEnabled &&
+		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } }),
+);
 const hasMultipleVerifiedUsers = computed(
 	() => usersStore.allUsers.filter((user) => !user.isPendingUser).length > 1,
 );
@@ -86,8 +94,26 @@ const activeTabId = computed(() => {
 	);
 });
 
+const chat = computed<IMenuItem>(() => ({
+	id: 'chat',
+	icon: 'message-circle',
+	label: 'Chat',
+	position: 'bottom',
+	route: { to: { name: CHAT_VIEW } },
+}));
+
+async function onSourceControlPull() {
+	// Update myProjects for the sidebar display
+	await projectsStore.getMyProjects();
+}
+
 onBeforeMount(async () => {
 	await usersStore.fetchUsers();
+	sourceControlEventBus.on('pull', onSourceControlPull);
+});
+
+onBeforeUnmount(() => {
+	sourceControlEventBus.off('pull', onSourceControlPull);
 });
 </script>
 
@@ -116,6 +142,13 @@ onBeforeMount(async () => {
 				:compact="props.collapsed"
 				:active="activeTabId === 'shared'"
 				data-test-id="project-shared-menu-item"
+			/>
+			<N8nMenuItem
+				v-if="isChatLinkAvailable"
+				:item="chat"
+				:compact="props.collapsed"
+				:active="activeTabId === 'chat'"
+				data-test-id="project-chat-menu-item"
 			/>
 		</div>
 		<N8nHeading

@@ -1,11 +1,12 @@
 name: Test Master
 
-# on:
-#   push:
-#     branches:
-#       - master
-#     paths-ignore:
-#       - packages/@n8n/task-runner-python/**
+on:
+  push:
+    branches:
+      - master
+      - 1.x
+    paths-ignore:
+      - packages/@n8n/task-runner-python/**
 
 jobs:
   build-github:
@@ -48,4 +49,4 @@ jobs:
           status: ${{ job.status }}
           channel: '#alerts-build'
           webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
-          message: Master branch (build or test or lint) failed (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          message: ${{ github.ref_name }} branch (build or test or lint) failed (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
