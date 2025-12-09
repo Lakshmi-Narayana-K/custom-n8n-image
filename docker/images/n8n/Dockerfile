@@ -53,7 +53,7 @@ WORKDIR /home/node
 COPY --from=app-artifact /app /usr/local/lib/node_modules/n8n
 COPY --from=launcher /launcher-bin/* /usr/local/bin/
 COPY docker/images/n8n/docker-entrypoint.sh /
-COPY docker/images/n8n/n8n-task-runners.json /etc/n8n-task-runners.json
+COPY docker/images/runners/n8n-task-runners.json /etc/n8n-task-runners.json
 
 # Ensure executables & symlink
 RUN set -eux; \
