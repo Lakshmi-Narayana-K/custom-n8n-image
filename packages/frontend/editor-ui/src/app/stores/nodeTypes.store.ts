@@ -59,15 +59,24 @@ export const useNodeTypesStore = defineStore(STORES.NODE_TYPES, () => {
 			settingsStore.settings.envFeatureFlags?.N8N_ENV_FEAT_SCHEDULE_TRIGGER_LIMIT_INTERVALS;
 		if (!raw || typeof raw !== 'string') return;
 
-		const normalized = raw
+		// Parse format: "hours=7200,days=86400" or old format "hours,days"
+		// We only need the keys (interval names) for UI restrictions
+		const parts = raw
 			.split(',')
 			.map((s) => s.trim())
 			.filter(Boolean);
+		const intervalNames = parts.map((part) => {
+			// If it contains '=', extract just the key
+			if (part.includes('=')) {
+				return part.split('=', 2)[0].trim();
+			}
+			return part;
+		});
 
-		const canonical = normalized
+		const canonical = intervalNames
 			.map((v) => v.toLowerCase())
 			.map((v) => {
-				// No shortcuts/aliases; only normalize casing + cronExpression spelling
+				// Normalize casing + cronExpression spelling
 				if (v === 'cronexpression') return 'cronExpression';
 				return v;
 			});

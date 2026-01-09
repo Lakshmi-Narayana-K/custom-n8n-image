@@ -27,8 +27,82 @@ import isEqual from 'lodash/isEqual';
 import omit from 'lodash/omit';
 import pick from 'lodash/pick';
 import { FileLocation, BinaryDataService } from 'n8n-core';
+import type { INode } from 'n8n-workflow';
 import { NodeApiError, PROJECT_ROOT, assert, type IDataObject } from 'n8n-workflow';
 import { v4 as uuid } from 'uuid';
+
+/**
+ * Parses N8N_SCHEDULE_TRIGGER_LIMIT_INTERVALS env var.
+ * Supports two formats:
+ * - Old: "hours,days" (no expiry values)
+ * - New: "hours=7200,days=86400" (with expiry in seconds)
+ * @returns Map of interval name to expiry seconds (0 means no expiry for that interval)
+ */
+function parseScheduleTriggerIntervalConfig(): Map<string, number> {
+	const raw = process.env.N8N_SCHEDULE_TRIGGER_LIMIT_INTERVALS ?? '';
+	const result = new Map<string, number>();
+	if (!raw.trim()) return result;
+
+	const parts = raw
+		.split(',')
+		.map((s) => s.trim())
+		.filter(Boolean);
+	for (const part of parts) {
+		if (part.includes('=')) {
+			// New format: "hours=7200"
+			const [key, val] = part.split('=', 2);
+			const intervalName = key.trim().toLowerCase();
+			const expirySeconds = parseInt(val.trim(), 10) || 0;
+			result.set(intervalName, expirySeconds);
+		} else {
+			// Old format: "hours" (no expiry)
+			result.set(part.toLowerCase(), 0);
+		}
+	}
+	return result;
+}
+
+/**
+ * Finds all Schedule Trigger interval types used in a workflow's nodes.
+ * @param nodes - The workflow nodes
+ * @returns Set of interval field values (e.g., "hours", "days", "cronExpression")
+ */
+function findScheduleTriggerIntervals(nodes: INode[]): Set<string> {
+	const intervals = new Set<string>();
+	for (const node of nodes) {
+		if (node.type !== 'n8n-nodes-base.scheduleTrigger') continue;
+
+		// Schedule Trigger stores rules in node.parameters.rule.interval[]
+		const rule = node.parameters?.rule as { interval?: Array<{ field?: string }> } | undefined;
+		const intervalRules = rule?.interval ?? [];
+		for (const r of intervalRules) {
+			if (r.field) {
+				intervals.add(r.field.toLowerCase());
+			}
+		}
+	}
+	return intervals;
+}
+
+/**
+ * Given the intervals used in a workflow and the config map, returns the shortest expiry in seconds.
+ * Returns 0 if no expiry applies (no matching intervals or all have 0 expiry).
+ */
+function getShortestExpiryForIntervals(
+	usedIntervals: Set<string>,
+	configMap: Map<string, number>,
+): number {
+	let shortest = 0;
+	for (const interval of usedIntervals) {
+		const expiry = configMap.get(interval);
+		if (expiry !== undefined && expiry > 0) {
+			if (shortest === 0 || expiry < shortest) {
+				shortest = expiry;
+			}
+		}
+	}
+	return shortest;
+}
 
 import { ActiveWorkflowManager } from '@/active-workflow-manager';
 import { FolderNotFoundError } from '@/errors/folder-not-found.error';
@@ -535,15 +609,24 @@ export class WorkflowService {
 		const isGlobalMember = user.role?.slug === 'global:member';
 		const memberPublishMaxCount =
 			Number(process.env.N8N_WORKFLOW_MEMBER_PUBLISH_MAX_COUNT ?? 0) || 0;
-		const memberScheduleExpirySeconds =
-			Number(process.env.N8N_WORKFLOW_MEMBER_SCHEDULE_EXPIRY_SECONDS ?? 0) || 0;
-		const shouldApplyMemberPublishRules =
-			isGlobalMember && (memberPublishMaxCount > 0 || memberScheduleExpirySeconds > 0);
 
+		// Parse interval config to check if expiry rules exist
+		const intervalConfig = parseScheduleTriggerIntervalConfig();
+		const hasExpiryRules = Array.from(intervalConfig.values()).some((v) => v > 0);
+
+		const shouldApplyMemberPublishRules =
+			isGlobalMember && (memberPublishMaxCount > 0 || hasExpiryRules);
+
+		let workflowVersion;
 		try {
-			await this.workflowHistoryService.getVersion(user, workflow.id, versionToActivate, {
-				includePublishHistory: false,
-			});
+			workflowVersion = await this.workflowHistoryService.getVersion(
+				user,
+				workflow.id,
+				versionToActivate,
+				{
+					includePublishHistory: false,
+				},
+			);
 		} catch (error) {
 			if (error instanceof WorkflowHistoryVersionNotFoundError) {
 				throw new NotFoundError('Version not found');
@@ -585,10 +668,16 @@ export class WorkflowService {
 			}
 
 			const publishedAt = new Date().toISOString();
-			const expiresAt =
-				memberScheduleExpirySeconds > 0
-					? new Date(Date.now() + memberScheduleExpirySeconds * 1000).toISOString()
-					: undefined;
+
+			// Calculate expiry based on Schedule Trigger intervals used in the workflow
+			let expiresAt: string | undefined;
+			if (hasExpiryRules && workflowVersion.nodes) {
+				const usedIntervals = findScheduleTriggerIntervals(workflowVersion.nodes);
+				const shortestExpiry = getShortestExpiryForIntervals(usedIntervals, intervalConfig);
+				if (shortestExpiry > 0) {
+					expiresAt = new Date(Date.now() + shortestExpiry * 1000).toISOString();
+				}
+			}
 
 			updatedStaticData = {
 				...workflowStaticData,

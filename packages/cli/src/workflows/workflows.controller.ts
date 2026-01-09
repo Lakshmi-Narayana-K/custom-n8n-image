@@ -64,15 +64,35 @@ import { CredentialsService } from '../credentials/credentials.service';
 
 @RestController('/workflows')
 export class WorkflowsController {
+	/**
+	 * Parses N8N_SCHEDULE_TRIGGER_LIMIT_INTERVALS to check if any expiry rules exist.
+	 */
+	private hasIntervalExpiryRules(): boolean {
+		const raw = process.env.N8N_SCHEDULE_TRIGGER_LIMIT_INTERVALS ?? '';
+		if (!raw.trim()) return false;
+
+		const parts = raw
+			.split(',')
+			.map((s) => s.trim())
+			.filter(Boolean);
+		for (const part of parts) {
+			if (part.includes('=')) {
+				const [, val] = part.split('=', 2);
+				const expirySeconds = parseInt(val.trim(), 10) || 0;
+				if (expirySeconds > 0) return true;
+			}
+		}
+		return false;
+	}
+
 	private getNxtwavePublishInfo(globalRoleSlug: string, staticData?: IDataObject) {
 		const isGlobalMember = globalRoleSlug === 'global:member';
 		const memberPublishMaxCount =
 			Number(process.env.N8N_WORKFLOW_MEMBER_PUBLISH_MAX_COUNT ?? 0) || 0;
-		const memberScheduleExpirySeconds =
-			Number(process.env.N8N_WORKFLOW_MEMBER_SCHEDULE_EXPIRY_SECONDS ?? 0) || 0;
+		const hasExpiryRules = this.hasIntervalExpiryRules();
 
 		// Only relevant for global:member, and only when at least one rule is enabled
-		if (!isGlobalMember || (memberPublishMaxCount <= 0 && memberScheduleExpirySeconds <= 0)) {
+		if (!isGlobalMember || (memberPublishMaxCount <= 0 && !hasExpiryRules)) {
 			return undefined;
 		}
 
