@@ -20,6 +20,22 @@ describe('ScheduleTrigger', () => {
 	});
 
 	describe('trigger', () => {
+		it('should not emit on schedule after expiry (scheduled mode only)', async () => {
+			const { emit } = await testTriggerNode(ScheduleTrigger, {
+				timezone,
+				node: { parameters: { rule: { interval: [{ field: 'hours', hoursInterval: 1 }] } } },
+				workflowStaticData: {
+					recurrenceRules: [],
+					__nxtwaveWorkflowPublish: {
+						expiresAt: new Date(mockDate.getTime() - 60_000).toISOString(),
+					},
+				},
+			});
+
+			jest.advanceTimersByTime(HOUR);
+			expect(emit).not.toHaveBeenCalled();
+		});
+
 		it('should emit on defined schedule', async () => {
 			const { emit } = await testTriggerNode(ScheduleTrigger, {
 				timezone,

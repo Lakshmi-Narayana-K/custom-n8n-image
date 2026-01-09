@@ -254,6 +254,16 @@ export interface IWorkflowDb {
 	activeVersionId: string | null;
 	usedCredentials?: IUsedCredential[];
 	meta?: WorkflowMetadata;
+	/**
+	 * Custom publish controls for member users (self-hosted learning use-case).
+	 * Derived from backend workflow staticData + env configuration.
+	 */
+	nxtwavePublish?: {
+		publishCount?: number;
+		maxPublishCount?: number;
+		isLimitReached?: boolean;
+		expiresAt?: string;
+	};
 	parentFolder?: {
 		id: string;
 		name: string;

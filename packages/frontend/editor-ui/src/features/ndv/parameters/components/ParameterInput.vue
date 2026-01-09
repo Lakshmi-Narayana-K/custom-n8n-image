@@ -1743,9 +1743,15 @@ onUpdated(async () => {
 					:key="option.value.toString()"
 					:value="option.value"
 					:label="getOptionsOptionDisplayName(option)"
+					:disabled="Boolean((option as unknown as { disabled?: boolean }).disabled)"
 					data-test-id="parameter-input-item"
 				>
-					<div class="list-option">
+					<div
+						class="list-option"
+						:class="{
+							'is-disabled': Boolean((option as unknown as { disabled?: boolean }).disabled),
+						}"
+					>
 						<div
 							class="option-headline"
 							:class="{ 'remote-parameter-option': isRemoteParameterOption(option) }"
@@ -1782,8 +1788,14 @@ onUpdated(async () => {
 					:key="option.value.toString()"
 					:value="option.value"
 					:label="getOptionsOptionDisplayName(option)"
+					:disabled="Boolean((option as unknown as { disabled?: boolean }).disabled)"
 				>
-					<div class="list-option">
+					<div
+						class="list-option"
+						:class="{
+							'is-disabled': Boolean((option as unknown as { disabled?: boolean }).disabled),
+						}"
+					>
 						<div class="option-headline">{{ getOptionsOptionDisplayName(option) }}</div>
 						<div
 							v-if="option.description"
@@ -1838,6 +1850,10 @@ onUpdated(async () => {
 
 .switch-input {
 	margin: var(--spacing--5xs) 0 var(--spacing--2xs) 0;
+}
+
+.list-option.is-disabled {
+	cursor: not-allowed;
 }
 
 .parameter-value-container {

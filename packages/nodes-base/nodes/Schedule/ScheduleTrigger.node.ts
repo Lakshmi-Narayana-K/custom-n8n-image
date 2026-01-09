@@ -438,6 +438,21 @@ export class ScheduleTrigger implements INodeType {
 		}
 
 		const executeTrigger = (recurrence: IRecurrenceRule) => {
+			// Only block scheduled runs (do not affect manual executions)
+			if (this.getMode() !== 'manual') {
+				const globalStaticData = this.getWorkflowStaticData('global') as Record<string, unknown>;
+				const meta = globalStaticData.__nxtwaveWorkflowPublish as
+					| { expiresAt?: string }
+					| undefined;
+
+				if (meta?.expiresAt) {
+					const expiresAtMs = Date.parse(meta.expiresAt);
+					if (!Number.isNaN(expiresAtMs) && Date.now() > expiresAtMs) {
+						return;
+					}
+				}
+			}
+
 			const shouldTrigger = recurrenceCheck(recurrence, staticData.recurrenceRules, timezone);
 			if (!shouldTrigger) return;
 

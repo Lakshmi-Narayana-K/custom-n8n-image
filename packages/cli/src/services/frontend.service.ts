@@ -137,6 +137,19 @@ export class FrontendService {
 			}
 		}
 
+		// Custom mapping for runtime UI configuration without requiring the N8N_ENV_FEAT_ prefix.
+		// Allows setting `N8N_SCHEDULE_TRIGGER_LIMIT_INTERVALS=hours,days` in ECS env vars.
+		if (process.env.N8N_SCHEDULE_TRIGGER_LIMIT_INTERVALS !== undefined) {
+			envFeatureFlags.N8N_ENV_FEAT_SCHEDULE_TRIGGER_LIMIT_INTERVALS =
+				process.env.N8N_SCHEDULE_TRIGGER_LIMIT_INTERVALS;
+		}
+
+		// Allows showing publish-count UI (0/Y etc.) for members even on new/unsaved workflows.
+		if (process.env.N8N_WORKFLOW_MEMBER_PUBLISH_MAX_COUNT !== undefined) {
+			envFeatureFlags.N8N_ENV_FEAT_WORKFLOW_MEMBER_PUBLISH_MAX_COUNT =
+				process.env.N8N_WORKFLOW_MEMBER_PUBLISH_MAX_COUNT;
+		}
+
 		return envFeatureFlags;
 	}
 

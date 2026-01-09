@@ -101,6 +101,21 @@ const sortable = computed(() => {
 	return !!props.parameter.typeOptions?.sortable;
 });
 
+const maxValues = computed(() => {
+	const value = props.parameter.typeOptions?.maxValues;
+	return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+});
+
+const currentItemCount = computed(() => {
+	return Object.values(mutableValues.value ?? {}).reduce((acc, items) => {
+		return acc + (Array.isArray(items) ? items.length : 0);
+	}, 0);
+});
+
+const isAddDisabled = computed(() => {
+	return maxValues.value > 0 && multipleValues.value && currentItemCount.value >= maxValues.value;
+});
+
 watch(
 	() => props.values,
 	(newValues: Record<string, INodeParameters[]>) => {
@@ -355,6 +370,7 @@ function getItemKey(item: INodeParameters, property: INodePropertyCollection) {
 				block
 				data-test-id="fixed-collection-add"
 				:label="getPlaceholderText"
+				:disabled="isAddDisabled"
 				@click="onAddButtonClick(parameter.options[0].name)"
 			/>
 			<div v-else class="add-option">
@@ -363,6 +379,7 @@ function getItemKey(item: INodeParameters, property: INodePropertyCollection) {
 					:placeholder="getPlaceholderText"
 					size="small"
 					filterable
+					:disabled="isAddDisabled"
 					@update:model-value="optionSelected"
 				>
 					<N8nOption

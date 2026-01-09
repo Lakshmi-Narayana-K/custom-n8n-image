@@ -30,7 +30,7 @@ import { PROJECT_OWNER_ROLE_SLUG } from '@n8n/permissions';
 import { In, type FindOptionsRelations } from '@n8n/typeorm';
 import axios from 'axios';
 import express from 'express';
-import { UnexpectedError } from 'n8n-workflow';
+import { UnexpectedError, type IDataObject } from 'n8n-workflow';
 import { v4 as uuid } from 'uuid';
 
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
@@ -64,6 +64,36 @@ import { CredentialsService } from '../credentials/credentials.service';
 
 @RestController('/workflows')
 export class WorkflowsController {
+	private getNxtwavePublishInfo(globalRoleSlug: string, staticData?: IDataObject) {
+		const isGlobalMember = globalRoleSlug === 'global:member';
+		const memberPublishMaxCount =
+			Number(process.env.N8N_WORKFLOW_MEMBER_PUBLISH_MAX_COUNT ?? 0) || 0;
+		const memberScheduleExpirySeconds =
+			Number(process.env.N8N_WORKFLOW_MEMBER_SCHEDULE_EXPIRY_SECONDS ?? 0) || 0;
+
+		// Only relevant for global:member, and only when at least one rule is enabled
+		if (!isGlobalMember || (memberPublishMaxCount <= 0 && memberScheduleExpirySeconds <= 0)) {
+			return undefined;
+		}
+
+		const globalStaticData = staticData?.global as unknown as IDataObject | undefined;
+		const meta = ((globalStaticData?.__nxtwaveWorkflowPublish ??
+			// Backwards compat: earlier versions stored this at the top-level
+			staticData?.__nxtwaveWorkflowPublish) as
+			| { publishCount?: number; publishedAt?: string; expiresAt?: string }
+			| undefined) ?? { publishCount: 0 };
+
+		const publishCount = meta.publishCount ?? 0;
+		const isLimitReached = memberPublishMaxCount > 0 && publishCount >= memberPublishMaxCount;
+
+		return {
+			publishCount,
+			maxPublishCount: memberPublishMaxCount > 0 ? memberPublishMaxCount : undefined,
+			isLimitReached,
+			expiresAt: meta.expiresAt,
+		};
+	}
+
 	constructor(
 		private readonly logger: Logger,
 		private readonly externalHooks: ExternalHooks,
@@ -254,8 +284,12 @@ export class WorkflowsController {
 		});
 
 		const scopes = await this.workflowService.getWorkflowScopes(req.user, savedWorkflow.id);
+		const nxtwavePublish = this.getNxtwavePublishInfo(
+			req.user.role.slug,
+			savedWorkflowWithMetaData.staticData,
+		);
 
-		return { ...savedWorkflowWithMetaData, scopes };
+		return { ...savedWorkflowWithMetaData, scopes, nxtwavePublish };
 	}
 
 	@Get('/', { middlewares: listQueryMiddleware })
@@ -382,7 +416,11 @@ export class WorkflowsController {
 
 			const scopes = await this.workflowService.getWorkflowScopes(req.user, workflowId);
 
-			return { ...workflowWithMetaData, scopes };
+			const nxtwavePublish = this.getNxtwavePublishInfo(
+				req.user.role.slug,
+				workflowWithMetaData.staticData,
+			);
+			return { ...workflowWithMetaData, scopes, nxtwavePublish };
 		}
 
 		// sharing disabled
@@ -410,7 +448,8 @@ export class WorkflowsController {
 
 		const scopes = await this.workflowService.getWorkflowScopes(req.user, workflowId);
 
-		return { ...workflow, scopes };
+		const nxtwavePublish = this.getNxtwavePublishInfo(req.user.role.slug, workflow.staticData);
+		return { ...workflow, scopes, nxtwavePublish };
 	}
 
 	@Patch('/:workflowId')
@@ -530,7 +569,8 @@ export class WorkflowsController {
 
 		const scopes = await this.workflowService.getWorkflowScopes(req.user, workflowId);
 
-		return { ...workflow, scopes };
+		const nxtwavePublish = this.getNxtwavePublishInfo(req.user.role.slug, workflow.staticData);
+		return { ...workflow, scopes, nxtwavePublish };
 	}
 
 	@Post('/:workflowId/deactivate')

@@ -953,6 +953,7 @@ export function useWorkflowHelpers() {
 		workflowsStore.setWorkflowVersionId(workflowData.versionId);
 		workflowsStore.setWorkflowMetadata(workflowData.meta);
 		workflowsStore.setWorkflowScopes(workflowData.scopes);
+		workflowsStore.setWorkflowNxtwavePublish(workflowData.nxtwavePublish);
 
 		if (workflowData.activeVersion) {
 			workflowsStore.setWorkflowActiveVersion(workflowData.activeVersion);

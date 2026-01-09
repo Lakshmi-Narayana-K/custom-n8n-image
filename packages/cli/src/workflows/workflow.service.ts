@@ -27,7 +27,7 @@ import isEqual from 'lodash/isEqual';
 import omit from 'lodash/omit';
 import pick from 'lodash/pick';
 import { FileLocation, BinaryDataService } from 'n8n-core';
-import { NodeApiError, PROJECT_ROOT, assert } from 'n8n-workflow';
+import { NodeApiError, PROJECT_ROOT, assert, type IDataObject } from 'n8n-workflow';
 import { v4 as uuid } from 'uuid';
 
 import { ActiveWorkflowManager } from '@/active-workflow-manager';
@@ -532,6 +532,14 @@ export class WorkflowService {
 		const versionToActivate = options?.versionId ?? workflow.versionId;
 		const wasActive = workflow.activeVersionId !== null;
 
+		const isGlobalMember = user.role?.slug === 'global:member';
+		const memberPublishMaxCount =
+			Number(process.env.N8N_WORKFLOW_MEMBER_PUBLISH_MAX_COUNT ?? 0) || 0;
+		const memberScheduleExpirySeconds =
+			Number(process.env.N8N_WORKFLOW_MEMBER_SCHEDULE_EXPIRY_SECONDS ?? 0) || 0;
+		const shouldApplyMemberPublishRules =
+			isGlobalMember && (memberPublishMaxCount > 0 || memberScheduleExpirySeconds > 0);
+
 		try {
 			await this.workflowHistoryService.getVersion(user, workflow.id, versionToActivate, {
 				includePublishHistory: false,
@@ -549,11 +557,58 @@ export class WorkflowService {
 
 		const activationMode = wasActive ? 'update' : 'activate';
 
+		const workflowStaticData = (workflow.staticData ?? {}) as IDataObject;
+		const memberPublishMetaKey = '__nxtwaveWorkflowPublish';
+		const globalStaticData = (workflowStaticData.global ?? {}) as IDataObject;
+		const existingMeta = shouldApplyMemberPublishRules
+			? ((globalStaticData[memberPublishMetaKey] ??
+					// Backwards compat: earlier versions stored this at the top-level
+					workflowStaticData[memberPublishMetaKey]) as
+					| {
+							publishCount?: number;
+							publishedAt?: string;
+							expiresAt?: string;
+					  }
+					| undefined)
+			: undefined;
+
+		let updatedStaticData: IDataObject | undefined;
+
+		if (shouldApplyMemberPublishRules) {
+			const previousCount = existingMeta?.publishCount ?? 0;
+			const nextCount = previousCount + 1;
+
+			if (memberPublishMaxCount > 0 && nextCount > memberPublishMaxCount) {
+				throw new BadRequestError(
+					`Publish limit reached. This workflow can only be published ${memberPublishMaxCount} times.`,
+				);
+			}
+
+			const publishedAt = new Date().toISOString();
+			const expiresAt =
+				memberScheduleExpirySeconds > 0
+					? new Date(Date.now() + memberScheduleExpirySeconds * 1000).toISOString()
+					: undefined;
+
+			updatedStaticData = {
+				...workflowStaticData,
+				global: {
+					...globalStaticData,
+					[memberPublishMetaKey]: {
+						publishCount: nextCount,
+						publishedAt,
+						...(expiresAt ? { expiresAt } : {}),
+					},
+				},
+			};
+		}
+
 		await this.workflowRepository.update(workflowId, {
 			activeVersionId: versionToActivate,
 			active: true,
 			// workflow content did not change, so we keep updatedAt as is
 			updatedAt: workflow.updatedAt,
+			...(updatedStaticData ? { staticData: updatedStaticData } : {}),
 		});
 
 		const updatedWorkflow = await this.workflowRepository.findOne({

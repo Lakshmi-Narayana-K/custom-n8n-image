@@ -9,6 +9,7 @@ import { useUIStore } from '@/app/stores/ui.store';
 import { WORKFLOW_PUBLISH_MODAL_KEY } from '@/app/constants';
 import { STORES } from '@n8n/stores';
 import type { INodeUi } from '@/Interface';
+import { useSettingsStore } from '@/app/stores/settings.store';
 
 vi.mock('vue-router', async (importOriginal) => ({
 	...(await importOriginal()),
@@ -40,6 +41,7 @@ const initialState = {
 	[STORES.SETTINGS]: {
 		settings: {
 			enterprise: {},
+			envFeatureFlags: {},
 		},
 	},
 };
@@ -87,10 +89,12 @@ const createMockActiveVersion = (versionId: string) => ({
 describe('WorkflowHeaderDraftPublishActions', () => {
 	let workflowsStore: MockedStore<typeof useWorkflowsStore>;
 	let uiStore: MockedStore<typeof useUIStore>;
+	let settingsStore: MockedStore<typeof useSettingsStore>;
 
 	beforeEach(() => {
 		workflowsStore = mockedStore(useWorkflowsStore);
 		uiStore = mockedStore(useUIStore);
+		settingsStore = mockedStore(useSettingsStore);
 
 		// Default workflow state
 		workflowsStore.workflow = {
@@ -109,6 +113,7 @@ describe('WorkflowHeaderDraftPublishActions', () => {
 		workflowsStore.workflowTriggerNodes = [];
 		uiStore.stateIsDirty = false;
 		uiStore.isActionActive = { workflowSaving: false };
+		settingsStore.settings.envFeatureFlags = {};
 
 		mockSaveCurrentWorkflow.mockClear();
 		mockSaveCurrentWorkflow.mockResolvedValue(true);
@@ -137,6 +142,28 @@ describe('WorkflowHeaderDraftPublishActions', () => {
 	});
 
 	describe('Publish button behavior', () => {
+		it('should disable publish button when workflow publish is disabled via env flag', () => {
+			settingsStore.settings.envFeatureFlags = {
+				N8N_ENV_FEAT_DISABLE_WORKFLOW_PUBLISH: 'true',
+			};
+
+			const { getByTestId } = renderComponent();
+
+			expect(getByTestId('workflow-open-publish-modal-button')).toBeDisabled();
+		});
+
+		it('should disable publish button when publish limit is reached', () => {
+			workflowsStore.workflow.nxtwavePublish = {
+				isLimitReached: true,
+				maxPublishCount: 2,
+				publishCount: 2,
+			};
+
+			const { getByTestId } = renderComponent();
+
+			expect(getByTestId('workflow-open-publish-modal-button')).toBeDisabled();
+		});
+
 		it('should open publish modal when clicked and workflow is saved', async () => {
 			const openModalSpy = vi.spyOn(uiStore, 'openModalWithData');
 			uiStore.stateIsDirty = false;

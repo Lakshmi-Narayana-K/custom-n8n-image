@@ -34,6 +34,8 @@ import { computed, ref } from 'vue';
 import { useActionsGenerator } from '@/features/shared/nodeCreator/composables/useActionsGeneration';
 import { removePreviewToken } from '@/features/shared/nodeCreator/nodeCreator.utils';
 import { useSettingsStore } from '@/app/stores/settings.store';
+import { useUsersStore } from '@/features/settings/users/users.store';
+import { ROLE } from '@n8n/api-types';
 
 export type NodeTypesStore = ReturnType<typeof useNodeTypesStore>;
 
@@ -47,6 +49,73 @@ export const useNodeTypesStore = defineStore(STORES.NODE_TYPES, () => {
 	const actionsGenerator = useActionsGenerator();
 
 	const settingsStore = useSettingsStore();
+	const usersStore = useUsersStore();
+
+	const applyMemberScheduleTriggerRestrictions = () => {
+		// Apply only for global members
+		if (usersStore.globalRoleName !== ROLE.Member) return;
+
+		const raw =
+			settingsStore.settings.envFeatureFlags?.N8N_ENV_FEAT_SCHEDULE_TRIGGER_LIMIT_INTERVALS;
+		if (!raw || typeof raw !== 'string') return;
+
+		const normalized = raw
+			.split(',')
+			.map((s) => s.trim())
+			.filter(Boolean);
+
+		const canonical = normalized
+			.map((v) => v.toLowerCase())
+			.map((v) => {
+				// No shortcuts/aliases; only normalize casing + cronExpression spelling
+				if (v === 'cronexpression') return 'cronExpression';
+				return v;
+			});
+
+		const allowed = new Set(
+			canonical.filter((v) =>
+				['seconds', 'minutes', 'hours', 'days', 'weeks', 'months', 'cronExpression'].includes(v),
+			),
+		);
+		if (allowed.size === 0) return;
+
+		const scheduleVersions = nodeTypes.value['n8n-nodes-base.scheduleTrigger'];
+		if (!scheduleVersions) return;
+
+		for (const nodeType of Object.values(scheduleVersions)) {
+			const ruleProp = nodeType.properties?.find((p) => p.name === 'rule');
+			if (!ruleProp || ruleProp.type !== 'fixedCollection') continue;
+
+			// Keep `multipleValues: true` (Schedule Trigger expects an array shape),
+			// but cap it to a single entry to prevent adding multiple rules.
+			ruleProp.typeOptions = { ...(ruleProp.typeOptions ?? {}), maxValues: 1 };
+
+			const intervalGroup = (
+				ruleProp.options as Array<{ name: string; values: unknown[] }> | undefined
+			)?.find((o) => o.name === 'interval');
+			if (!intervalGroup) continue;
+
+			const field = (
+				intervalGroup.values as Array<{ name: string; options?: Array<{ value: string }> }>
+			).find((v) => v.name === 'field');
+			if (!field?.options) continue;
+
+			type IntervalOption = { name: string; value: string; disabled?: boolean };
+			const intervalOptions = field.options as unknown as IntervalOption[];
+
+			// Keep all options visible, but disable disallowed ones
+			for (const option of intervalOptions) {
+				option.disabled = !allowed.has(String(option.value));
+			}
+
+			// Ensure default is valid for new nodes (but don't remove/override existing workflow values)
+			const currentDefault = (field as unknown as { default?: unknown }).default;
+			if (typeof currentDefault === 'string' && !allowed.has(currentDefault)) {
+				const firstAllowed = intervalOptions.find((o) => !o.disabled)?.value;
+				(field as unknown as { default?: string }).default = firstAllowed ?? 'days';
+			}
+		}
+	};
 
 	// ---------------------------------------------------------------------------
 	// #region Computed
@@ -346,6 +415,7 @@ export const useNodeTypesStore = defineStore(STORES.NODE_TYPES, () => {
 
 		if (nodeTypes.length) {
 			setNodeTypes(nodeTypes);
+			applyMemberScheduleTriggerRestrictions();
 		}
 	};
 

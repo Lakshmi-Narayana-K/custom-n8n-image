@@ -10,7 +10,7 @@ import { telemetry } from '@/app/plugins/telemetry';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
 import { createEventBus } from '@n8n/utils/event-bus';
 import { useI18n } from '@n8n/i18n';
-import { N8nHeading, N8nCallout, N8nButton } from '@n8n/design-system';
+import { N8nHeading, N8nCallout, N8nButton, N8nTooltip } from '@n8n/design-system';
 import WorkflowPublishForm from '@/app/components/WorkflowPublishForm.vue';
 import { getActivatableTriggerNodes } from '@/app/utils/nodeTypesUtils';
 import { useToast } from '@/app/composables/useToast';
@@ -23,6 +23,7 @@ import type { INodeUi } from '@/Interface';
 import type { IUsedCredential } from '@/features/credentials/credentials.types';
 import WorkflowActivationErrorMessage from '@/app/components/WorkflowActivationErrorMessage.vue';
 import { generateVersionName } from '@/features/workflows/workflowHistory/utils';
+import { useEnvFeatureFlag } from '@/features/shared/envFeatureFlag/useEnvFeatureFlag';
 
 const modalBus = createEventBus();
 const i18n = useI18n();
@@ -33,6 +34,7 @@ const uiStore = useUIStore();
 const { showMessage } = useToast();
 const workflowActivate = useWorkflowActivate();
 const workflowHelpers = useWorkflowHelpers();
+const { check: checkEnvFeatureFlag } = useEnvFeatureFlag();
 
 const publishForm = useTemplateRef<InstanceType<typeof WorkflowPublishForm>>('publishForm');
 
@@ -53,8 +55,32 @@ const wfHasAnyChanges = computed(() => {
 
 const hasNodeIssues = computed(() => workflowsStore.nodesIssuesExist);
 
+const isWorkflowPublishDisabled = computed(() =>
+	checkEnvFeatureFlag.value('DISABLE_WORKFLOW_PUBLISH'),
+);
+const isPublishLimitReached = computed(
+	() => workflowsStore.workflow?.nxtwavePublish?.isLimitReached ?? false,
+);
+const maxPublishCount = computed(() => workflowsStore.workflow?.nxtwavePublish?.maxPublishCount);
+const publishCount = computed(() => workflowsStore.workflow?.nxtwavePublish?.publishCount ?? 0);
+
+const limitReachedTooltip = computed(() =>
+	i18n.baseText('workflows.publish.limitReachedTooltip', {
+		interpolate: {
+			count: String(publishCount.value),
+			max: maxPublishCount.value ? String(maxPublishCount.value) : '',
+		},
+	}),
+);
+
 const inputsDisabled = computed(() => {
-	return !wfHasAnyChanges.value || !containsTrigger.value || hasNodeIssues.value;
+	return (
+		isWorkflowPublishDisabled.value ||
+		isPublishLimitReached.value ||
+		!wfHasAnyChanges.value ||
+		!containsTrigger.value ||
+		hasNodeIssues.value
+	);
 });
 
 const isPublishDisabled = computed(() => {
@@ -158,7 +184,7 @@ async function displayActivationError() {
 }
 
 async function handlePublish() {
-	if (isPublishDisabled.value) {
+	if (isPublishDisabled.value || isWorkflowPublishDisabled.value || isPublishLimitReached.value) {
 		return;
 	}
 
@@ -262,12 +288,24 @@ async function handlePublish() {
 						data-test-id="workflow-publish-cancel-button"
 						@click="modalBus.emit('close')"
 					/>
-					<N8nButton
-						:disabled="isPublishDisabled"
-						:label="i18n.baseText('workflows.publish')"
-						data-test-id="workflow-publish-button"
-						@click="handlePublish"
-					/>
+					<N8nTooltip
+						:content="
+							isWorkflowPublishDisabled
+								? i18n.baseText('workflows.publish.disabledTooltip')
+								: limitReachedTooltip
+						"
+						:disabled="!isWorkflowPublishDisabled && !isPublishLimitReached"
+						placement="top"
+					>
+						<div :class="$style.publishButtonWrapper">
+							<N8nButton
+								:disabled="isPublishDisabled"
+								:label="i18n.baseText('workflows.publish')"
+								data-test-id="workflow-publish-button"
+								@click="handlePublish"
+							/>
+						</div>
+					</N8nTooltip>
 				</div>
 			</div>
 		</template>
@@ -285,5 +323,10 @@ async function handlePublish() {
 	display: flex;
 	justify-content: flex-end;
 	gap: var(--spacing--xs);
+}
+
+.publishButtonWrapper {
+	// ensures tooltip still triggers even when button is disabled
+	cursor: not-allowed;
 }
 </style>

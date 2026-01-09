@@ -6,7 +6,7 @@ import type { IWorkflowDb } from '@/Interface';
 import type { PermissionsRecord } from '@n8n/permissions';
 import { computed, useTemplateRef } from 'vue';
 import { WORKFLOW_PUBLISH_MODAL_KEY } from '@/app/constants';
-import { N8nButton, N8nIcon, N8nTooltip } from '@n8n/design-system';
+import { N8nBadge, N8nButton, N8nIcon, N8nTooltip } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
 import { useUIStore } from '@/app/stores/ui.store';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
@@ -15,6 +15,7 @@ import TimeAgo from '@/app/components/TimeAgo.vue';
 import { getActivatableTriggerNodes } from '@/app/utils/nodeTypesUtils';
 import { useWorkflowSaving } from '@/app/composables/useWorkflowSaving';
 import { useRouter } from 'vue-router';
+import { useEnvFeatureFlag } from '@/features/shared/envFeatureFlag/useEnvFeatureFlag';
 
 const props = defineProps<{
 	readOnly?: boolean;
@@ -39,15 +40,57 @@ const workflowsStore = useWorkflowsStore();
 const i18n = useI18n();
 const router = useRouter();
 const { saveCurrentWorkflow } = useWorkflowSaving({ router });
+const { check: checkEnvFeatureFlag } = useEnvFeatureFlag();
 
 const isWorkflowSaving = computed(() => {
 	return uiStore.isActionActive.workflowSaving;
 });
 
+const isWorkflowPublishDisabled = computed(() =>
+	checkEnvFeatureFlag.value('DISABLE_WORKFLOW_PUBLISH'),
+);
+const isPublishLimitReached = computed(
+	() => workflowsStore.workflow?.nxtwavePublish?.isLimitReached ?? false,
+);
+const maxPublishCount = computed(() => workflowsStore.workflow?.nxtwavePublish?.maxPublishCount);
+const publishCount = computed(() => workflowsStore.workflow?.nxtwavePublish?.publishCount ?? 0);
+const expiresAt = computed(() => workflowsStore.workflow?.nxtwavePublish?.expiresAt);
+const isScheduleExpired = computed(() => {
+	if (!expiresAt.value) return false;
+	const ms = Date.parse(expiresAt.value);
+	return !Number.isNaN(ms) && Date.now() > ms;
+});
+const expiresAtReadable = computed(() => {
+	if (!expiresAt.value) return '';
+	const ms = Date.parse(expiresAt.value);
+	if (Number.isNaN(ms)) return '';
+	return new Date(ms).toLocaleString();
+});
+
+const workflowPublishDisabledTooltip = computed(() =>
+	i18n.baseText('workflows.publish.disabledTooltip'),
+);
+
+const workflowPublishLimitTooltip = computed(() =>
+	i18n.baseText('workflows.publish.limitReachedTooltip', {
+		interpolate: {
+			count: String(publishCount.value),
+			max: maxPublishCount.value ? String(maxPublishCount.value) : '',
+		},
+	}),
+);
+
+const isPublishingBlocked = computed(
+	() => isWorkflowPublishDisabled.value || isPublishLimitReached.value,
+);
+
 const importFileRef = computed(() => actionsMenuRef.value?.importFileRef);
 
 const onPublishButtonClick = async () => {
 	// If there are unsaved changes, save the workflow first
+	if (isPublishingBlocked.value) {
+		return;
+	}
 	if (uiStore.stateIsDirty || props.isNewWorkflow) {
 		const saved = await saveCurrentWorkflow({}, true);
 		if (!saved) {
@@ -109,15 +152,48 @@ defineExpose({
 			</N8nTooltip>
 		</div>
 		<div v-if="!isArchived && workflowPermissions.update" :class="$style.publishButtonWrapper">
-			<N8nButton
-				type="secondary"
-				data-test-id="workflow-open-publish-modal-button"
-				@click="onPublishButtonClick"
+			<N8nTooltip
+				:content="
+					isWorkflowPublishDisabled ? workflowPublishDisabledTooltip : workflowPublishLimitTooltip
+				"
+				:disabled="!isPublishingBlocked"
+				placement="bottom"
 			>
-				{{ locale.baseText('workflows.publish') }}
-			</N8nButton>
+				<div
+					:class="{
+						[$style.publishButtonInner]: true,
+						[$style.publishButtonInnerDisabled]: isPublishingBlocked,
+					}"
+				>
+					<N8nButton
+						type="secondary"
+						data-test-id="workflow-open-publish-modal-button"
+						:disabled="isPublishingBlocked"
+						@click="onPublishButtonClick"
+					>
+						<span :class="$style.publishButtonLabel">
+							{{ locale.baseText('workflows.publish') }}
+						</span>
+						<span v-if="maxPublishCount" :class="$style.publishCountPill">
+							{{ publishCount }}/{{ maxPublishCount }}
+						</span>
+					</N8nButton>
+				</div>
+			</N8nTooltip>
+			<N8nTooltip v-if="isScheduleExpired" placement="bottom">
+				<template #content>
+					{{
+						i18n.baseText('workflows.publish.expiredTooltip', {
+							interpolate: { date: expiresAtReadable },
+						})
+					}}
+				</template>
+				<N8nBadge :class="$style.expiredBadge" size="medium">
+					{{ i18n.baseText('workflows.publish.expiredBadge') }}
+				</N8nBadge>
+			</N8nTooltip>
 			<span
-				v-if="showPublishIndicator"
+				v-if="showPublishIndicator && !isPublishingBlocked"
 				:class="$style.publishButtonIndicator"
 				data-test-id="workflow-publish-indicator"
 			></span>
@@ -170,7 +246,13 @@ defineExpose({
 
 .publishButtonWrapper {
 	position: relative;
-	display: inline-block;
+	display: inline-flex;
+	align-items: center;
+	gap: var(--spacing--xs);
+}
+
+.publishButtonInnerDisabled {
+	cursor: not-allowed;
 }
 
 .publishButtonIndicator {
@@ -182,5 +264,24 @@ defineExpose({
 	background-color: var(--color--primary);
 	border-radius: 50%;
 	box-shadow: 0 0 0 2px var(--color--background--light-3);
+}
+
+.expiredBadge {
+	margin-left: 0;
+}
+
+.publishButtonLabel {
+	display: inline-flex;
+	align-items: center;
+}
+
+.publishCountPill {
+	margin-left: var(--spacing--3xs);
+	padding: 0 var(--spacing--3xs);
+	border-radius: var(--radius);
+	font-size: var(--font-size--2xs);
+	line-height: var(--line-height--sm);
+	background: var(--color--foreground--tint-2);
+	color: var(--color--text--shade-1);
 }
 </style>

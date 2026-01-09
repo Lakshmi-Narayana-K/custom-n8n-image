@@ -82,6 +82,7 @@ import { i18n } from '@n8n/i18n';
 import { computed, ref, watch } from 'vue';
 import { useProjectsStore } from '@/features/collaboration/projects/projects.store';
 import type { PushPayload } from '@n8n/api-types';
+import { ROLE } from '@n8n/api-types';
 import { useTelemetry } from '@/app/composables/useTelemetry';
 import { useWorkflowHelpers } from '@/app/composables/useWorkflowHelpers';
 import { useSettingsStore } from './settings.store';
@@ -721,8 +722,34 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 		return await workflowsApi.getWorkflowsWithNodesIncluded(rootStore.restApiContext, nodeTypes);
 	}
 
+	function getMemberPublishMaxCountFromEnv(): number {
+		if (usersStore.globalRoleName !== ROLE.Member) return 0;
+
+		const raw =
+			settingsStore.settings.envFeatureFlags?.N8N_ENV_FEAT_WORKFLOW_MEMBER_PUBLISH_MAX_COUNT;
+		const value = typeof raw === 'string' ? Number(raw) : 0;
+		if (!Number.isFinite(value)) return 0;
+
+		return Math.max(0, Math.floor(value));
+	}
+
+	function setWorkflowNxtwavePublish(nxtwavePublish: IWorkflowDb['nxtwavePublish']): void {
+		workflow.value.nxtwavePublish = nxtwavePublish;
+	}
+
 	function resetWorkflow() {
 		workflow.value = createEmptyWorkflow();
+
+		const maxPublishCount = getMemberPublishMaxCountFromEnv();
+		if (maxPublishCount > 0) {
+			workflow.value.nxtwavePublish = {
+				publishCount: 0,
+				maxPublishCount,
+				isLimitReached: false,
+			};
+		} else {
+			workflow.value.nxtwavePublish = undefined;
+		}
 	}
 
 	function setUsedCredentials(data: IUsedCredential[]) {
@@ -1623,6 +1650,21 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 			data as unknown as IDataObject,
 		);
 
+		// Keep local state in sync with server response (includes nxtwavePublish metadata)
+		if (workflowsById.value[id]) {
+			workflowsById.value[id] = {
+				...workflowsById.value[id],
+				...updatedWorkflow,
+			};
+		}
+
+		if (workflow.value.id === id) {
+			workflow.value = {
+				...workflow.value,
+				...updatedWorkflow,
+			};
+		}
+
 		return updatedWorkflow;
 	}
 
@@ -1984,6 +2026,7 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 		fetchWorkflow,
 		fetchWorkflowsWithNodesIncluded,
 		resetWorkflow,
+		setWorkflowNxtwavePublish,
 		addNodeExecutionStartedData,
 		setUsedCredentials,
 		setWorkflowVersionId,

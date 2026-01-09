@@ -35,6 +35,7 @@ import type { WorkflowHistoryVersionUnpublishModalEventBusEvents } from '../comp
 import type { WorkflowHistoryPublishModalEventBusEvents } from '../components/WorkflowHistoryPublishModal.vue';
 import { IS_DRAFT_PUBLISH_ENABLED } from '@/app/constants';
 import type { WorkflowHistoryAction } from '@/features/workflows/workflowHistory/types';
+import { useEnvFeatureFlag } from '@/features/shared/envFeatureFlag/useEnvFeatureFlag';
 
 type WorkflowHistoryActionRecord = {
 	[K in Uppercase<WorkflowHistoryActionTypes[number]>]: Lowercase<K>;
@@ -67,6 +68,7 @@ const pageRedirectionHelper = usePageRedirectionHelper();
 const workflowHistoryStore = useWorkflowHistoryStore();
 const uiStore = useUIStore();
 const workflowsStore = useWorkflowsStore();
+const { check: checkEnvFeatureFlag } = useEnvFeatureFlag();
 const workflowActivate = useWorkflowActivate();
 const canRender = ref(true);
 const isListLoading = ref(true);
@@ -93,6 +95,12 @@ const workflowActiveVersionId = computed(() => {
 });
 
 const isDraftPublishEnabled = IS_DRAFT_PUBLISH_ENABLED;
+const isWorkflowPublishDisabled = computed(() =>
+	checkEnvFeatureFlag.value('DISABLE_WORKFLOW_PUBLISH'),
+);
+const isPublishLimitReached = computed(
+	() => activeWorkflow.value?.nxtwavePublish?.isLimitReached ?? false,
+);
 
 const actions = computed<Array<UserAction<IUser>>>(() =>
 	workflowHistoryActionTypes
@@ -102,7 +110,9 @@ const actions = computed<Array<UserAction<IUser>>>(() =>
 			disabled:
 				(value === 'clone' && !workflowPermissions.value.create) ||
 				(value === 'restore' && !workflowPermissions.value.update) ||
-				((value === 'publish' || value === 'unpublish') && !workflowPermissions.value.update),
+				((value === 'publish' || value === 'unpublish') && !workflowPermissions.value.update) ||
+				((value === 'publish' || value === 'unpublish') && isWorkflowPublishDisabled.value) ||
+				(value === 'publish' && isPublishLimitReached.value),
 			value,
 		})),
 );
