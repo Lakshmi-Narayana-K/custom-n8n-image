@@ -52,21 +52,17 @@ export const useNodeTypesStore = defineStore(STORES.NODE_TYPES, () => {
 	const usersStore = useUsersStore();
 
 	const applyMemberScheduleTriggerRestrictions = () => {
-		// Apply only for global members
 		if (usersStore.globalRoleName !== ROLE.Member) return;
 
 		const raw =
 			settingsStore.settings.envFeatureFlags?.N8N_ENV_FEAT_SCHEDULE_TRIGGER_LIMIT_INTERVALS;
 		if (!raw || typeof raw !== 'string') return;
 
-		// Parse format: "hours=7200,days=86400" or old format "hours,days"
-		// We only need the keys (interval names) for UI restrictions
 		const parts = raw
 			.split(',')
 			.map((s) => s.trim())
 			.filter(Boolean);
 		const intervalNames = parts.map((part) => {
-			// If it contains '=', extract just the key
 			if (part.includes('=')) {
 				return part.split('=', 2)[0].trim();
 			}
@@ -76,7 +72,6 @@ export const useNodeTypesStore = defineStore(STORES.NODE_TYPES, () => {
 		const canonical = intervalNames
 			.map((v) => v.toLowerCase())
 			.map((v) => {
-				// Normalize casing + cronExpression spelling
 				if (v === 'cronexpression') return 'cronExpression';
 				return v;
 			});
@@ -89,39 +84,93 @@ export const useNodeTypesStore = defineStore(STORES.NODE_TYPES, () => {
 		if (allowed.size === 0) return;
 
 		const scheduleVersions = nodeTypes.value['n8n-nodes-base.scheduleTrigger'];
-		if (!scheduleVersions) return;
+		if (scheduleVersions) {
+			for (const nodeType of Object.values(scheduleVersions)) {
+				const ruleProp = nodeType.properties?.find((p) => p.name === 'rule');
+				if (!ruleProp || ruleProp.type !== 'fixedCollection') continue;
 
-		for (const nodeType of Object.values(scheduleVersions)) {
-			const ruleProp = nodeType.properties?.find((p) => p.name === 'rule');
-			if (!ruleProp || ruleProp.type !== 'fixedCollection') continue;
+				ruleProp.typeOptions = { ...(ruleProp.typeOptions ?? {}), maxValues: 1 };
 
-			// Keep `multipleValues: true` (Schedule Trigger expects an array shape),
-			// but cap it to a single entry to prevent adding multiple rules.
-			ruleProp.typeOptions = { ...(ruleProp.typeOptions ?? {}), maxValues: 1 };
+				const intervalGroup = (
+					ruleProp.options as Array<{ name: string; values: unknown[] }> | undefined
+				)?.find((o) => o.name === 'interval');
+				if (!intervalGroup) continue;
 
-			const intervalGroup = (
-				ruleProp.options as Array<{ name: string; values: unknown[] }> | undefined
-			)?.find((o) => o.name === 'interval');
-			if (!intervalGroup) continue;
+				const field = (
+					intervalGroup.values as Array<{ name: string; options?: Array<{ value: string }> }>
+				).find((v) => v.name === 'field');
+				if (!field?.options) continue;
 
-			const field = (
-				intervalGroup.values as Array<{ name: string; options?: Array<{ value: string }> }>
-			).find((v) => v.name === 'field');
-			if (!field?.options) continue;
+				type IntervalOption = { name: string; value: string; disabled?: boolean };
+				const intervalOptions = field.options as unknown as IntervalOption[];
 
-			type IntervalOption = { name: string; value: string; disabled?: boolean };
-			const intervalOptions = field.options as unknown as IntervalOption[];
+				for (const option of intervalOptions) {
+					option.disabled = !allowed.has(String(option.value));
+				}
 
-			// Keep all options visible, but disable disallowed ones
-			for (const option of intervalOptions) {
-				option.disabled = !allowed.has(String(option.value));
+				const currentDefault = (field as unknown as { default?: unknown }).default;
+				if (typeof currentDefault === 'string' && !allowed.has(currentDefault)) {
+					const firstAllowed = intervalOptions.find((o) => !o.disabled)?.value;
+					(field as unknown as { default?: string }).default = firstAllowed ?? 'days';
+				}
 			}
+		}
 
-			// Ensure default is valid for new nodes (but don't remove/override existing workflow values)
-			const currentDefault = (field as unknown as { default?: unknown }).default;
-			if (typeof currentDefault === 'string' && !allowed.has(currentDefault)) {
-				const firstAllowed = intervalOptions.find((o) => !o.disabled)?.value;
-				(field as unknown as { default?: string }).default = firstAllowed ?? 'days';
+		const intervalToPollMode: Record<string, string> = {
+			minutes: 'everyMinute',
+			hours: 'everyHour',
+			days: 'everyDay',
+			weeks: 'everyWeek',
+			months: 'everyMonth',
+			cronExpression: 'custom',
+		};
+
+		const allowedPollModes = new Set<string>();
+		for (const interval of allowed) {
+			const mode = intervalToPollMode[interval];
+			if (mode) {
+				allowedPollModes.add(mode);
+			}
+		}
+
+		for (const [_nodeName, nodeVersions] of Object.entries(nodeTypes.value)) {
+			for (const nodeType of Object.values(nodeVersions)) {
+				if (!nodeType.polling) continue;
+
+				const pollTimesProp = nodeType.properties?.find((p) => p.name === 'pollTimes');
+				if (!pollTimesProp || pollTimesProp.type !== 'fixedCollection') continue;
+
+				pollTimesProp.typeOptions = { ...(pollTimesProp.typeOptions ?? {}), maxValues: 1 };
+
+				const itemGroup = (
+					pollTimesProp.options as Array<{ name: string; values: unknown[] }> | undefined
+				)?.find((o) => o.name === 'item');
+				if (!itemGroup) continue;
+
+				const modeField = (
+					itemGroup.values as Array<{ name: string; options?: Array<{ value: string }> }>
+				).find((v) => v.name === 'mode');
+				if (!modeField?.options) continue;
+
+				type ModeOption = { name: string; value: string; disabled?: boolean };
+				const modeOptions = modeField.options as unknown as ModeOption[];
+
+				for (const option of modeOptions) {
+					option.disabled = !allowedPollModes.has(String(option.value));
+				}
+
+				const firstAllowed = modeOptions.find((o) => !o.disabled)?.value ?? 'everyHour';
+
+				const modeFieldDefault = (modeField as unknown as { default?: unknown }).default;
+				if (typeof modeFieldDefault === 'string' && !allowedPollModes.has(modeFieldDefault)) {
+					(modeField as unknown as { default?: string }).default = firstAllowed;
+				}
+
+				type PollTimesDefault = { item?: Array<{ mode?: string }> };
+				const pollDefault = pollTimesProp.default as PollTimesDefault | undefined;
+				if (pollDefault?.item?.[0]?.mode && !allowedPollModes.has(pollDefault.item[0].mode)) {
+					pollDefault.item[0].mode = firstAllowed;
+				}
 			}
 		}
 	};

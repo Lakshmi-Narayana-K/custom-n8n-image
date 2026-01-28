@@ -1650,18 +1650,23 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 			data as unknown as IDataObject,
 		);
 
-		// Keep local state in sync with server response (includes nxtwavePublish metadata)
 		if (workflowsById.value[id]) {
 			workflowsById.value[id] = {
 				...workflowsById.value[id],
-				...updatedWorkflow,
+				active: updatedWorkflow.active,
+				activeVersionId: updatedWorkflow.activeVersionId,
+				activeVersion: updatedWorkflow.activeVersion,
+				nxtwavePublish: updatedWorkflow.nxtwavePublish,
 			};
 		}
 
 		if (workflow.value.id === id) {
 			workflow.value = {
 				...workflow.value,
-				...updatedWorkflow,
+				active: updatedWorkflow.active,
+				activeVersionId: updatedWorkflow.activeVersionId,
+				activeVersion: updatedWorkflow.activeVersion,
+				nxtwavePublish: updatedWorkflow.nxtwavePublish,
 			};
 		}
 
