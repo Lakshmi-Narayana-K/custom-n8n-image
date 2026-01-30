@@ -3,7 +3,7 @@ name: Build n8n and Create Docker Image
 on:
   workflow_dispatch:
   push:
-    branches: [ "master" ]
+    branches: [ "n8n-hanging-issue" ]
 
 env:
   IMAGE_NAME: n8n-custom
@@ -28,7 +28,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10.18.3
+          version: 10.22.0
 
       - name: Setup Node.js (Node 20 LTS)
         uses: actions/setup-node@v4

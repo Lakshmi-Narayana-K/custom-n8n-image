@@ -1,0 +1,10 @@
+
+> n8n-nodes-base@1.121.0 build /home/nxtwave/Desktop/Nxtwave-codebase/n8n-custom/packages/nodes-base
+> tsc --build tsconfig.build.cjs.json && pnpm copy-nodes-json && tsc-alias -p tsconfig.build.cjs.json && pnpm n8n-copy-static-files && pnpm n8n-generate-translations && pnpm n8n-generate-metadata
+
+
+> n8n-nodes-base@1.121.0 copy-nodes-json /home/nxtwave/Desktop/Nxtwave-codebase/n8n-custom/packages/nodes-base
+> node scripts/copy-nodes-json.js .
+
+Default locale set to: [35men[0m
+No translation required - Skipping translations build...

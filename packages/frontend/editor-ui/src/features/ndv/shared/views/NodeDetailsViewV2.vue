@@ -9,30 +9,30 @@ import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from
 import NDVHeader from '../../panel/components/NDVHeader.vue';
 import NodeSettings from '@/features/ndv/settings/components/NodeSettings.vue';
 
-import { useExternalHooks } from '@/composables/useExternalHooks';
-import { useKeybindings } from '@/composables/useKeybindings';
-import { useMessage } from '@/composables/useMessage';
+import { useExternalHooks } from '@/app/composables/useExternalHooks';
+import { useKeybindings } from '@/app/composables/useKeybindings';
+import { useMessage } from '@/app/composables/useMessage';
 import { useNdvLayout } from '../../panel/composables/useNdvLayout';
-import { useNodeDocsUrl } from '@/composables/useNodeDocsUrl';
-import { useNodeHelpers } from '@/composables/useNodeHelpers';
-import { usePinnedData } from '@/composables/usePinnedData';
-import { useStyles } from '@/composables/useStyles';
-import { useTelemetry } from '@/composables/useTelemetry';
-import { useWorkflowActivate } from '@/composables/useWorkflowActivate';
+import { useNodeDocsUrl } from '@/app/composables/useNodeDocsUrl';
+import { useNodeHelpers } from '@/app/composables/useNodeHelpers';
+import { usePinnedData } from '@/app/composables/usePinnedData';
+import { useStyles } from '@/app/composables/useStyles';
+import { useTelemetry } from '@/app/composables/useTelemetry';
+import { useWorkflowActivate } from '@/app/composables/useWorkflowActivate';
 import {
 	APP_MODALS_ELEMENT_ID,
 	EXECUTABLE_TRIGGER_NODE_TYPES,
 	MODAL_CONFIRM,
 	START_NODE_TYPE,
 	STICKY_NODE_TYPE,
-} from '@/constants';
-import type { DataPinningDiscoveryEvent } from '@/event-bus';
-import { dataPinningEventBus } from '@/event-bus';
+} from '@/app/constants';
+import type { DataPinningDiscoveryEvent } from '@/app/event-bus';
+import { dataPinningEventBus } from '@/app/event-bus';
 import { useNDVStore } from '../ndv.store';
-import { useNodeTypesStore } from '@/stores/nodeTypes.store';
-import { useUIStore } from '@/stores/ui.store';
-import { useWorkflowsStore } from '@/stores/workflows.store';
-import { getNodeIconSource } from '@/utils/nodeIcon';
+import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
+import { useUIStore } from '@/app/stores/ui.store';
+import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import { getNodeIconSource } from '@/app/utils/nodeIcon';
 import { useDeviceSupport } from '@n8n/composables/useDeviceSupport';
 import { useI18n } from '@n8n/i18n';
 import { storeToRefs } from 'pinia';
@@ -40,7 +40,7 @@ import InputPanel from '../../panel/components/InputPanel.vue';
 import OutputPanel from '../../panel/components/OutputPanel.vue';
 import PanelDragButtonV2 from '../../panel/components/PanelDragButtonV2.vue';
 import TriggerPanel from '../../panel/components/TriggerPanel.vue';
-import { useTelemetryContext } from '@/composables/useTelemetryContext';
+import { useTelemetryContext } from '@/app/composables/useTelemetryContext';
 
 import { N8nResizeWrapper } from '@n8n/design-system';
 import NDVFloatingNodes from '@/features/ndv/panel/components/NDVFloatingNodes.vue';
@@ -728,14 +728,20 @@ onBeforeUnmount(() => {
 			:style="{ zIndex: APP_Z_INDEXES.NDV }"
 		>
 			<NDVFloatingNodes :root-node="activeNode" @switch-selected-node="onSwitchSelectedNode" />
-			<div ref="containerRef" :class="$style.container">
+			<div
+				ref="containerRef"
+				:class="{
+					[$style.container]: true,
+					[$style.webhookWaiting]: isExecutionWaitingForWebhook,
+				}"
+			>
 				<NDVHeader
 					:class="$style.header"
 					:node-name="activeNode.name"
 					:node-type-name="
 						activeNodeType?.defaults.name ?? activeNodeType?.displayName ?? activeNode.name
 					"
-					:icon="getNodeIconSource(activeNodeType ?? activeNode.type)"
+					:icon="getNodeIconSource(activeNodeType ?? activeNode.type, activeNode)"
 					:docs-url="docsUrl"
 					@close="close"
 					@rename="onRename"
@@ -789,7 +795,10 @@ onBeforeUnmount(() => {
 						:min-width="260"
 						:supported-directions="supportedResizeDirections"
 						:grid-size="8"
-						:class="$style.column"
+						:class="{
+							[$style.column]: !isExecutionWaitingForWebhook,
+							[$style.webhookWaiting]: isExecutionWaitingForWebhook,
+						}"
 						:style="{ width: `${panelWidthPercentage.main}%` }"
 						outset
 						@resize="onResize"
@@ -926,6 +935,7 @@ onBeforeUnmount(() => {
 }
 
 .header {
+	background-color: var(--ndv--background--color);
 	border-bottom: var(--border);
 	border-top-left-radius: var(--radius--lg);
 	border-top-right-radius: var(--radius--lg);
@@ -943,5 +953,9 @@ onBeforeUnmount(() => {
 	left: 50%;
 	transform: translateX(-50%);
 	height: var(--draggable--height);
+}
+
+.webhookWaiting {
+	border: none;
 }
 </style>

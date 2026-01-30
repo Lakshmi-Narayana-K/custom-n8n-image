@@ -423,6 +423,7 @@ defineExpose({
 				<N8nTooltip
 					:content="creditsTooltipContent"
 					:popper-class="$style.infoPopper"
+					:show-after="300"
 					placement="top"
 				>
 					<N8nIcon icon="info" size="small" />
@@ -432,6 +433,8 @@ defineExpose({
 				:disabled="!showAskOwnerTooltip"
 				:content="t('promptInput.askAdminToUpgrade')"
 				placement="top"
+				:show-after="300"
+				:enterable="false"
 			>
 				<N8nLink size="small" theme="text" @click="() => emit('upgrade-click')">
 					{{ t('promptInput.getMore') }}
@@ -506,7 +509,7 @@ defineExpose({
 	resize: none;
 	outline: none;
 	font-family: var(--font-family), sans-serif;
-	font-size: var(--font-size--2xs);
+	font-size: var(--font-size--sm);
 	line-height: 24px;
 	color: var(--color--text--shade-1);
 	padding: 0 var(--spacing--2xs);
@@ -539,7 +542,7 @@ defineExpose({
 	resize: none;
 	outline: none;
 	font-family: var(--font-family), sans-serif;
-	font-size: var(--font-size--2xs);
+	font-size: var(--font-size--sm);
 	line-height: 18px;
 	color: var(--color--text--shade-1);
 	padding: var(--spacing--3xs);

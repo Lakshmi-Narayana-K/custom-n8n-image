@@ -15,9 +15,9 @@ import { computed, ref, watch, onBeforeMount } from 'vue';
 import { useI18n } from '@n8n/i18n';
 import ParameterInputList from './ParameterInputList.vue';
 import Draggable from 'vuedraggable';
-import { useWorkflowsStore } from '@/stores/workflows.store';
+import { useWorkflowsStore } from '@/app/stores/workflows.store';
 import { useNDVStore } from '@/features/ndv/shared/ndv.store';
-import { telemetry } from '@/plugins/telemetry';
+import { telemetry } from '@/app/plugins/telemetry';
 import { storeToRefs } from 'pinia';
 
 import {
@@ -36,6 +36,7 @@ export type Props = {
 	path: string;
 	values?: Record<string, INodeParameters[]>;
 	isReadOnly?: boolean;
+	hiddenIssuesInputs?: string[];
 };
 
 type ValueChangedEvent = {
@@ -47,6 +48,7 @@ type ValueChangedEvent = {
 const props = withDefaults(defineProps<Props>(), {
 	values: () => ({}),
 	isReadOnly: false,
+	hiddenIssuesInputs: () => [],
 });
 
 const emit = defineEmits<{
@@ -97,6 +99,21 @@ const parameterOptions = computed(() => {
 
 const sortable = computed(() => {
 	return !!props.parameter.typeOptions?.sortable;
+});
+
+const maxValues = computed(() => {
+	const value = props.parameter.typeOptions?.maxValues;
+	return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+});
+
+const currentItemCount = computed(() => {
+	return Object.values(mutableValues.value ?? {}).reduce((acc, items) => {
+		return acc + (Array.isArray(items) ? items.length : 0);
+	}, 0);
+});
+
+const isAddDisabled = computed(() => {
+	return maxValues.value > 0 && multipleValues.value && currentItemCount.value >= maxValues.value;
 });
 
 watch(
@@ -310,6 +327,7 @@ function getItemKey(item: INodeParameters, property: INodePropertyCollection) {
 										:path="getPropertyPath(property.name, index)"
 										:hide-delete="true"
 										:is-read-only="isReadOnly"
+										:hidden-issues-inputs="hiddenIssuesInputs"
 										@value-changed="valueChanged"
 									/>
 								</Suspense>
@@ -338,6 +356,7 @@ function getItemKey(item: INodeParameters, property: INodePropertyCollection) {
 						:is-read-only="isReadOnly"
 						class="parameter-item"
 						:hide-delete="true"
+						:hidden-issues-inputs="hiddenIssuesInputs"
 						@value-changed="valueChanged"
 					/>
 				</div>
@@ -351,6 +370,7 @@ function getItemKey(item: INodeParameters, property: INodePropertyCollection) {
 				block
 				data-test-id="fixed-collection-add"
 				:label="getPlaceholderText"
+				:disabled="isAddDisabled"
 				@click="onAddButtonClick(parameter.options[0].name)"
 			/>
 			<div v-else class="add-option">
@@ -359,6 +379,7 @@ function getItemKey(item: INodeParameters, property: INodePropertyCollection) {
 					:placeholder="getPlaceholderText"
 					size="small"
 					filterable
+					:disabled="isAddDisabled"
 					@update:model-value="optionSelected"
 				>
 					<N8nOption
