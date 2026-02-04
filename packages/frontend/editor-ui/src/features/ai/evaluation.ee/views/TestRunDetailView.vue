@@ -3,12 +3,14 @@ import type { TestCaseExecutionRecord } from '../evaluation.api';
 import type { TestTableColumn } from '../components/shared/TestTableBase.vue';
 import TestTableBase from '../components/shared/TestTableBase.vue';
 import { useI18n } from '@n8n/i18n';
-import { useToast } from '@/composables/useToast';
-import { VIEWS } from '@/constants';
+import { useToast } from '@/app/composables/useToast';
+import { VIEWS } from '@/app/constants';
+import { injectStrict } from '@/app/utils/injectStrict';
+import { WorkflowIdKey } from '@/app/constants/injectionKeys';
 import type { BaseTextKey } from '@n8n/i18n';
 import { useEvaluationStore } from '../evaluation.store';
-import { useWorkflowsStore } from '@/stores/workflows.store';
-import { convertToDisplayDate } from '@/utils/formatters/dateFormatter';
+import { useWorkflowsListStore } from '@/app/stores/workflowsList.store';
+import { convertToDisplayDate } from '@/app/utils/formatters/dateFormatter';
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import orderBy from 'lodash/orderBy';
@@ -35,7 +37,7 @@ import {
 import {
 	useWorkflowSettingsCache,
 	type UserEvaluationPreferences,
-} from '@/composables/useWorkflowsCache';
+} from '@/app/composables/useWorkflowsCache';
 
 export type Column =
 	| {
@@ -55,7 +57,7 @@ export type Header = TestTableColumn<TestCaseExecutionRecord & { index: number }
 const router = useRouter();
 const toast = useToast();
 const evaluationStore = useEvaluationStore();
-const workflowsStore = useWorkflowsStore();
+const workflowsListStore = useWorkflowsListStore();
 const locale = useI18n();
 const workflowsCache = useWorkflowSettingsCache();
 
@@ -64,8 +66,10 @@ const testCases = ref<TestCaseExecutionRecord[]>([]);
 const hasFailedTestCases = ref<boolean>(false);
 
 const runId = computed(() => router.currentRoute.value.params.runId as string);
-const workflowId = computed(() => router.currentRoute.value.params.name as string);
-const workflowName = computed(() => workflowsStore.getWorkflowById(workflowId.value)?.name ?? '');
+const workflowId = injectStrict(WorkflowIdKey);
+const workflowName = computed(
+	() => workflowsListStore.getWorkflowById(workflowId.value)?.name ?? '',
+);
 
 const cachedUserPreferences = ref<UserEvaluationPreferences | undefined>();
 const expandedRows = ref<Set<string>>(new Set());
@@ -418,7 +422,7 @@ onMounted(async () => {
 .container {
 	height: 100%;
 	width: 100%;
-	max-width: var(--content-container-width);
+	max-width: var(--content-container--width);
 	padding: var(--spacing--lg) 0;
 }
 

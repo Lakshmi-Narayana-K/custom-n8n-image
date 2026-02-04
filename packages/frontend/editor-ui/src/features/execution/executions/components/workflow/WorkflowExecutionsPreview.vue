@@ -1,17 +1,19 @@
 <script lang="ts" setup>
 import WorkflowExecutionAnnotationPanel from './WorkflowExecutionAnnotationPanel.ee.vue';
 import WorkflowExecutionAnnotationTags from './WorkflowExecutionAnnotationTags.ee.vue';
-import WorkflowPreview from '@/components/WorkflowPreview.vue';
+import WorkflowPreview from '@/app/components/WorkflowPreview.vue';
 import { useExecutionDebugging } from '../../composables/useExecutionDebugging';
 import type { IExecutionUIData } from '../../composables/useExecutionHelpers';
 import { useExecutionHelpers } from '../../composables/useExecutionHelpers';
 import { useI18n } from '@n8n/i18n';
-import { useToast } from '@/composables/useToast';
-import { useMessage } from '@/composables/useMessage';
-import { EnterpriseEditionFeature, MODAL_CONFIRM, VIEWS } from '@/constants';
+import { useToast } from '@/app/composables/useToast';
+import { useMessage } from '@/app/composables/useMessage';
+import { EnterpriseEditionFeature, MODAL_CONFIRM, VIEWS } from '@/app/constants';
+import { injectStrict } from '@/app/utils/injectStrict';
+import { WorkflowIdKey } from '@/app/constants/injectionKeys';
 import { getResourcePermissions } from '@n8n/permissions';
-import { useSettingsStore } from '@/stores/settings.store';
-import { useWorkflowsStore } from '@/stores/workflows.store';
+import { useSettingsStore } from '@/app/stores/settings.store';
+import { useWorkflowsListStore } from '@/app/stores/workflowsList.store';
 import type { AnnotationVote, ExecutionSummary } from 'n8n-workflow';
 import { computed, ref } from 'vue';
 import { useRoute } from 'vue-router';
@@ -40,12 +42,13 @@ const { showError } = useToast();
 const executionHelpers = useExecutionHelpers();
 const message = useMessage();
 const executionDebugging = useExecutionDebugging();
-const workflowsStore = useWorkflowsStore();
+const workflowsListStore = useWorkflowsListStore();
 const settingsStore = useSettingsStore();
 const retryDropdownRef = ref<RetryDropdownRef | null>(null);
-const workflowId = computed(() => route.params.name as string);
+const workflowId = injectStrict(WorkflowIdKey);
 const workflowPermissions = computed(
-	() => getResourcePermissions(workflowsStore.getWorkflowById(workflowId.value)?.scopes).workflow,
+	() =>
+		getResourcePermissions(workflowsListStore.getWorkflowById(workflowId.value)?.scopes).workflow,
 );
 const executionId = computed(() => route.params.executionId as string);
 const nodeId = computed(() => route.params.nodeId as string);

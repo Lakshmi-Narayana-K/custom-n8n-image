@@ -152,8 +152,8 @@ export class LmChatAnthropic implements INodeType {
 				type: 'resourceLocator',
 				default: {
 					mode: 'list',
-					value: 'claude-sonnet-4-20250514',
-					cachedResultName: 'Claude 4 Sonnet',
+					value: 'claude-sonnet-4-5-20250929',
+					cachedResultName: 'Claude Sonnet 4.5',
 				},
 				required: true,
 				modes: [
@@ -324,7 +324,7 @@ export class LmChatAnthropic implements INodeType {
 		}
 
 		const clientOptions: {
-			fetchOptions?: { dispatcher: any };
+			fetchOptions?: { dispatcher: ReturnType<typeof getProxyAgent> };
 			defaultHeaders?: Record<string, string>;
 		} = {
 			fetchOptions: {

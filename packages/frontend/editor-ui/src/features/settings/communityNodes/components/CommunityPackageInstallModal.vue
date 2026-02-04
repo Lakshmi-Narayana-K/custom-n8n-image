@@ -1,19 +1,25 @@
 <script setup lang="ts">
-import Modal from '@/components/Modal.vue';
+import Modal from '@/app/components/Modal.vue';
 import { useInstallNode } from '../composables/useInstallNode';
-import { useTelemetry } from '@/composables/useTelemetry';
+import { useTelemetry } from '@/app/composables/useTelemetry';
 import {
 	COMMUNITY_PACKAGE_INSTALL_MODAL_KEY,
 	COMMUNITY_NODES_INSTALLATION_DOCS_URL,
 	COMMUNITY_NODES_RISKS_DOCS_URL,
 	NPM_KEYWORD_SEARCH_URL,
 } from '../communityNodes.constants';
-import { useUIStore } from '@/stores/ui.store';
+import { useUIStore } from '@/app/stores/ui.store';
 import { useI18n } from '@n8n/i18n';
 import { createEventBus } from '@n8n/utils/event-bus';
 import { computed, ref } from 'vue';
-import { ElCheckbox } from 'element-plus';
-import { N8nButton, N8nInput, N8nInputLabel, N8nLink, N8nText } from '@n8n/design-system';
+import {
+	N8nButton,
+	N8nCheckbox,
+	N8nInput,
+	N8nInputLabel,
+	N8nLink,
+	N8nText,
+} from '@n8n/design-system';
 
 interface ModalData {
 	packageName?: string;
@@ -149,20 +155,22 @@ const onLearnMoreLinkClick = () => {
 						v-text="infoTextErrorMessage"
 					></span>
 				</div>
-				<ElCheckbox
+				<N8nCheckbox
 					v-model="userAgreed"
 					:class="[$style.checkbox, checkboxWarning ? $style.error : '', 'mt-l']"
 					:disabled="loading"
 					data-test-id="user-agreement-checkbox"
-					@update:model-value="onCheckboxChecked"
+					@change="onCheckboxChecked"
 				>
-					<N8nText>
-						{{ i18n.baseText('settings.communityNodes.installModal.checkbox.label') }} </N8nText
-					><br />
-					<N8nLink :to="COMMUNITY_NODES_RISKS_DOCS_URL" @click="onLearnMoreLinkClick">{{
-						i18n.baseText('generic.moreInfo')
-					}}</N8nLink>
-				</ElCheckbox>
+					<template #label>
+						<N8nText>
+							{{ i18n.baseText('settings.communityNodes.installModal.checkbox.label') }} </N8nText
+						><br />
+						<N8nLink :to="COMMUNITY_NODES_RISKS_DOCS_URL" @click="onLearnMoreLinkClick">{{
+							i18n.baseText('generic.moreInfo')
+						}}</N8nLink>
+					</template>
+				</N8nCheckbox>
 			</div>
 		</template>
 		<template #footer>

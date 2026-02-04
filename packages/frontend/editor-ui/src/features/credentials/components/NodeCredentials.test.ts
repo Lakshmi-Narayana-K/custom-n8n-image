@@ -1,4 +1,4 @@
-import { describe, it } from 'vitest';
+import { describe, it, vi } from 'vitest';
 import { screen } from '@testing-library/vue';
 import userEvent from '@testing-library/user-event';
 import { createTestingPinia } from '@pinia/testing';
@@ -8,9 +8,13 @@ import { createComponentRenderer } from '@/__tests__/render';
 import { useCredentialsStore } from '../credentials.store';
 import { mockedStore } from '@/__tests__/utils';
 import type { INodeUi } from '@/Interface';
-import { useNDVStore } from '@/features/nodes/ndv/ndv.store';
-import { useUIStore } from '@/stores/ui.store';
-import { useWorkflowsStore } from '@/stores/workflows.store';
+import { useProjectsStore } from '@/features/collaboration/projects/projects.store';
+import type { Project } from '@/features/collaboration/projects/projects.types';
+import { useNDVStore } from '@/features/ndv/shared/ndv.store';
+import { useUIStore } from '@/app/stores/ui.store';
+import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import { useSettingsStore } from '@/app/stores/settings.store';
+import type { FrontendSettings } from '@n8n/api-types';
 
 const httpNode: INodeUi = {
 	parameters: {
@@ -85,6 +89,15 @@ describe('NodeCredentials', () => {
 	const credentialsStore = mockedStore(useCredentialsStore);
 	const ndvStore = mockedStore(useNDVStore);
 	const uiStore = mockedStore(useUIStore);
+	const projectsStore = mockedStore(useProjectsStore);
+	const settingsStore = mockedStore(useSettingsStore);
+
+	projectsStore.currentProject = { id: 'default', scopes: ['credential:create'] } as Project;
+	settingsStore.settings = {
+		envFeatureFlags: {
+			N8N_ENV_FEAT_DYNAMIC_CREDENTIALS: true,
+		},
+	} as unknown as FrontendSettings;
 
 	beforeAll(() => {
 		credentialsStore.state.credentialTypes = {
@@ -325,6 +338,129 @@ describe('NodeCredentials', () => {
 				currentNodeName: 'OpenAI no creds',
 				type: 'openAiApi',
 			});
+		});
+	});
+
+	describe('resolvable credentials', () => {
+		it('should show dynamic icon in dropdown for resolvable credentials', async () => {
+			ndvStore.activeNode = httpNode;
+			credentialsStore.state.credentials = {
+				c8vqdPpPClh4TgIO: {
+					id: 'c8vqdPpPClh4TgIO',
+					name: 'OpenAi account',
+					type: 'openAiApi',
+					isManaged: false,
+					isResolvable: true,
+					createdAt: '',
+					updatedAt: '',
+				},
+			};
+
+			renderComponent();
+
+			const credentialsSelect = screen.getByTestId('node-credentials-select');
+
+			await userEvent.click(credentialsSelect);
+
+			expect(screen.queryByTestId('credential-option-dynamic-icon')).toBeInTheDocument();
+		});
+
+		it('should not show dynamic icon in dropdown for non-resolvable credentials', async () => {
+			ndvStore.activeNode = httpNode;
+			credentialsStore.state.credentials = {
+				c8vqdPpPClh4TgIO: {
+					id: 'c8vqdPpPClh4TgIO',
+					name: 'OpenAi account',
+					type: 'openAiApi',
+					isManaged: false,
+					isResolvable: false,
+					createdAt: '',
+					updatedAt: '',
+				},
+			};
+
+			renderComponent();
+
+			const credentialsSelect = screen.getByTestId('node-credentials-select');
+
+			await userEvent.click(credentialsSelect);
+
+			expect(screen.queryByTestId('credential-option-dynamic-icon')).not.toBeInTheDocument();
+		});
+
+		it('should show dynamic indicator next to selected resolvable credential', async () => {
+			ndvStore.activeNode = httpNode;
+			const resolvableCredential = {
+				id: 'c8vqdPpPClh4TgIO',
+				name: 'OpenAi account 2',
+				type: 'openAiApi',
+				isManaged: false,
+				isResolvable: true,
+				createdAt: '',
+				updatedAt: '',
+			};
+			credentialsStore.state.credentials = {
+				c8vqdPpPClh4TgIO: resolvableCredential,
+			};
+
+			credentialsStore.getCredentialById = vi.fn().mockReturnValue(resolvableCredential);
+
+			renderComponent();
+
+			expect(screen.queryByTestId('node-credential-dynamic-icon')).toBeInTheDocument();
+		});
+
+		it('should show warning when resolvable credential selected but workflow has no resolver', async () => {
+			ndvStore.activeNode = httpNode;
+			const resolvableCredential = {
+				id: 'c8vqdPpPClh4TgIO',
+				name: 'OpenAi account 2',
+				type: 'openAiApi',
+				isManaged: false,
+				isResolvable: true,
+				createdAt: '',
+				updatedAt: '',
+			};
+			credentialsStore.state.credentials = {
+				c8vqdPpPClh4TgIO: resolvableCredential,
+			};
+
+			credentialsStore.getCredentialById = vi.fn().mockReturnValue(resolvableCredential);
+
+			const workflowsStore = mockedStore(useWorkflowsStore);
+			workflowsStore.workflowSettings = { executionOrder: 'v1' };
+
+			renderComponent();
+
+			expect(screen.queryByTestId('node-credential-resolver-warning')).toBeInTheDocument();
+		});
+
+		it('should not show warning when resolvable credential selected and workflow has resolver', async () => {
+			ndvStore.activeNode = httpNode;
+			const resolvableCredential = {
+				id: 'c8vqdPpPClh4TgIO',
+				name: 'OpenAi account 2',
+				type: 'openAiApi',
+				isManaged: false,
+				isResolvable: true,
+				createdAt: '',
+				updatedAt: '',
+			};
+			credentialsStore.state.credentials = {
+				c8vqdPpPClh4TgIO: resolvableCredential,
+			};
+
+			credentialsStore.getCredentialById = vi.fn().mockReturnValue(resolvableCredential);
+
+			const workflowsStore = mockedStore(useWorkflowsStore);
+			workflowsStore.workflowSettings = {
+				executionOrder: 'v1',
+				credentialResolverId: 'resolver-123',
+			};
+
+			renderComponent();
+
+			expect(screen.queryByTestId('node-credential-resolver-warning')).not.toBeInTheDocument();
 		});
 	});
 });

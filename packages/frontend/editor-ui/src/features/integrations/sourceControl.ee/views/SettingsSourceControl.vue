@@ -1,14 +1,14 @@
 <script lang="ts" setup>
-import CopyInput from '@/components/CopyInput.vue';
-import { useDocumentTitle } from '@/composables/useDocumentTitle';
-import { useLoadingService } from '@/composables/useLoadingService';
-import { useMessage } from '@/composables/useMessage';
-import { usePageRedirectionHelper } from '@/composables/usePageRedirectionHelper';
-import { useToast } from '@/composables/useToast';
-import { MODAL_CONFIRM } from '@/constants';
+import CopyInput from '@/app/components/CopyInput.vue';
+import { useDocumentTitle } from '@/app/composables/useDocumentTitle';
+import { useLoadingService } from '@/app/composables/useLoadingService';
+import { useMessage } from '@/app/composables/useMessage';
+import { usePageRedirectionHelper } from '@/app/composables/usePageRedirectionHelper';
+import { useToast } from '@/app/composables/useToast';
+import { MODAL_CONFIRM } from '@/app/constants';
 import { useSourceControlStore } from '../sourceControl.store';
 import type { SshKeyTypes, SourceControlPreferences } from '../sourceControl.types';
-import type { TupleToUnion } from '@/utils/typeHelpers';
+import type { TupleToUnion } from '@/app/utils/typeHelpers';
 import type { Rule, RuleGroup } from '@n8n/design-system/types';
 import { useI18n } from '@n8n/i18n';
 import type { Validatable } from '@n8n/design-system';
@@ -174,7 +174,7 @@ const repoUrlValidationRules = computed<Array<Rule | RuleGroup>>(() => {
 			name: 'MATCH_REGEX',
 			config: {
 				regex:
-					/^(?:git@|ssh:\/\/git@|[\w-]+@)(?:[\w.-]+|\[[0-9a-fA-F:]+])(?::\d+)?[:\/][\w\-~.]+(?:\/[\w\-~.]+)*(?:\.git)?(?:\/.*)?$/,
+					/^(?:git@|ssh:\/\/git@|[\w.-]+@)(?:[\w.-]+|\[[0-9a-fA-F:]+])(?::\d+)?[:\/][\w\-~.]+(?:\/[\w\-~.]+)*(?:\.git)?(?:\/.*)?$/,
 				message: locale.baseText('settings.sourceControl.repoUrlInvalid'),
 			},
 		});
@@ -498,12 +498,15 @@ watch(connectionType, () => {
 					<N8nCheckbox
 						v-model="sourceControlStore.preferences.branchReadOnly"
 						:class="$style.readOnly"
+						data-test-id="source-control-read-only-checkbox"
 					>
-						<I18nT keypath="settings.sourceControl.protected" tag="span" scope="global">
-							<template #bold>
-								<strong>{{ locale.baseText('settings.sourceControl.protected.bold') }}</strong>
-							</template>
-						</I18nT>
+						<template #label>
+							<I18nT keypath="settings.sourceControl.protected" tag="span" scope="global">
+								<template #bold>
+									<strong>{{ locale.baseText('settings.sourceControl.protected.bold') }}</strong>
+								</template>
+							</I18nT>
+						</template>
 					</N8nCheckbox>
 				</div>
 				<div :class="$style.group">
@@ -555,7 +558,7 @@ watch(connectionType, () => {
 		border: 1px solid var(--color--foreground--tint-1);
 	}
 
-	label {
+	> label {
 		display: inline-block;
 		padding: 0 0 var(--spacing--2xs);
 		font-size: var(--font-size--sm);

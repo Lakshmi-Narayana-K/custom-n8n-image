@@ -3,8 +3,9 @@ import { useLogsExecutionData } from './useLogsExecutionData';
 import { waitFor } from '@testing-library/vue';
 import { createTestingPinia } from '@pinia/testing';
 import { mockedStore, waitAllPromises } from '@/__tests__/utils';
-import { useWorkflowsStore } from '@/stores/workflows.store';
-import { useNodeTypesStore } from '@/stores/nodeTypes.store';
+import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import { useWorkflowsListStore } from '@/app/stores/workflowsList.store';
+import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
 import { nodeTypes } from '../__test__/data';
 import {
 	createTestNode,
@@ -12,20 +13,20 @@ import {
 	createTestWorkflow,
 	createTestWorkflowExecutionResponse,
 } from '@/__tests__/mocks';
-import type { IRunExecutionData } from 'n8n-workflow';
+import { createRunExecutionData, type IRunExecutionData } from 'n8n-workflow';
 import { stringify } from 'flatted';
-import { useToast } from '@/composables/useToast';
+import { useToast } from '@/app/composables/useToast';
 import {
 	injectWorkflowState,
 	useWorkflowState,
 	type WorkflowState,
-} from '@/composables/useWorkflowState';
+} from '@/app/composables/useWorkflowState';
 import { computed } from 'vue';
 
-vi.mock('@/composables/useToast');
+vi.mock('@/app/composables/useToast');
 
-vi.mock('@/composables/useWorkflowState', async () => {
-	const actual = await vi.importActual('@/composables/useWorkflowState');
+vi.mock('@/app/composables/useWorkflowState', async () => {
+	const actual = await vi.importActual('@/app/composables/useWorkflowState');
 	return {
 		...actual,
 		injectWorkflowState: vi.fn(),
@@ -36,12 +37,14 @@ let workflowState: WorkflowState;
 
 describe(useLogsExecutionData, () => {
 	let workflowsStore: ReturnType<typeof mockedStore<typeof useWorkflowsStore>>;
+	let workflowsListStore: ReturnType<typeof mockedStore<typeof useWorkflowsListStore>>;
 	let nodeTypeStore: ReturnType<typeof mockedStore<typeof useNodeTypesStore>>;
 
 	beforeEach(() => {
 		setActivePinia(createTestingPinia({ stubActions: false }));
 
 		workflowsStore = mockedStore(useWorkflowsStore);
+		workflowsListStore = mockedStore(useWorkflowsListStore);
 
 		workflowState = useWorkflowState();
 		vi.mocked(injectWorkflowState).mockReturnValue(workflowState);
@@ -54,7 +57,7 @@ describe(useLogsExecutionData, () => {
 		beforeEach(() => {
 			workflowState.setWorkflowExecutionData(
 				createTestWorkflowExecutionResponse({
-					data: { resultData: { runData: { n0: [createTestTaskData()] } } },
+					data: createRunExecutionData({ resultData: { runData: { n0: [createTestTaskData()] } } }),
 					workflowData: createTestWorkflow({ nodes: [createTestNode({ name: 'n0' })] }),
 				}),
 			);
@@ -91,7 +94,7 @@ describe(useLogsExecutionData, () => {
 							},
 						},
 					}),
-					data: {
+					data: createRunExecutionData({
 						resultData: {
 							runData: {
 								A: [createTestTaskData()],
@@ -102,7 +105,7 @@ describe(useLogsExecutionData, () => {
 								],
 							},
 						},
-					},
+					}),
 				}),
 			);
 
@@ -146,7 +149,7 @@ describe(useLogsExecutionData, () => {
 				typeof useToastMock
 			>);
 
-			workflowsStore.fetchWorkflow.mockResolvedValueOnce(createTestWorkflow());
+			workflowsListStore.fetchWorkflow.mockResolvedValueOnce(createTestWorkflow());
 			workflowsStore.fetchExecutionDataById.mockRejectedValueOnce(
 				new Error('test execution fetch fail'),
 			);

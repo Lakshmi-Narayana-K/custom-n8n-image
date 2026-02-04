@@ -8,8 +8,8 @@ import { chatEventBus } from '@n8n/chat/event-buses';
 import type { ArrowKeyDownPayload } from '@n8n/chat/components/Input.vue';
 import ChatInput from '@n8n/chat/components/Input.vue';
 import { computed, ref } from 'vue';
-import { useClipboard } from '@/composables/useClipboard';
-import { useToast } from '@/composables/useToast';
+import { useClipboard } from '@/app/composables/useClipboard';
+import { useToast } from '@/app/composables/useToast';
 import LogsPanelHeader from '@/features/execution/logs/components/LogsPanelHeader.vue';
 import { N8nButton, N8nIconButton, N8nTooltip } from '@n8n/design-system';
 interface Props {
@@ -297,12 +297,44 @@ async function copySessionId() {
 	--chat--message--user--border: none;
 	--chat--input--padding: var(--spacing--xs);
 	--chat--color-typing: var(--color--text--tint-1);
-	--chat--textarea--max-height: calc(var(--logs-panel-height) * 0.3);
+	--chat--textarea--max-height: calc(var(--logs-panel--height) * 0.3);
 	--chat--message--pre--background: var(--color--foreground--tint-1);
 	--chat--textarea--height: calc(
 		var(--chat--input--padding) * 2 + var(--chat--input--font-size) *
 			var(--chat--input--line-height)
 	);
+	--chat--transition-duration: 0.3s;
+	--chat--button--font-size: var(--font-size--2xs);
+	--chat--button--line-height: 1;
+	--chat--button--border-radius: var(--radius);
+	--chat--button--padding: var(--spacing--2xs) var(--spacing--xs);
+	--chat--button--color--primary: var(--button--color--text--primary);
+	--chat--button--background--primary: var(--button--color--background--primary);
+	--chat--button--border--primary: none;
+	--chat--button--color--primary--hover: var(--button--color--text--primary);
+	--chat--button--background--primary--hover: var(
+		--button--color--background--primary--hover-active-focus
+	);
+	--chat--button--border--primary--hover: none;
+	--chat--button--color--primary--disabled: var(--button--color--text--primary--disabled);
+	--chat--button--background--primary--disabled: var(
+		--button--color--background--primary--disabled
+	);
+	--chat--button--border--primary--disabled: none;
+	--chat--button--color--secondary: var(--button--color--text--secondary);
+	--chat--button--background--secondary: var(--button--color--background--secondary);
+	--chat--button--border--secondary: var(--border-width) var(--button--border-color--secondary)
+		var(--border-style);
+	--chat--button--color--secondary--hover: var(
+		--button--color--text--secondary--hover-active-focus
+	);
+	--chat--button--background--secondary--hover: var(--button--color--background--secondary--hover);
+	--chat--button--border--secondary--hover: var(--border-width)
+		var(--button--border-color--secondary--hover-active-focus) var(--border-style);
+	--chat--button--color--secondary--disabled: var(--button--color--text--secondary--disabled);
+	--chat--button--background--secondary--disabled: var(--button--color--background--secondary);
+	--chat--button--border--secondary--disabled: var(--border-width)
+		var(--button--border-color--secondary--disabled) var(--border-style);
 	height: 100%;
 	display: flex;
 	flex-direction: column;

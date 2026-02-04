@@ -1,21 +1,21 @@
 <script setup lang="ts">
-import Modal from '@/components/Modal.vue';
+import Modal from '@/app/components/Modal.vue';
 import {
 	COMMUNITY_PACKAGE_CONFIRM_MODAL_KEY,
 	COMMUNITY_PACKAGE_MANAGE_ACTIONS,
 } from '../communityNodes.constants';
-import { useToast } from '@/composables/useToast';
+import { useToast } from '@/app/composables/useToast';
 import { useCommunityNodesStore } from '../communityNodes.store';
 import { createEventBus } from '@n8n/utils/event-bus';
 import { useI18n } from '@n8n/i18n';
-import { useTelemetry } from '@/composables/useTelemetry';
+import { useTelemetry } from '@/app/composables/useTelemetry';
 import { computed, onMounted, ref } from 'vue';
-import { useNodeTypesStore } from '@/stores/nodeTypes.store';
+import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
 import type { CommunityNodeType } from '@n8n/api-types';
-import { useSettingsStore } from '@/stores/settings.store';
+import { useSettingsStore } from '@/app/stores/settings.store';
 import semver from 'semver';
-import { useUIStore } from '@/stores/ui.store';
-import { useWorkflowsStore } from '@/stores/workflows.store';
+import { useUIStore } from '@/app/stores/ui.store';
+import { useWorkflowsListStore } from '@/app/stores/workflowsList.store';
 import type { WorkflowResource } from '@/Interface';
 
 import { N8nButton, N8nNotice, N8nText } from '@n8n/design-system';
@@ -34,7 +34,7 @@ const props = defineProps<Props>();
 const communityNodesStore = useCommunityNodesStore();
 const nodeTypesStore = useNodeTypesStore();
 const settingsStore = useSettingsStore();
-const workflowsStore = useWorkflowsStore();
+const workflowsListStore = useWorkflowsListStore();
 
 const modalBus = createEventBus();
 
@@ -227,7 +227,7 @@ onMounted(async () => {
 
 	if (communityStorePackage.value?.installedNodes.length) {
 		const nodeTypes = communityStorePackage.value.installedNodes.map((node) => node.type);
-		const response = await workflowsStore.fetchWorkflowsWithNodesIncluded(nodeTypes);
+		const response = await workflowsListStore.fetchWorkflowsWithNodesIncluded(nodeTypes);
 		workflowsWithPackageNodes.value = response?.data ?? [];
 	}
 

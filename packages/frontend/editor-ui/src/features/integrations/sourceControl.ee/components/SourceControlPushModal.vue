@@ -1,13 +1,13 @@
 <script lang="ts" setup>
 import ProjectCardBadge from '@/features/collaboration/projects/components/ProjectCardBadge.vue';
-import { useLoadingService } from '@/composables/useLoadingService';
-import { useTelemetry } from '@/composables/useTelemetry';
-import { useToast } from '@/composables/useToast';
-import { VIEWS } from '@/constants';
+import { useLoadingService } from '@/app/composables/useLoadingService';
+import { useTelemetry } from '@/app/composables/useTelemetry';
+import { useToast } from '@/app/composables/useToast';
+import { VIEWS } from '@/app/constants';
 import { SOURCE_CONTROL_PUSH_MODAL_KEY } from '../sourceControl.constants';
 import type { WorkflowResource } from '@/Interface';
 import { useProjectsStore } from '@/features/collaboration/projects/projects.store';
-import { useSettingsStore } from '@/stores/settings.store';
+import { useSettingsStore } from '@/app/stores/settings.store';
 import { useSourceControlStore } from '../sourceControl.store';
 import { useUsersStore } from '@/features/settings/users/users.store';
 import type {
@@ -16,7 +16,7 @@ import type {
 } from '@/features/collaboration/projects/projects.types';
 import { ResourceType } from '@/features/collaboration/projects/projects.utils';
 import { getPushPriorityByStatus, getStatusText, getStatusTheme } from '../sourceControl.utils';
-import type { SourceControlledFile } from '@n8n/api-types';
+import type { SourceControlledFile, SourceControlledFileStatus } from '@n8n/api-types';
 import {
 	ROLE,
 	SOURCE_CONTROL_FILE_LOCATION,
@@ -32,7 +32,7 @@ import { computed, onBeforeMount, onMounted, reactive, ref, toRaw, watch, watchE
 import { useRoute, useRouter } from 'vue-router';
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller';
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css';
-import Modal from '@/components/Modal.vue';
+import Modal from '@/app/components/Modal.vue';
 import ProjectSharing from '@/features/collaboration/projects/components/ProjectSharing.vue';
 import {
 	N8nBadge,
@@ -97,6 +97,13 @@ async function loadSourceControlStatus() {
 		}
 
 		status.value = freshStatus;
+
+		// Auto-select all credentials by default (only once on load)
+		freshStatus.forEach((file) => {
+			if (file.type === 'credential') {
+				selectedCredentials.add(file.id);
+			}
+		});
 	} catch (error) {
 		toast.showError(error, i18n.baseText('error'));
 		close();
@@ -127,8 +134,6 @@ const projectsForFilters = computed(() => {
 const concatenateWithAnd = (messages: string[]) =>
 	new Intl.ListFormat(i18n.locale, { style: 'long', type: 'conjunction' }).format(messages);
 
-type SourceControlledFileStatus = SourceControlledFile['status'];
-
 type SourceControlledFileWithProject = SourceControlledFile & { project?: ProjectListItem };
 
 type Changes = {
@@ -138,6 +143,7 @@ type Changes = {
 	workflow: SourceControlledFileWithProject[];
 	currentWorkflow?: SourceControlledFileWithProject;
 	folders: SourceControlledFileWithProject[];
+	projects: SourceControlledFileWithProject[];
 };
 
 const classifyFilesByType = (files: SourceControlledFile[], currentWorkflowId?: string): Changes =>
@@ -185,6 +191,11 @@ const classifyFilesByType = (files: SourceControlledFile[], currentWorkflowId?: 
 				return acc;
 			}
 
+			if (file.type === SOURCE_CONTROL_FILE_TYPE.project) {
+				acc.projects.push({ ...file, project });
+				return acc;
+			}
+
 			return acc;
 		},
 		{
@@ -193,6 +204,7 @@ const classifyFilesByType = (files: SourceControlledFile[], currentWorkflowId?: 
 			credential: [],
 			workflow: [],
 			folders: [],
+			projects: [],
 			currentWorkflow: undefined,
 		},
 	);
@@ -217,6 +229,13 @@ const userNotices = computed(() => {
 	if (changes.value.folders.length) {
 		messages.push({
 			title: 'Folders',
+			content: 'at least one new or modified',
+		});
+	}
+
+	if (changes.value.projects.length) {
+		messages.push({
+			title: 'Projects',
 			content: 'at least one new or modified',
 		});
 	}
@@ -368,6 +387,7 @@ const isSubmitDisabled = computed(() => {
 		changes.value.tags.length +
 		changes.value.variables.length +
 		changes.value.folders.length +
+		changes.value.projects.length +
 		selectedWorkflows.size;
 
 	return toBePushed <= 0;
@@ -463,6 +483,10 @@ const successNotificationMessage = () => {
 		messages.push(i18n.baseText('generic.tag_plural'));
 	}
 
+	if (changes.value.projects.length) {
+		messages.push(i18n.baseText('generic.projects'));
+	}
+
 	return [
 		concatenateWithAnd(messages),
 		i18n.baseText('settings.sourceControl.modals.push.success.description'),
@@ -474,6 +498,7 @@ async function commitAndPush() {
 		.concat(changes.value.variables)
 		.concat(changes.value.credential.filter((file) => selectedCredentials.has(file.id)))
 		.concat(changes.value.folders)
+		.concat(changes.value.projects)
 		.concat(changes.value.workflow.filter((file) => selectedWorkflows.has(file.id)));
 	loadingService.startLoading(i18n.baseText('settings.sourceControl.loading.push'));
 	close();
@@ -627,6 +652,7 @@ function castProject(project: ProjectListItem): WorkflowResource {
 		id: '',
 		name: '',
 		active: false,
+		activeVersionId: null,
 		createdAt: '',
 		updatedAt: '',
 		isArchived: false,
@@ -637,7 +663,7 @@ function castProject(project: ProjectListItem): WorkflowResource {
 	return resource;
 }
 
-function openDiffModal(id: string) {
+function openDiffModal(id: string, workflowStatus: SourceControlledFileStatus) {
 	telemetry.track('User clicks compare workflows', {
 		workflow_id: id,
 		context: 'source_control_push',
@@ -648,6 +674,7 @@ function openDiffModal(id: string) {
 		query: {
 			...route.query,
 			diff: id,
+			workflowStatus,
 			direction: 'push',
 		},
 	});
@@ -699,8 +726,13 @@ onMounted(async () => {
 							<N8nIcon icon="search" />
 						</template>
 					</N8nInput>
-					<N8nPopover trigger="click" width="304" style="align-self: normal">
-						<template #reference>
+					<N8nPopover
+						width="304px"
+						:content-class="$style['popover-content']"
+						style="align-self: normal"
+						z-index="2000"
+					>
+						<template #trigger>
 							<N8nButton
 								icon="funnel"
 								type="tertiary"
@@ -713,44 +745,46 @@ onMounted(async () => {
 								</N8nBadge>
 							</N8nButton>
 						</template>
-						<N8nInputLabel
-							:label="i18n.baseText('workflows.filters.status')"
-							:bold="false"
-							size="small"
-							color="text-base"
-							class="mb-3xs"
-						/>
-						<N8nSelect
-							v-model="filters.status"
-							data-test-id="source-control-status-filter"
-							clearable
-						>
-							<N8nOption
-								v-for="option in statusFilterOptions"
-								:key="option.label"
-								data-test-id="source-control-status-filter-option"
-								v-bind="option"
+						<template #content>
+							<N8nInputLabel
+								:label="i18n.baseText('workflows.filters.status')"
+								:bold="false"
+								size="small"
+								color="text-base"
+								class="mb-3xs"
 							/>
-						</N8nSelect>
-						<N8nInputLabel
-							:label="i18n.baseText('forms.resourceFiltersDropdown.owner')"
-							:bold="false"
-							size="small"
-							color="text-base"
-							class="mb-3xs mt-3xs"
-						/>
-						<ProjectSharing
-							v-model="filters.project"
-							data-test-id="source-control-push-modal-project-search"
-							:projects="projectsForFilters"
-							:placeholder="i18n.baseText('forms.resourceFiltersDropdown.owner.placeholder')"
-							:empty-options-text="i18n.baseText('projects.sharing.noMatchingProjects')"
-						/>
-						<div v-if="filterCount" class="mt-s">
-							<N8nLink @click="resetFilters">
-								{{ i18n.baseText('forms.resourceFiltersDropdown.reset') }}
-							</N8nLink>
-						</div>
+							<N8nSelect
+								v-model="filters.status"
+								data-test-id="source-control-status-filter"
+								clearable
+							>
+								<N8nOption
+									v-for="option in statusFilterOptions"
+									:key="option.label"
+									data-test-id="source-control-status-filter-option"
+									v-bind="option"
+								/>
+							</N8nSelect>
+							<N8nInputLabel
+								:label="i18n.baseText('forms.resourceFiltersDropdown.owner')"
+								:bold="false"
+								size="small"
+								color="text-base"
+								class="mb-3xs mt-3xs"
+							/>
+							<ProjectSharing
+								v-model="filters.project"
+								data-test-id="source-control-push-modal-project-search"
+								:projects="projectsForFilters"
+								:placeholder="i18n.baseText('forms.resourceFiltersDropdown.owner.placeholder')"
+								:empty-options-text="i18n.baseText('projects.sharing.noMatchingProjects')"
+							/>
+							<div v-if="filterCount" class="mt-s">
+								<N8nLink @click="resetFilters">
+									{{ i18n.baseText('forms.resourceFiltersDropdown.reset') }}
+								</N8nLink>
+							</div>
+						</template>
 					</N8nPopover>
 				</div>
 			</div>
@@ -782,7 +816,7 @@ onMounted(async () => {
 						<button
 							type="button"
 							:class="[$style.tab, { [$style.tabActive]: activeTab === tab.value }]"
-							data-test-id="source-control-push-modal-tab"
+							:data-test-id="`source-control-push-modal-tab-${tab.value}`"
 							@click="activeTab = tab.value"
 						>
 							<div>{{ tab.label }}</div>
@@ -803,7 +837,9 @@ onMounted(async () => {
 								:disabled="activeDataSourceFiltered.length === 0"
 								@update:model-value="onToggleSelectAll"
 							>
-								<N8nText> Title </N8nText>
+								<template #label>
+									<N8nText> Title </N8nText>
+								</template>
 							</N8nCheckbox>
 							<N8nInfoTip
 								v-if="filtersApplied"
@@ -845,6 +881,7 @@ onMounted(async () => {
 										:active="active"
 										:size-dependencies="[file.name, file.id]"
 										:data-index="index"
+										data-test-id="push-modal-item"
 									>
 										<N8nCheckbox
 											:class="[$style.listItem]"
@@ -852,62 +889,74 @@ onMounted(async () => {
 											:model-value="activeSelection.has(file.id)"
 											@update:model-value="toggleSelected(file.id)"
 										>
-											<span>
-												<N8nText tag="div" bold color="text-dark" :class="[$style.listItemName]">
-													{{ file.name || file.id }}
-												</N8nText>
-												<N8nText
-													v-if="file.updatedAt"
-													tag="p"
-													class="mt-0"
-													color="text-light"
-													size="small"
-												>
-													{{ renderUpdatedAt(file) }}
-												</N8nText>
-											</span>
-											<span :class="[$style.badges]">
-												<N8nBadge
-													v-if="changes.currentWorkflow && file.id === changes.currentWorkflow.id"
-													class="mr-2xs"
-												>
-													Current workflow
-												</N8nBadge>
-												<template
-													v-if="
-														file.type === SOURCE_CONTROL_FILE_TYPE.workflow ||
-														file.type === SOURCE_CONTROL_FILE_TYPE.credential
-													"
-												>
-													<ProjectCardBadge
-														v-if="file.project"
-														data-test-id="source-control-push-modal-project-badge"
-														:resource="castProject(file.project)"
-														:resource-type="castType(file.type)"
-														:resource-type-label="
-															i18n.baseText(`generic.${file.type}`).toLowerCase()
-														"
-														:personal-project="projectsStore.personalProject"
-														:show-badge-border="false"
-													/>
-												</template>
-												<N8nBadge :theme="getStatusTheme(file.status)" style="height: 25px">
-													{{ getStatusText(file.status) }}
-												</N8nBadge>
-												<template v-if="isWorkflowDiffsEnabled">
-													<N8nTooltip
-														v-if="file.type === SOURCE_CONTROL_FILE_TYPE.workflow"
-														:content="i18n.baseText('workflowDiff.compare')"
-														placement="top"
-													>
-														<N8nIconButton
-															icon="file-diff"
-															type="secondary"
-															@click="openDiffModal(file.id)"
-														/>
-													</N8nTooltip>
-												</template>
-											</span>
+											<template #label>
+												<div :class="$style.listItemContent">
+													<span>
+														<N8nText
+															tag="div"
+															bold
+															color="text-dark"
+															:class="[$style.listItemName]"
+														>
+															{{ file.name || file.id }}
+														</N8nText>
+														<N8nText
+															v-if="file.updatedAt"
+															tag="p"
+															class="mt-0"
+															color="text-light"
+															size="small"
+														>
+															{{ renderUpdatedAt(file) }}
+														</N8nText>
+													</span>
+													<span :class="[$style.badges]">
+														<N8nBadge
+															v-if="
+																changes.currentWorkflow && file.id === changes.currentWorkflow.id
+															"
+															class="mr-2xs"
+														>
+															Current workflow
+														</N8nBadge>
+														<template
+															v-if="
+																file.type === SOURCE_CONTROL_FILE_TYPE.workflow ||
+																file.type === SOURCE_CONTROL_FILE_TYPE.credential
+															"
+														>
+															<ProjectCardBadge
+																v-if="file.project"
+																data-test-id="source-control-push-modal-project-badge"
+																:resource="castProject(file.project)"
+																:resource-type="castType(file.type)"
+																:resource-type-label="
+																	i18n.baseText(`generic.${file.type}`).toLowerCase()
+																"
+																:personal-project="projectsStore.personalProject"
+																:show-badge-border="false"
+															/>
+														</template>
+														<N8nBadge :theme="getStatusTheme(file.status)" style="height: 25px">
+															{{ getStatusText(file.status) }}
+														</N8nBadge>
+														<template v-if="isWorkflowDiffsEnabled">
+															<N8nTooltip
+																v-if="file.type === SOURCE_CONTROL_FILE_TYPE.workflow"
+																:content="i18n.baseText('workflowDiff.compare')"
+																placement="top"
+															>
+																<N8nIconButton
+																	data-test-id="source-control-workflow-diff-button"
+																	icon="file-diff"
+																	type="secondary"
+																	@click="openDiffModal(file.id, file.status)"
+																/>
+															</N8nTooltip>
+														</template>
+													</span>
+												</div>
+											</template>
 										</N8nCheckbox>
 									</DynamicScrollerItem>
 								</template>
@@ -919,8 +968,13 @@ onMounted(async () => {
 		</template>
 
 		<template #footer>
-			<N8nNotice v-if="userNotices.length" :compact="false" class="mt-0">
-				<N8nText bold size="medium">Changes to variables, tags and folders </N8nText>
+			<N8nNotice
+				v-if="userNotices.length"
+				:compact="false"
+				class="mt-0"
+				id="source-control-push-modal-notice"
+			>
+				<N8nText bold size="medium">Changes to variables, tags, folders and projects </N8nText>
 				<br />
 				<template v-for="{ title, content } in userNotices" :key="title">
 					<N8nText bold size="small"> {{ title }}</N8nText>
@@ -1000,6 +1054,14 @@ onMounted(async () => {
 	padding: 10px 16px;
 	margin: 0;
 	border-bottom: var(--border);
+	width: 100%;
+
+	.listItemContent {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		width: 100%;
+	}
 
 	.listItemName {
 		line-clamp: 2;
@@ -1009,18 +1071,6 @@ onMounted(async () => {
 		display: -webkit-box;
 		-webkit-box-orient: vertical;
 		word-wrap: break-word; /* Important for long words! */
-	}
-
-	:global(.el-checkbox__label) {
-		display: flex;
-		width: 100%;
-		justify-content: space-between;
-		align-items: center;
-		gap: 30px;
-	}
-
-	:global(.el-checkbox__inner) {
-		transition: none;
 	}
 }
 
@@ -1094,5 +1144,9 @@ onMounted(async () => {
 .tabActive {
 	background-color: var(--color--background);
 	color: var(--color--text--shade-1);
+}
+
+.popover-content {
+	padding: var(--spacing--sm);
 }
 </style>

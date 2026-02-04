@@ -4,8 +4,16 @@ import {
 	type ChatMessageId,
 	type ChatHubSessionDto,
 	type ChatHubConversationDto,
+	type ChatSessionId,
+	type MessageChunk,
+	type ChatHubProvider,
+	chatHubConversationModelSchema,
+	type ChatModelDto,
+	agentIconOrEmojiSchema,
 } from '@n8n/api-types';
+import type { IBinaryData, INode } from 'n8n-workflow';
 import { z } from 'zod';
+import { isLlmProviderModel } from './chat.utils';
 
 export interface UserMessage {
 	id: string;
@@ -33,6 +41,13 @@ export interface ErrorMessage {
 
 export type StreamChunk = AssistantMessage | ErrorMessage;
 
+export type MessagingState =
+	| 'idle'
+	| 'waitingFirstChunk'
+	| 'receiving'
+	| 'missingCredentials'
+	| 'missingAgent';
+
 export interface ChatMessage extends ChatHubMessageDto {
 	responses: ChatMessageId[];
 	alternatives: ChatMessageId[];
@@ -45,26 +60,6 @@ export interface ChatConversation extends ChatHubConversationDto {
 
 export interface StreamOutput {
 	messages: StreamChunk[];
-}
-
-export type Suggestion = {
-	title: string;
-	subtitle: string;
-	icon?: string;
-};
-
-// From @n8n/chat
-export type ChunkType = 'begin' | 'item' | 'end' | 'error';
-export interface StructuredChunk {
-	type: ChunkType;
-	content?: string;
-	metadata: {
-		nodeId: string;
-		nodeName: string;
-		timestamp: number;
-		runIndex: number;
-		itemIndex: number;
-	};
 }
 
 export interface NodeStreamingState {
@@ -81,4 +76,48 @@ export type CredentialsMap = z.infer<typeof credentialsMapSchema>;
 export interface GroupedConversations {
 	group: string;
 	sessions: ChatHubSessionDto[];
+}
+
+export interface ChatAgentFilter {
+	sortBy: 'updatedAt' | 'createdAt';
+	search: string;
+}
+
+export interface ChatStreamingState extends Partial<MessageChunk['metadata']> {
+	promptPreviousMessageId: ChatMessageId | null;
+	promptText: string;
+	promptId: ChatMessageId;
+	sessionId: ChatSessionId;
+	retryOfMessageId: ChatMessageId | null;
+	revisionOfMessageId: ChatMessageId | null;
+	tools: INode[];
+	attachments: IBinaryData[];
+	agent: ChatModelDto;
+}
+
+export interface FlattenedModel {
+	provider: ChatHubProvider | null;
+	model: string | null;
+	workflowId: string | null;
+	agentId: string | null;
+}
+
+export const chatHubConversationModelWithCachedDisplayNameSchema = chatHubConversationModelSchema
+	.and(
+		z.object({
+			cachedDisplayName: z.string().optional(),
+			cachedIcon: agentIconOrEmojiSchema.optional(),
+		}),
+	)
+	.transform((value) => ({
+		...value,
+		cachedDisplayName: value.cachedDisplayName || (isLlmProviderModel(value) ? value.model : ''),
+	}));
+
+export type ChatHubConversationModelWithCachedDisplayName = z.infer<
+	typeof chatHubConversationModelWithCachedDisplayNameSchema
+>;
+
+export interface FetchOptions {
+	minLoadingTime?: number;
 }

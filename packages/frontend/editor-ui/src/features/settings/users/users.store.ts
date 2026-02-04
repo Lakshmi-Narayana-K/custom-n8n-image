@@ -23,14 +23,14 @@ import type {
 import { getPersonalizedNodeTypes } from './users.utils';
 import { defineStore } from 'pinia';
 import { useRootStore } from '@n8n/stores/useRootStore';
-import { useUIStore } from '@/stores/ui.store';
+import { useUIStore } from '@/app/stores/ui.store';
 import * as mfaApi from '@n8n/rest-api-client/api/mfa';
 import * as cloudApi from '@n8n/rest-api-client/api/cloudPlans';
 import * as invitationsApi from './invitation.api';
 import { computed, ref } from 'vue';
-import { useSettingsStore } from '@/stores/settings.store';
-import * as onboardingApi from '@/api/workflow-webhooks';
-import * as promptsApi from '@n8n/rest-api-client/api/prompts';
+import { useSettingsStore } from '@/app/stores/settings.store';
+import * as onboardingApi from '@/app/api/workflow-webhooks';
+import { hasPermission } from '@/app/utils/rbac/permissions';
 
 const _isPendingUser = (user: IUserResponse | null) => !!user?.isPending;
 const _isInstanceOwner = (user: IUserResponse | null) => user?.role === ROLE.Owner;
@@ -38,8 +38,8 @@ const _isDefaultUser = (user: IUserResponse | null) =>
 	_isInstanceOwner(user) && _isPendingUser(user);
 const _isAdmin = (user: IUserResponse | null) => user?.role === ROLE.Admin;
 
-export type LoginHook = (user: CurrentUserResponse) => void;
-type LogoutHook = () => void;
+export type LoginHook = (user: CurrentUserResponse) => void | Promise<void>;
+type LogoutHook = () => void | Promise<void>;
 
 export const useUsersStore = defineStore(STORES.USERS, () => {
 	const initialized = ref(false);
@@ -147,13 +147,13 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 		});
 	};
 
-	const setCurrentUser = (user: CurrentUserResponse) => {
+	const setCurrentUser = async (user: CurrentUserResponse) => {
 		addUsers([user]);
 		currentUserId.value = user.id;
 
 		for (const hook of loginHooks.value) {
 			try {
-				hook(user);
+				await hook(user);
 			} catch (error) {
 				console.error('Error executing login hook:', error);
 			}
@@ -166,16 +166,12 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 			return;
 		}
 
-		setCurrentUser(user);
+		await setCurrentUser(user);
 	};
 
-	const initialize = async (options: { quota?: number } = {}) => {
+	const initialize = async () => {
 		if (initialized.value) {
 			return;
-		}
-
-		if (typeof options.quota !== 'undefined') {
-			userQuota.value = options.quota;
 		}
 
 		try {
@@ -213,7 +209,7 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 			return;
 		}
 
-		setCurrentUser(user);
+		await setCurrentUser(user);
 	};
 
 	const registerLoginHook = (hook: LoginHook) => {
@@ -231,7 +227,7 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 
 		for (const hook of logoutHooks.value) {
 			try {
-				hook();
+				await hook();
 			} catch (error) {
 				console.error('Error executing logout hook:', error);
 			}
@@ -248,25 +244,28 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 	}) => {
 		const user = await usersApi.setupOwner(rootStore.restApiContext, params);
 		if (user) {
-			setCurrentUser(user);
+			await setCurrentUser(user);
 			settingsStore.stopShowingSetupPage();
 		}
 	};
 
-	const validateSignupToken = async (params: { inviteeId: string; inviterId: string }) => {
+	const validateSignupToken = async (
+		params: { token?: string } | { inviteeId?: string; inviterId?: string },
+	) => {
 		return await usersApi.validateSignupToken(rootStore.restApiContext, params);
 	};
 
 	const acceptInvitation = async (params: {
-		inviteeId: string;
-		inviterId: string;
+		token?: string;
+		inviteeId?: string;
+		inviterId?: string;
 		firstName: string;
 		lastName: string;
 		password: string;
 	}) => {
 		const user = await invitationsApi.acceptInvitation(rootStore.restApiContext, params);
 		if (user) {
-			setCurrentUser(user);
+			await setCurrentUser(user);
 		}
 	};
 
@@ -323,8 +322,20 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 		deleteUserById(params.id);
 	};
 
-	const fetchUsers = async () => {
-		const { items } = await usersApi.getUsers(rootStore.restApiContext, { take: -1, skip: 0 });
+	const fetchUsers = async ({
+		take,
+		skip,
+		filter,
+	}: { take?: number; skip?: number; filter?: UsersListFilterDto['filter'] } = {}) => {
+		if (!hasPermission(['rbac'], { rbac: { scope: 'user:list' } })) {
+			return;
+		}
+
+		const { items } = await usersApi.getUsers(rootStore.restApiContext, {
+			take: take ?? 50,
+			skip: skip ?? 0,
+			filter,
+		});
 		addUsers(items);
 	};
 
@@ -350,6 +361,10 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 
 	const getUserPasswordResetLink = async (params: { id: string }) => {
 		return await usersApi.getPasswordResetLink(rootStore.restApiContext, params);
+	};
+
+	const generateInviteLink = async (params: { id: string }) => {
+		return await usersApi.generateInviteLink(rootStore.restApiContext, params);
 	};
 
 	const submitPersonalizationSurvey = async (results: IPersonalizationLatestVersion) => {
@@ -400,7 +415,7 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 
 	const updateGlobalRole = async ({ id, newRoleName }: UpdateGlobalRolePayload) => {
 		await usersApi.updateGlobalRole(rootStore.restApiContext, { id, newRoleName });
-		await fetchUsers();
+		await fetchUsers({ filter: { ids: [id] } });
 	};
 
 	const submitContactEmail = async (email: string, agree: boolean) => {
@@ -415,18 +430,6 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 		return null;
 	};
 
-	const submitContactInfo = async (email: string) => {
-		try {
-			return await promptsApi.submitContactInfo(
-				rootStore.instanceId,
-				currentUserId.value ?? '',
-				email,
-			);
-		} catch (error) {
-			return;
-		}
-	};
-
 	const usersList = useAsyncState(
 		async (filter?: UsersListFilterDto) =>
 			await usersApi.getUsers(rootStore.restApiContext, filter),
@@ -436,6 +439,12 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 		},
 		{ immediate: false, resetOnExecute: false },
 	);
+
+	const setUserQuota = (quota?: number) => {
+		if (typeof quota !== 'undefined') {
+			userQuota.value = quota;
+		}
+	};
 
 	return {
 		initialized,
@@ -478,6 +487,7 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 		inviteUsers,
 		reinviteUser,
 		getUserPasswordResetLink,
+		generateInviteLink,
 		submitPersonalizationSurvey,
 		showPersonalizationSurvey,
 		fetchMfaQR,
@@ -492,7 +502,7 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 		isCalloutDismissed,
 		setCalloutDismissed,
 		submitContactEmail,
-		submitContactInfo,
+		setUserQuota,
 		usersList,
 	};
 });

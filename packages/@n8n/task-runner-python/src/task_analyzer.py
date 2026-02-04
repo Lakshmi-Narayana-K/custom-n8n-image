@@ -1,5 +1,6 @@
 import ast
 import hashlib
+import re
 from collections import OrderedDict
 
 from src.errors import SecurityViolationError
@@ -8,14 +9,21 @@ from src.config.security_config import SecurityConfig
 from src.constants import (
     MAX_VALIDATION_CACHE_SIZE,
     ERROR_RELATIVE_IMPORT,
+    ERROR_DANGEROUS_NAME,
     ERROR_DANGEROUS_ATTRIBUTE,
+    ERROR_NAME_MANGLED_ATTRIBUTE,
     ERROR_DYNAMIC_IMPORT,
+    ERROR_DANGEROUS_STRING_PATTERN,
+    ERROR_MATCH_PATTERN_ATTRIBUTE,
     BLOCKED_ATTRIBUTES,
+    BLOCKED_NAMES,
 )
 
 CacheKey = tuple[str, tuple]  # (code_hash, allowlists_tuple)
 CachedViolations = list[str]
 ValidationCache = OrderedDict[CacheKey, CachedViolations]
+
+FORMAT_FIELD_PATTERN = re.compile(r"\{([^}]*)\}")
 
 
 class SecurityValidator(ast.NodeVisitor):
@@ -46,6 +54,12 @@ class SecurityValidator(ast.NodeVisitor):
 
         self.generic_visit(node)
 
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id in BLOCKED_NAMES:
+            self._add_violation(node.lineno, ERROR_DANGEROUS_NAME.format(name=node.id))
+
+        self.generic_visit(node)
+
     def visit_Attribute(self, node: ast.Attribute) -> None:
         """Detect access to unsafe attributes that could bypass security restrictions."""
 
@@ -53,6 +67,11 @@ class SecurityValidator(ast.NodeVisitor):
             self._add_violation(
                 node.lineno, ERROR_DANGEROUS_ATTRIBUTE.format(attr=node.attr)
             )
+
+        if node.attr.startswith("_") and "__" in node.attr:
+            parts = node.attr.split("__", 1)
+            if len(parts) == 2 and parts[0].startswith("_"):
+                self._add_violation(node.lineno, ERROR_NAME_MANGLED_ATTRIBUTE)
 
         self.generic_visit(node)
 
@@ -114,6 +133,50 @@ class SecurityValidator(ast.NodeVisitor):
 
         self.generic_visit(node)
 
+    def visit_Constant(self, node: ast.Constant) -> None:
+        """Detect string constants containing dangerous format patterns."""
+
+        if isinstance(node.value, str):
+            self._check_format_string(node.value, node.lineno)
+
+        self.generic_visit(node)
+
+    def visit_MatchClass(self, node: ast.MatchClass) -> None:
+        """Detect match patterns that extract blocked attributes, e.g. `case AttributeError(obj=x)`"""
+
+        for attr in node.kwd_attrs:
+            if attr in BLOCKED_ATTRIBUTES:
+                self._add_violation(
+                    node.lineno, ERROR_MATCH_PATTERN_ATTRIBUTE.format(attr=attr)
+                )
+
+        self.generic_visit(node)
+
+    def _check_format_string(self, s: str, lineno: int) -> None:
+        """Check if a string contains format patterns that access blocked attributes."""
+
+        # escaped braces produce literal braces, not format fields
+        s = s.replace("{{", "").replace("}}", "")
+
+        for match in FORMAT_FIELD_PATTERN.finditer(s):
+            field = match.group(1)
+
+            # attribute access
+            for attr_match in re.finditer(r"\.(\w+)", field):
+                attr = attr_match.group(1)
+                if attr in BLOCKED_ATTRIBUTES or attr in BLOCKED_NAMES:
+                    self._add_violation(
+                        lineno, ERROR_DANGEROUS_STRING_PATTERN.format(attr=attr)
+                    )
+
+            # subscript access
+            for subscript_match in re.finditer(r"\[(['\"]?)(\w+)\1\]", field):
+                key = subscript_match.group(2)
+                if key in BLOCKED_ATTRIBUTES or key in BLOCKED_NAMES:
+                    self._add_violation(
+                        lineno, ERROR_DANGEROUS_STRING_PATTERN.format(attr=key)
+                    )
+
     # ========== Validation ==========
 
     def _validate_import(self, module_path: str, lineno: int) -> None:
@@ -135,6 +198,7 @@ class SecurityValidator(ast.NodeVisitor):
         )
 
         if not is_allowed:
+            assert error_msg is not None
             self._add_violation(lineno, error_msg)
 
     def _add_violation(self, lineno: int, message: str) -> None:
@@ -161,9 +225,8 @@ class TaskAnalyzer:
 
         cache_key = self._to_cache_key(code)
         cached_violations = self._cache.get(cache_key)
-        cache_hit = cached_violations is not None
 
-        if cache_hit:
+        if cached_violations is not None:
             self._cache.move_to_end(cache_key)
 
             if len(cached_violations) == 0:
