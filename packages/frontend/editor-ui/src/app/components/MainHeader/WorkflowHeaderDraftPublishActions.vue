@@ -4,12 +4,9 @@ import WorkflowHistoryButton from '@/features/workflows/workflowHistory/componen
 import type { FolderShortInfo } from '@/features/core/folders/folders.types';
 import type { IWorkflowDb } from '@/Interface';
 import type { PermissionsRecord } from '@n8n/permissions';
-import { computed, useTemplateRef } from 'vue';
-import { WORKFLOW_PUBLISH_MODAL_KEY } from '@/app/constants';
-import { N8nBadge, N8nButton, N8nIcon, N8nTooltip } from '@n8n/design-system';
 import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef } from 'vue';
 import { WORKFLOW_PUBLISH_MODAL_KEY, AutoSaveState } from '@/app/constants';
-import { N8nButton, N8nTooltip } from '@n8n/design-system';
+import { N8nBadge, N8nButton, N8nIcon, N8nTooltip } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
 import { useUIStore } from '@/app/stores/ui.store';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
@@ -45,7 +42,6 @@ const workflowsStore = useWorkflowsStore();
 const collaborationStore = useCollaborationStore();
 const i18n = useI18n();
 const router = useRouter();
-const { saveCurrentWorkflow } = useWorkflowSaving({ router });
 const { check: checkEnvFeatureFlag } = useEnvFeatureFlag();
 
 const autosaveStore = useWorkflowAutosaveStore();

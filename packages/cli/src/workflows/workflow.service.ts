@@ -27,17 +27,13 @@ import type { QueryDeepPartialEntity } from '@n8n/typeorm/query-builder/QueryPar
 import isEqual from 'lodash/isEqual';
 import pick from 'lodash/pick';
 import { FileLocation, BinaryDataService } from 'n8n-core';
-import type { INode, 
-	INodes, 
-	IWorkflowSettings, 
-	JsonValue, 
-	NodeApiError,
+import type { IDataObject, INode, INodes, IWorkflowSettings, JsonValue } from 'n8n-workflow';
+import {
 	PROJECT_ROOT,
 	Workflow,
-	assert, type IDataObject,
-	calculateWorkflowChecksum,} from 'n8n-workflow';
-import {
-	
+	assert,
+	calculateWorkflowChecksum,
+	NodeApiError,
 } from 'n8n-workflow';
 import { v4 as uuid } from 'uuid';
 

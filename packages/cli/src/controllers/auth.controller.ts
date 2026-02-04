@@ -49,7 +49,7 @@ export class AuthController {
 	) {}
 
 	/** Log in a user */
-	@Post('/login', { skipAuth: true, rateLimit: { limit: 1_000, windowMs: 60_000 } })
+	@Post('/login', { skipAuth: true, ipRateLimit: { limit: 1_000, windowMs: 60_000 } })
 	async login(
 		req: AuthlessRequest,
 		res: Response,
