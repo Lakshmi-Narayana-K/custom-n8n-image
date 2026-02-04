@@ -81,11 +81,14 @@ exports[`AskAssistantChat > limits maximum input length when maxCharacterLength 
         
       </div>
     </div>
+    <!--v-if-->
+    <!--v-if-->
     <div
       class="inputWrapper"
       data-test-id="chat-input-wrapper"
     >
       <n8n-prompt-input-stub
+        autofocus="true"
         data-test-id="chat-input"
         disabled="false"
         maxlength="100"
@@ -318,6 +321,7 @@ exports[`AskAssistantChat > renders chat with messages correctly 1`] = `
                   
                   
                 </div>
+                <!-- Placeholder thinking message when there are no tools yet called -->
                 <!--v-if-->
               </div>
               
@@ -335,11 +339,14 @@ exports[`AskAssistantChat > renders chat with messages correctly 1`] = `
         </div>
       </div>
     </div>
+    <!--v-if-->
+    <!--v-if-->
     <div
       class="inputWrapper"
       data-test-id="chat-input-wrapper"
     >
       <n8n-prompt-input-stub
+        autofocus="true"
         data-test-id="chat-input"
         disabled="false"
         maxlength="5000"
@@ -437,11 +444,14 @@ exports[`AskAssistantChat > renders default placeholder chat correctly 1`] = `
         
       </div>
     </div>
+    <!--v-if-->
+    <!--v-if-->
     <div
       class="inputWrapper"
       data-test-id="chat-input-wrapper"
     >
       <n8n-prompt-input-stub
+        autofocus="true"
         data-test-id="chat-input"
         disabled="false"
         maxlength="5000"
@@ -573,6 +583,7 @@ exports[`AskAssistantChat > renders end of session chat correctly 1`] = `
                   
                   
                 </div>
+                <!-- Placeholder thinking message when there are no tools yet called -->
                 <!--v-if-->
               </div>
               
@@ -590,11 +601,14 @@ exports[`AskAssistantChat > renders end of session chat correctly 1`] = `
         </div>
       </div>
     </div>
+    <!--v-if-->
+    <!--v-if-->
     <div
       class="inputWrapper disabledInput"
       data-test-id="chat-input-wrapper"
     >
       <n8n-prompt-input-stub
+        autofocus="true"
         data-test-id="chat-input"
         disabled="true"
         maxlength="5000"
@@ -707,6 +721,7 @@ exports[`AskAssistantChat > renders error message correctly with retry button 1`
                   
                   
                 </div>
+                <!-- Placeholder thinking message when there are no tools yet called -->
                 <!--v-if-->
               </div>
               
@@ -724,11 +739,14 @@ exports[`AskAssistantChat > renders error message correctly with retry button 1`
         </div>
       </div>
     </div>
+    <!--v-if-->
+    <!--v-if-->
     <div
       class="inputWrapper"
       data-test-id="chat-input-wrapper"
     >
       <n8n-prompt-input-stub
+        autofocus="true"
         data-test-id="chat-input"
         disabled="false"
         maxlength="5000"
@@ -841,6 +859,7 @@ exports[`AskAssistantChat > renders message with code snippet 1`] = `
                   
                   
                 </div>
+                <!-- Placeholder thinking message when there are no tools yet called -->
                 <!--v-if-->
               </div>
               
@@ -858,11 +877,14 @@ exports[`AskAssistantChat > renders message with code snippet 1`] = `
         </div>
       </div>
     </div>
+    <!--v-if-->
+    <!--v-if-->
     <div
       class="inputWrapper"
       data-test-id="chat-input-wrapper"
     >
       <n8n-prompt-input-stub
+        autofocus="true"
         data-test-id="chat-input"
         disabled="false"
         maxlength="5000"
@@ -975,6 +997,7 @@ exports[`AskAssistantChat > renders streaming chat correctly 1`] = `
                   
                   
                 </div>
+                <!-- Placeholder thinking message when there are no tools yet called -->
                 <!--v-if-->
               </div>
               
@@ -992,11 +1015,14 @@ exports[`AskAssistantChat > renders streaming chat correctly 1`] = `
         </div>
       </div>
     </div>
+    <!--v-if-->
+    <!--v-if-->
     <div
       class="inputWrapper"
       data-test-id="chat-input-wrapper"
     >
       <n8n-prompt-input-stub
+        autofocus="true"
         data-test-id="chat-input"
         disabled="false"
         maxlength="5000"

@@ -92,6 +92,7 @@ const limitReachedTooltip = computed(() =>
 		},
 	}),
 );
+const publishing = ref(false);
 
 const handlePublish = async () => {
 	if (isWorkflowPublishDisabled.value || isPublishLimitReached.value) {
@@ -101,8 +102,8 @@ const handlePublish = async () => {
 		return;
 	}
 
-	isPublishDisabled.value = true;
-	const success = await workflowActivate.publishWorkflow(
+	publishing.value = true;
+	const { success } = await workflowActivate.publishWorkflow(
 		props.data.workflowId,
 		props.data.versionId,
 		{
@@ -111,7 +112,7 @@ const handlePublish = async () => {
 		},
 	);
 
-	isPublishDisabled.value = false;
+	publishing.value = false;
 
 	if (success) {
 		props.data.eventBus.emit('publish', {
@@ -147,6 +148,7 @@ const handlePublish = async () => {
 				/>
 				<div :class="$style.actions">
 					<N8nButton
+						:disabled="publishing"
 						type="secondary"
 						:label="i18n.baseText('generic.cancel')"
 						data-test-id="workflow-history-publish-cancel-button"
@@ -175,6 +177,13 @@ const handlePublish = async () => {
 							/>
 						</div>
 					</N8nTooltip>
+					<N8nButton
+						:loading="publishing"
+						:disabled="versionName.trim().length === 0"
+						:label="i18n.baseText('workflows.publish')"
+						data-test-id="workflow-history-publish-button"
+						@click="handlePublish"
+					/>
 				</div>
 			</div>
 		</template>

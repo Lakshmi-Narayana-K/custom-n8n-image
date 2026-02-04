@@ -9,8 +9,12 @@ import { useBugReporting } from '@/app/composables/useBugReporting';
 import type { CommandGroup, CommandBarItem } from '../types';
 import { useUsersStore } from '@/features/settings/users/users.store';
 import { ROLE } from '@n8n/api-types';
+import { useSettingsStore } from '@/app/stores/settings.store';
+import { useProjectsStore } from '@/features/collaboration/projects/projects.store';
+import { useTemplatesStore } from '@/features/workflows/templates/templates.store';
 
 const ITEM_ID = {
+	CHAT_HUB: 'chat-hub',
 	WHATS_NEW: 'whats-new',
 	SETTINGS: 'settings',
 	SIGN_OUT: 'sign-out',
@@ -29,6 +33,9 @@ export function useGenericCommands(): CommandGroup {
 	const i18n = useI18n();
 	const uiStore = useUIStore();
 	const router = useRouter();
+	const settingsStore = useSettingsStore();
+	const projectsStore = useProjectsStore();
+	const templatesStore = useTemplatesStore();
 	const { getReportingURL } = useBugReporting();
 	const usersStore = useUsersStore();
 

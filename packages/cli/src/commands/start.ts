@@ -36,18 +36,13 @@ import { BaseCommand } from './base-command';
 import { CredentialsOverwrites } from '@/credentials-overwrites';
 import { DeprecationService } from '@/deprecation/deprecation.service';
 import { LoadNodesAndCredentials } from '@/load-nodes-and-credentials';
+import { WorkflowHistoryCompactionService } from '@/services/pruning/workflow-history-compaction.service';
 
 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const open = require('open');
 
 const flagsSchema = z.object({
 	open: z.boolean().alias('o').describe('opens the UI automatically in browser').optional(),
-	tunnel: z
-		.boolean()
-		.describe(
-			'runs the webhooks via a hooks.n8n.cloud tunnel server. Use only for testing and development!',
-		)
-		.optional(),
 });
 
 @Command({
@@ -254,6 +249,10 @@ export class Start extends BaseCommand<z.infer<typeof flagsSchema>> {
 
 		await this.moduleRegistry.initModules(this.instanceSettings.instanceType);
 
+		// Initialize auth handler registry after modules are loaded
+		const { AuthHandlerRegistry } = await import('@/auth/auth-handler.registry');
+		await Container.get(AuthHandlerRegistry).init();
+
 		if (this.instanceSettings.isMultiMain) {
 			// we instantiate `PrometheusMetricsService` early to register its multi-main event handlers
 			if (this.globalConfig.endpoints.metrics.enable) {
@@ -274,8 +273,26 @@ export class Start extends BaseCommand<z.infer<typeof flagsSchema>> {
 		Container.get(PubSubRegistry).init();
 
 		const subscriber = Container.get(Subscriber);
-		await subscriber.subscribe('n8n.commands');
-		await subscriber.subscribe('n8n.worker-response');
+		await subscriber.subscribe(subscriber.getCommandChannel());
+		await subscriber.subscribe(subscriber.getWorkerResponseChannel());
+		await subscriber.subscribe(subscriber.getMcpRelayChannel());
+
+		// Set up MCP relay handler for multi-main queue mode
+		subscriber.setMcpRelayHandler(async (msg) => {
+			try {
+				const { McpServerManager } = await import(
+					'@n8n/n8n-nodes-langchain/dist/nodes/mcp/McpTrigger/McpServer'
+				);
+				const mcpServerManager = McpServerManager.instance(this.logger);
+				mcpServerManager.handleWorkerResponse(msg.sessionId, msg.messageId, msg.response);
+			} catch (error) {
+				this.logger.error('Failed to handle MCP relay message', {
+					sessionId: msg.sessionId,
+					messageId: msg.messageId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		});
 
 		if (this.instanceSettings.isMultiMain) {
 			await Container.get(MultiMainSetup).init();
@@ -303,18 +320,10 @@ export class Start extends BaseCommand<z.infer<typeof flagsSchema>> {
 			}
 		}
 
-		if (this.globalConfig.database.isLegacySqlite) {
-			// Employ lazy loading to avoid unnecessary imports in the CLI
-			// and to ensure that the legacy recovery service is only used when needed.
-			const { LegacySqliteExecutionRecoveryService } = await import(
-				'@/executions/legacy-sqlite-execution-recovery.service'
-			);
-			await Container.get(LegacySqliteExecutionRecoveryService).cleanupWorkflowExecutions();
-		}
-
 		await this.server.start();
 
 		Container.get(ExecutionsPruningService).init();
+		Container.get(WorkflowHistoryCompactionService).init();
 
 		if (this.globalConfig.executions.mode === 'regular') {
 			await this.runEnqueuedExecutions();
@@ -322,6 +331,8 @@ export class Start extends BaseCommand<z.infer<typeof flagsSchema>> {
 
 		// Start to get active workflows and run their triggers
 		await this.activeWorkflowManager.init();
+
+		Container.get(LoadNodesAndCredentials).releaseTypes();
 
 		const editorUrl = this.getEditorUrl();
 
