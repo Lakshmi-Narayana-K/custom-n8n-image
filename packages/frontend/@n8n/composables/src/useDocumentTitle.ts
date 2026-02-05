@@ -26,11 +26,8 @@ export interface UseDocumentTitleOptions {
 }
 
 export function useDocumentTitle(options: UseDocumentTitleOptions = {}) {
-	const { releaseChannel, windowRef } = options;
-	const suffix =
-		!releaseChannel || releaseChannel === 'stable'
-			? DEFAULT_TITLE
-			: `${DEFAULT_TITLE}[${releaseChannel.toUpperCase()}]`;
+	const { windowRef } = options;
+	const suffix = DEFAULT_TITLE;
 
 	const currentState = ref<WorkflowTitleStatus | undefined>(undefined);
 
