@@ -13,6 +13,8 @@ import { useTemplatesStore } from '@/features/workflows/templates/templates.stor
 import { useUIStore } from '@/app/stores/ui.store';
 import { useVersionsStore } from '@/app/stores/versions.store';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import { useUsersStore } from '@/features/settings/users/users.store';
+import { ROLE } from '@n8n/api-types';
 import { useTelemetry } from '@/app/composables/useTelemetry';
 import { useBugReporting } from '@/app/composables/useBugReporting';
 import { usePageRedirectionHelper } from '@/app/composables/usePageRedirectionHelper';
@@ -36,6 +38,7 @@ const uiStore = useUIStore();
 const versionsStore = useVersionsStore();
 const workflowsStore = useWorkflowsStore();
 const resourceCenterStore = useResourceCenterStore();
+const usersStore = useUsersStore();
 
 const i18n = useI18n();
 const router = useRouter();
@@ -76,6 +79,13 @@ const resourceCenterLabel = computed(() => {
 	return i18n.baseText('experiments.resourceCenter.sidebar');
 });
 
+const isMember = computed(() => {
+	const user = usersStore.currentUser;
+	if (!user) return false;
+	const userRole = user.isDefaultUser ? ROLE.Default : user.role;
+	return userRole === ROLE.Member;
+});
+
 const mainMenuItems = computed<IMenuItem[]>(() => [
 	{
 		id: 'cloud-admin',
@@ -102,7 +112,8 @@ const mainMenuItems = computed<IMenuItem[]>(() => [
 		available:
 			settingsStore.isTemplatesEnabled &&
 			templatesStore.hasCustomTemplatesHost &&
-			!isResourceCenterEnabled.value,
+			!isResourceCenterEnabled.value &&
+			!isMember.value,
 		route: { to: { name: VIEWS.TEMPLATES } },
 	},
 	{
@@ -114,7 +125,8 @@ const mainMenuItems = computed<IMenuItem[]>(() => [
 		available:
 			settingsStore.isTemplatesEnabled &&
 			!templatesStore.hasCustomTemplatesHost &&
-			!isResourceCenterEnabled.value,
+			!isResourceCenterEnabled.value &&
+			!isMember.value,
 		link: {
 			href: templatesStore.websiteTemplateRepositoryURL,
 			target: '_blank',
@@ -194,7 +206,7 @@ const mainMenuItems = computed<IMenuItem[]>(() => [
 		id: 'settings',
 		label: i18n.baseText('mainSidebar.settings'),
 		icon: 'settings',
-		available: true,
+		available: !isMember.value,
 		children: settingsItems.value,
 	},
 ]);

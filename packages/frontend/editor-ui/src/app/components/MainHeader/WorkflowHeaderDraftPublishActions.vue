@@ -374,7 +374,7 @@ defineExpose({
 						@click="onPublishButtonClick"
 					>
 						<span :class="$style.publishButtonLabel">
-							{{ locale.baseText('workflows.publish') }}
+							{{ i18n.baseText('workflows.publish') }}
 						</span>
 						<span v-if="maxPublishCount" :class="$style.publishCountPill">
 							{{ publishCount }}/{{ maxPublishCount }}
@@ -395,7 +395,7 @@ defineExpose({
 				</N8nBadge>
 			</N8nTooltip>
 			<span
-				v-if="showPublishIndicator && !isPublishingBlocked"
+				v-if="publishButtonConfig.showIndicator && !isPublishingBlocked"
 				:class="$style.publishButtonIndicator"
 				data-test-id="workflow-publish-indicator"
 			></span>

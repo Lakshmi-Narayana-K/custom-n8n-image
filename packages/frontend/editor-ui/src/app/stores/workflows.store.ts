@@ -1598,9 +1598,9 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 			data as unknown as IDataObject,
 		);
 
-		if (workflowsById.value[id]) {
-			workflowsById.value[id] = {
-				...workflowsById.value[id],
+		if (workflowsListStore.workflowsById[id]) {
+			workflowsListStore.workflowsById[id] = {
+				...workflowsListStore.workflowsById[id],
 				active: updatedWorkflow.active,
 				activeVersionId: updatedWorkflow.activeVersionId,
 				activeVersion: updatedWorkflow.activeVersion,

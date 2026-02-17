@@ -13,6 +13,7 @@ import { CHAT_VIEW } from '@/features/ai/chatHub/constants';
 
 import { N8nMenuItem, N8nText } from '@n8n/design-system';
 import { hasPermission } from '@/app/utils/rbac/permissions';
+import { ROLE } from '@n8n/api-types';
 
 type Props = {
 	collapsed: boolean;
@@ -30,11 +31,18 @@ const usersStore = useUsersStore();
 
 const displayProjects = computed(() => globalEntityCreation.displayProjects.value);
 const isFoldersFeatureEnabled = computed(() => settingsStore.isFoldersFeatureEnabled);
-const isChatLinkAvailable = computed(
-	() =>
+const isChatLinkAvailable = computed(() => {
+	const user = usersStore.currentUser;
+	if (!user) return false;
+	const userRole = user.isDefaultUser ? ROLE.Default : user.role;
+	const isMember = userRole === ROLE.Member;
+
+	return (
+		!isMember &&
 		settingsStore.isChatFeatureEnabled &&
-		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } }),
-);
+		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } })
+	);
+});
 const hasMultipleVerifiedUsers = computed(
 	() => usersStore.allUsers.filter((user) => !user.isPendingUser).length > 1,
 );

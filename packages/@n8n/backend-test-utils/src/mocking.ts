@@ -7,6 +7,6 @@ export const mockInstance = <T>(
 	data: DeepPartial<T> | undefined = undefined,
 ) => {
 	const instance = mock<T>(data);
-	Container.set(serviceClass, instance);
+	Container.set(serviceClass, instance as T);
 	return instance;
 };

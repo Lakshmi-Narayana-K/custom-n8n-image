@@ -20,10 +20,10 @@ describe('useDocumentTitle', () => {
 		expect(document.title).toBe('Workflow Automation - n8n');
 	});
 
-	it('should use the correct suffix for the release channel', () => {
+	it('should always use default suffix regardless of release channel', () => {
 		const { set } = useDocumentTitle({ releaseChannel: 'beta' });
 		set('Test Title');
-		expect(document.title).toBe('Test Title - n8n[BETA]');
+		expect(document.title).toBe('Test Title - n8n');
 	});
 
 	it('should use default suffix for stable release channel', () => {
