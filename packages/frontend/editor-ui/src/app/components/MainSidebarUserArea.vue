@@ -6,7 +6,7 @@ import {
 	N8nAvatar,
 	N8nIconButton,
 	N8nMenuItem,
-	N8nPopoverReka,
+	N8nPopover,
 	N8nText,
 } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';

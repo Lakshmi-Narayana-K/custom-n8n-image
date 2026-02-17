@@ -2,6 +2,8 @@
 
 exports[`Scope Information ensure scopes are defined correctly 1`] = `
 [
+  "aiAssistant:manage",
+  "aiAssistant:*",
   "annotationTag:create",
   "annotationTag:read",
   "annotationTag:update",
@@ -37,7 +39,6 @@ exports[`Scope Information ensure scopes are defined correctly 1`] = `
   "externalSecretsProvider:list",
   "externalSecretsProvider:*",
   "externalSecret:list",
-  "externalSecret:use",
   "externalSecret:*",
   "eventBusDestination:test",
   "eventBusDestination:create",
@@ -79,6 +80,7 @@ exports[`Scope Information ensure scopes are defined correctly 1`] = `
   "user:resetPassword",
   "user:changeRole",
   "user:enforceMfa",
+  "user:generateInviteLink",
   "user:create",
   "user:read",
   "user:update",
@@ -105,6 +107,7 @@ exports[`Scope Information ensure scopes are defined correctly 1`] = `
   "workflow:move",
   "workflow:activate",
   "workflow:deactivate",
+  "workflow:publish",
   "workflow:create",
   "workflow:read",
   "workflow:update",

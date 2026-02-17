@@ -18,6 +18,7 @@ export {
 	type ChatHubN8nModel,
 	type ChatHubCustomAgentModel,
 	type ChatHubConversationModel,
+	type ChatHubModuleSettings,
 	chatHubProviderSchema,
 	chatHubLLMProviderSchema,
 	type ChatHubProvider,
@@ -46,11 +47,32 @@ export {
 	type ChatHubAgentDto,
 	ChatHubCreateAgentRequest,
 	ChatHubUpdateAgentRequest,
-	type EnrichedStructuredChunk,
+	type AgentIconOrEmoji,
+	agentIconOrEmojiSchema,
+	type MessageChunk,
 	type ChatHubAgentTool,
 	UpdateChatSettingsRequest,
 	type ChatProviderSettingsDto,
+	type ChatSendMessageResponse,
+	type ChatReconnectResponse,
+	ChatReconnectRequest,
 } from './chat-hub';
+
+export type {
+	ChatHubPushMessage,
+	ChatHubStreamEvent,
+	ChatHubStreamBegin,
+	ChatHubStreamChunk,
+	ChatHubStreamEnd,
+	ChatHubStreamError,
+	ChatHubStreamMetadata,
+	ChatHubExecutionEvent,
+	ChatHubExecutionBegin,
+	ChatHubExecutionEnd,
+	ChatHubHumanMessageCreated,
+	ChatHubMessageEdited,
+	ChatHubAttachmentInfo,
+} from './push/chat-hub';
 
 export type { Collaborator } from './push/collaboration';
 export type { HeartbeatMessage } from './push/heartbeat';
@@ -68,6 +90,10 @@ export {
 	type CredentialResolver,
 	type CredentialResolverType,
 } from './schemas/credential-resolver.schema';
+export {
+	WORKFLOW_VERSION_NAME_MAX_LENGTH,
+	WORKFLOW_VERSION_DESCRIPTION_MAX_LENGTH,
+} from './schemas/workflow-version.schema';
 
 export type {
 	ProjectType,
@@ -130,6 +156,11 @@ export type {
 	ExternalSecretsProviderState,
 } from './schemas/external-secrets.schema';
 
+export {
+	WorkflowExecutionStatusSchema,
+	type WorkflowExecutionStatus,
+} from './schemas/workflow-execution-status.schema';
+
 export type { UsageState } from './schemas/usage.schema';
 
 export type {
@@ -144,3 +175,13 @@ export type {
 	BreakingChangeLightReportResult,
 	BreakingChangeVersion,
 } from './schemas/breaking-changes.schema';
+
+export type {
+	SecretsProviderType,
+	SecretsProviderState,
+	SecretsProviderConnectionTestState,
+	SecretProviderConnection,
+	SecretProviderTypeResponse,
+	AutocompletionSecretsResponse,
+	TestSecretProviderConnectionResponse,
+} from './schemas/secrets-provider.schema';

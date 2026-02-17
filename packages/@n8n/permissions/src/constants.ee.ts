@@ -1,6 +1,7 @@
 export const DEFAULT_OPERATIONS = ['create', 'read', 'update', 'delete', 'list'] as const;
 
 export const RESOURCES = {
+	aiAssistant: ['manage'] as const,
 	annotationTag: [...DEFAULT_OPERATIONS] as const,
 	auditLogs: ['manage'] as const,
 	banner: ['dismiss'] as const,
@@ -8,7 +9,7 @@ export const RESOURCES = {
 	communityPackage: ['install', 'uninstall', 'update', 'list', 'manage'] as const,
 	credential: ['share', 'shareGlobally', 'move', ...DEFAULT_OPERATIONS] as const,
 	externalSecretsProvider: ['sync', ...DEFAULT_OPERATIONS] as const,
-	externalSecret: ['list', 'use'] as const,
+	externalSecret: ['list'] as const,
 	eventBusDestination: ['test', ...DEFAULT_OPERATIONS] as const,
 	ldap: ['sync', 'manage'] as const,
 	license: ['manage'] as const,
@@ -19,7 +20,13 @@ export const RESOURCES = {
 	securityAudit: ['generate'] as const,
 	sourceControl: ['pull', 'push', 'manage'] as const,
 	tag: [...DEFAULT_OPERATIONS] as const,
-	user: ['resetPassword', 'changeRole', 'enforceMfa', ...DEFAULT_OPERATIONS] as const,
+	user: [
+		'resetPassword',
+		'changeRole',
+		'enforceMfa',
+		'generateInviteLink',
+		...DEFAULT_OPERATIONS,
+	] as const,
 	variable: [...DEFAULT_OPERATIONS] as const,
 	projectVariable: [...DEFAULT_OPERATIONS] as const,
 	workersView: ['manage'] as const,
@@ -30,6 +37,7 @@ export const RESOURCES = {
 		'move',
 		'activate',
 		'deactivate',
+		'publish',
 		...DEFAULT_OPERATIONS,
 	] as const,
 	folder: [...DEFAULT_OPERATIONS, 'move'] as const,
@@ -57,9 +65,11 @@ export const API_KEY_RESOURCES = {
 	project: ['create', 'update', 'delete', 'list'] as const,
 	user: ['read', 'list', 'create', 'changeRole', 'delete', 'enforceMfa'] as const,
 	execution: ['delete', 'read', 'retry', 'list', 'get'] as const,
-	credential: ['create', 'move', 'delete'] as const,
+	credential: ['create', 'update', 'move', 'delete'] as const,
 	sourceControl: ['pull'] as const,
 	workflowTags: ['update', 'list'] as const,
+	dataTable: ['create', 'read', 'update', 'delete', 'list'] as const,
+	dataTableRow: ['create', 'read', 'update', 'delete', 'upsert'] as const,
 } as const;
 
 export const PROJECT_OWNER_ROLE_SLUG = 'project:personalOwner';

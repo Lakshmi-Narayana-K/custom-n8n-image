@@ -1,6 +1,7 @@
 import type { Scope } from '../../types.ee';
 
 export const GLOBAL_OWNER_SCOPES: Scope[] = [
+	'aiAssistant:manage',
 	'annotationTag:create',
 	'annotationTag:read',
 	'annotationTag:update',
@@ -34,7 +35,6 @@ export const GLOBAL_OWNER_SCOPES: Scope[] = [
 	'externalSecretsProvider:list',
 	'externalSecretsProvider:sync',
 	'externalSecret:list',
-	'externalSecret:use',
 	'ldap:manage',
 	'ldap:sync',
 	'license:manage',
@@ -56,6 +56,7 @@ export const GLOBAL_OWNER_SCOPES: Scope[] = [
 	'user:delete',
 	'user:list',
 	'user:resetPassword',
+	'user:generateInviteLink',
 	'user:changeRole',
 	'user:enforceMfa',
 	'variable:create',
@@ -71,6 +72,7 @@ export const GLOBAL_OWNER_SCOPES: Scope[] = [
 	'workflow:create',
 	'workflow:read',
 	'workflow:update',
+	'workflow:publish',
 	'workflow:delete',
 	'workflow:list',
 	'workflow:share',
