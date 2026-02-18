@@ -26,6 +26,8 @@ import {
 	CHAT_VIEW,
 	CHAT_WORKFLOW_AGENTS_VIEW,
 } from '@/features/ai/chatHub/constants';
+import { useUsersStore } from '@/features/settings/users/users.store';
+import { ROLE } from '@n8n/api-types';
 
 export function useCommandBar() {
 	const nodeTypesStore = useNodeTypesStore();
@@ -35,11 +37,19 @@ export function useCommandBar() {
 	const route = useRoute();
 	const i18n = useI18n();
 	const telemetry = useTelemetry();
+	const usersStore = useUsersStore();
 
 	const placeholder = i18n.baseText('commandBar.placeholder');
 
 	const activeNodeId = ref<string | null>(null);
 	const lastQuery = ref('');
+
+	const isMember = computed(() => {
+		const user = usersStore.currentUser;
+		if (!user) return false;
+		const userRole = user.isDefaultUser ? ROLE.Default : user.role;
+		return userRole === ROLE.Member;
+	});
 
 	const currentProjectName = computed(() => {
 		const projectId = route.params.projectId || projectsStore.currentProjectId;
@@ -173,37 +183,56 @@ export function useCommandBar() {
 	];
 
 	const activeCommandGroups = computed<CommandGroup[]>(() => {
+		let groups: CommandGroup[] = [];
+
 		switch (router.currentRoute.value.name) {
 			case VIEWS.WORKFLOW:
 			case VIEWS.NEW_WORKFLOW:
-				return canvasViewGroups;
+				groups = canvasViewGroups;
+				break;
 			case VIEWS.EXECUTION_PREVIEW:
 			case VIEWS.EXECUTION_DEBUG:
-				return executionViewGroups;
+				groups = executionViewGroups;
+				break;
 			case VIEWS.WORKFLOWS:
 			case VIEWS.PROJECTS_WORKFLOWS:
-				return workflowsListViewGroups;
+				groups = workflowsListViewGroups;
+				break;
 			case VIEWS.CREDENTIALS:
 			case VIEWS.PROJECTS_CREDENTIALS:
-				return credentialsListViewGroups;
+				groups = credentialsListViewGroups;
+				break;
 			case VIEWS.EXECUTIONS:
 			case VIEWS.PROJECTS_EXECUTIONS:
-				return executionsListViewGroups;
+				groups = executionsListViewGroups;
+				break;
 			case PROJECT_DATA_TABLES:
 			case DATA_TABLE_VIEW:
-				return dataStoresListViewGroups;
+				groups = dataStoresListViewGroups;
+				break;
 			case VIEWS.EVALUATION:
 			case VIEWS.EVALUATION_EDIT:
 			case VIEWS.EVALUATION_RUNS_DETAIL:
-				return evaluationViewGroups;
+				groups = evaluationViewGroups;
+				break;
 			case CHAT_VIEW:
 			case CHAT_CONVERSATION_VIEW:
 			case CHAT_PERSONAL_AGENTS_VIEW:
 			case CHAT_WORKFLOW_AGENTS_VIEW:
-				return chatHubViewGroups;
+				groups = chatHubViewGroups;
+				break;
 			default:
-				return fallbackViewCommands;
+				groups = fallbackViewCommands;
 		}
+
+		// Filter for member users - keep only Recent and Workflows sections
+		if (isMember.value) {
+			return groups.filter(
+				(group) => group === recentResourcesGroup || group === workflowNavigationGroup,
+			);
+		}
+
+		return groups;
 	});
 
 	const context = computed(() => {
