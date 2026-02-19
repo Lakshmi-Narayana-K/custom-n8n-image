@@ -113,9 +113,7 @@ async function onSourceControlPull() {
 }
 
 onBeforeMount(async () => {
-	if (!isMember.value) {
-		await usersStore.fetchUsers({ filter: { isPending: false }, take: 2 });
-	}
+	// await usersStore.fetchUsers({ filter: { isPending: false }, take: 2 });
 	sourceControlEventBus.on('pull', onSourceControlPull);
 });
 
