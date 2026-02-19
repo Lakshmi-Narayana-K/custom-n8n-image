@@ -164,21 +164,6 @@ const {
 		</N8nNavigationDropdown>
 		<KeyboardShortcutTooltip
 			:placement="isCollapsed ? 'right' : 'bottom'"
-			:show-after="500"
-			:label="i18n.baseText('nodeView.openCommandBar')"
-			:shortcut="{ keys: ['k'], metaKey: true }"
-		>
-			<N8nIconButton
-				size="small"
-				type="highlight"
-				icon="search"
-				icon-size="large"
-				aria-label="Open command palette"
-				@click="openCommandBar"
-			/>
-		</KeyboardShortcutTooltip>
-		<KeyboardShortcutTooltip
-			:placement="isCollapsed ? 'right' : 'bottom'"
 			:label="
 				isCollapsed
 					? i18n.baseText('mainSidebar.state.expand')

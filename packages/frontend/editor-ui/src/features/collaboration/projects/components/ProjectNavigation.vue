@@ -31,14 +31,15 @@ const usersStore = useUsersStore();
 
 const displayProjects = computed(() => globalEntityCreation.displayProjects.value);
 const isFoldersFeatureEnabled = computed(() => settingsStore.isFoldersFeatureEnabled);
-const isChatLinkAvailable = computed(() => {
+const isMember = computed(() => {
 	const user = usersStore.currentUser;
 	if (!user) return false;
 	const userRole = user.isDefaultUser ? ROLE.Default : user.role;
-	const isMember = userRole === ROLE.Member;
-
+	return userRole === ROLE.Member;
+});
+const isChatLinkAvailable = computed(() => {
 	return (
-		!isMember &&
+		!isMember.value &&
 		settingsStore.isChatFeatureEnabled &&
 		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } })
 	);
@@ -112,7 +113,9 @@ async function onSourceControlPull() {
 }
 
 onBeforeMount(async () => {
-	await usersStore.fetchUsers({ filter: { isPending: false }, take: 2 });
+	if (!isMember.value) {
+		await usersStore.fetchUsers({ filter: { isPending: false }, take: 2 });
+	}
 	sourceControlEventBus.on('pull', onSourceControlPull);
 });
 
