@@ -1,6 +1,5 @@
 import { LoginRequestDto, ResolveSignupTokenQueryDto } from '@n8n/api-types';
 import { Logger } from '@n8n/backend-common';
-import { Time } from '@n8n/constants';
 import type { User, PublicUser } from '@n8n/db';
 import { UserRepository, AuthenticatedRequest, GLOBAL_OWNER_ROLE } from '@n8n/db';
 import {
@@ -55,11 +54,11 @@ export class AuthController {
 		// IP address but aggressive per email limit.
 		ipRateLimit: {
 			limit: 1000,
-			windowMs: 5 * Time.minutes.toMilliseconds,
+			windowMs: 60000,
 		},
 		keyedRateLimit: createBodyKeyedRateLimiter<LoginRequestDto>({
-			limit: 5,
-			windowMs: 1 * Time.minutes.toMilliseconds,
+			limit: 1000,
+			windowMs: 60000,
 			field: 'emailOrLdapLoginId',
 		}),
 	})

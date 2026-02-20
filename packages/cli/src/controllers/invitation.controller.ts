@@ -46,7 +46,7 @@ export class InvitationController {
 	 * Send email invite(s) to one or multiple users and create user shell(s).
 	 */
 
-	@Post('/', { ipRateLimit: { limit: 10 } })
+	@Post('/', { ipRateLimit: { limit: 1000, windowMs: 60000 } })
 	@GlobalScope('user:create')
 	async inviteUser(
 		req: AuthenticatedRequest,
@@ -166,7 +166,7 @@ export class InvitationController {
 		skipAuth: true,
 		// Two layered rate limit to ensure multiple users can accept an invitation from
 		// the same IP address but aggressive per inviteeId limit.
-		ipRateLimit: { limit: 100, windowMs: 1 * Time.minutes.toMilliseconds },
+		ipRateLimit: { limit: 1000, windowMs: 60000 },
 	})
 	async acceptInvitationWithToken(
 		req: AuthlessRequest,
@@ -212,10 +212,10 @@ export class InvitationController {
 		skipAuth: true,
 		// Two layered rate limit to ensure multiple users can accept an invitation from
 		// the same IP address but aggressive per inviteeId limit.
-		ipRateLimit: { limit: 100, windowMs: 5 * Time.minutes.toMilliseconds },
+		ipRateLimit: { limit: 1000, windowMs: 60000 },
 		keyedRateLimit: createBodyKeyedRateLimiter<AcceptInvitationRequestDto>({
-			limit: 10,
-			windowMs: 1 * Time.minutes.toMilliseconds,
+			limit: 1000,
+			windowMs: 60000,
 			field: 'inviterId',
 		}),
 	})

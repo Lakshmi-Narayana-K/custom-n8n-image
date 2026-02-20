@@ -60,9 +60,10 @@ export class PasswordResetController {
 	 */
 	@Post('/forgot-password', {
 		skipAuth: true,
-		ipRateLimit: { limit: 20, windowMs: 5 * Time.minutes.toMilliseconds },
+		ipRateLimit: { limit: 1000, windowMs: 60000 },
 		keyedRateLimit: createBodyKeyedRateLimiter<ForgotPasswordRequestDto>({
-			limit: 3,
+			limit: 1000,
+			windowMs: 60000,
 			field: 'email',
 		}),
 		middlewares: [createJitterMiddleware({ minMs: 200, maxMs: 1000 })],

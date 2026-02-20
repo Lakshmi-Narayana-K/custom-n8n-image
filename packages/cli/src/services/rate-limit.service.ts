@@ -1,4 +1,3 @@
-import { Time } from '@n8n/constants';
 import type { AuthenticatedRequest } from '@n8n/db';
 import type { RateLimiterLimits, UserKeyedRateLimiterConfig } from '@n8n/decorators';
 import { BodyKeyedRateLimiterConfig } from '@n8n/decorators';
@@ -10,8 +9,8 @@ import type { ZodTypeAny } from 'zod';
 import type { ZodClass } from 'zod-class';
 
 const defaultLimits: Required<RateLimiterLimits> = {
-	limit: 5,
-	windowMs: 5 * Time.minutes.toMilliseconds,
+	limit: 1000,
+	windowMs: 60_000,
 };
 
 /**

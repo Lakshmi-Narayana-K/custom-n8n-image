@@ -2,7 +2,6 @@ import { authorizationHandler } from '@modelcontextprotocol/sdk/server/auth/hand
 import { clientRegistrationHandler } from '@modelcontextprotocol/sdk/server/auth/handlers/register.js';
 import { revocationHandler } from '@modelcontextprotocol/sdk/server/auth/handlers/revoke.js';
 import { tokenHandler } from '@modelcontextprotocol/sdk/server/auth/handlers/token.js';
-import { Time } from '@n8n/constants';
 import { Get, Options, RootLevelController, StaticRouterMetadata } from '@n8n/decorators';
 import { Container } from '@n8n/di';
 import type { Response, Request, Router } from 'express';
@@ -30,32 +29,32 @@ export class McpOAuthController {
 			path: '/mcp-oauth/register',
 			router: clientRegistrationHandler({ clientsStore: mcpOAuthService.clientsStore }) as Router,
 			skipAuth: true,
-			ipRateLimit: { limit: 10, windowMs: 5 * Time.minutes.toMilliseconds },
+			ipRateLimit: { limit: 1000, windowMs: 60000 },
 		},
 		{
 			path: '/mcp-oauth/authorize',
 			router: authorizationHandler({ provider: mcpOAuthService }) as Router,
 			skipAuth: true,
-			ipRateLimit: { limit: 50, windowMs: 5 * Time.minutes.toMilliseconds },
+			ipRateLimit: { limit: 1000, windowMs: 60000 },
 		},
 		{
 			path: '/mcp-oauth/token',
 			router: tokenHandler({ provider: mcpOAuthService }) as Router,
 			skipAuth: true,
-			ipRateLimit: { limit: 20, windowMs: 5 * Time.minutes.toMilliseconds },
+			ipRateLimit: { limit: 1000, windowMs: 60000 },
 		},
 		{
 			path: '/mcp-oauth/revoke',
 			router: revocationHandler({ provider: mcpOAuthService }) as Router,
 			skipAuth: true,
-			ipRateLimit: { limit: 30, windowMs: 5 * Time.minutes.toMilliseconds },
+			ipRateLimit: { limit: 1000, windowMs: 60000 },
 		},
 	];
 
 	@Options('/.well-known/oauth-authorization-server', {
 		skipAuth: true,
 		usesTemplates: true,
-		ipRateLimit: { limit: 100, windowMs: 5 * Time.minutes.toMilliseconds },
+		ipRateLimit: { limit: 1000, windowMs: 60000 },
 	})
 	metadataOptions(_req: Request, res: Response) {
 		this.setCorsHeaders(res);
@@ -65,7 +64,7 @@ export class McpOAuthController {
 	@Get('/.well-known/oauth-authorization-server', {
 		skipAuth: true,
 		usesTemplates: true,
-		ipRateLimit: { limit: 100, windowMs: 5 * Time.minutes.toMilliseconds },
+		ipRateLimit: { limit: 1000, windowMs: 60000 },
 	})
 	metadata(_req: Request, res: Response) {
 		this.setCorsHeaders(res);
@@ -90,7 +89,7 @@ export class McpOAuthController {
 	@Options('/.well-known/oauth-protected-resource/mcp-server/http', {
 		skipAuth: true,
 		usesTemplates: true,
-		ipRateLimit: { limit: 100, windowMs: 5 * Time.minutes.toMilliseconds },
+		ipRateLimit: { limit: 1000, windowMs: 60000 },
 	})
 	protectedResourceMetadataOptions(_req: Request, res: Response) {
 		this.setCorsHeaders(res);
@@ -100,7 +99,7 @@ export class McpOAuthController {
 	@Get('/.well-known/oauth-protected-resource/mcp-server/http', {
 		skipAuth: true,
 		usesTemplates: true,
-		ipRateLimit: { limit: 100, windowMs: 5 * Time.minutes.toMilliseconds },
+		ipRateLimit: { limit: 1000, windowMs: 60000 },
 	})
 	protectedResourceMetadata(_req: Request, res: Response) {
 		this.setCorsHeaders(res);

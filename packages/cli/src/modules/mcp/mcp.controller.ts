@@ -68,7 +68,7 @@ export class McpController {
 	}
 
 	@Post('/http', {
-		ipRateLimit: { limit: 100 },
+		ipRateLimit: { limit: 1000, windowMs: 60000 },
 		middlewares: [getAuthMiddleware()],
 		skipAuth: true,
 		usesTemplates: true,
