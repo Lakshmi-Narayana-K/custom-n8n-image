@@ -1,9 +1,14 @@
 <!-- eslint-disable import-x/extensions -->
 <script setup lang="ts">
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import {
+	useWorkflowDocumentStore,
+	createWorkflowDocumentId,
+} from '@/app/stores/workflowDocument.store';
 import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
 import { useUIStore } from '@/app/stores/ui.store';
 
+import { useInjectWorkflowId } from '@/app/composables/useInjectWorkflowId';
 import { useRunWorkflow } from '@/app/composables/useRunWorkflow';
 import { useI18n, type BaseTextKey } from '@n8n/i18n';
 import { computed, onBeforeUnmount, onMounted, ref, watch, type WatchStopHandle } from 'vue';
@@ -15,7 +20,7 @@ import CanvasRunWorkflowButton from '@/features/workflows/canvas/components/elem
 import { useLogsStore } from '@/app/stores/logs.store';
 import { isChatNode } from '@/app/utils/aiUtils';
 import { useToast } from '@/app/composables/useToast';
-import { N8nTooltip } from '@n8n/design-system';
+import { N8nTooltip, N8nIcon, N8nButton } from '@n8n/design-system';
 import { nextTick } from 'vue';
 import { useBuilderStore } from '@/features/ai/assistant/builder.store';
 import { SETUP_CREDENTIALS_MODAL_KEY } from '@/app/constants';
@@ -31,6 +36,12 @@ const emit = defineEmits<Emits>();
 // Initialize composables and stores
 const router = useRouter();
 const workflowsStore = useWorkflowsStore();
+const workflowId = useInjectWorkflowId();
+const workflowDocumentStore = computed(() =>
+	workflowId.value
+		? useWorkflowDocumentStore(createWorkflowDocumentId(workflowId.value))
+		: undefined,
+);
 const nodeTypesStore = useNodeTypesStore();
 const uiStore = useUIStore();
 const i18n = useI18n();
@@ -78,7 +89,9 @@ const ensureExecutionWatcher = () => {
 
 const hasValidationIssues = computed(() => builderStore.workflowTodos.length > 0);
 const triggerNodes = computed(() =>
-	workflowsStore.workflow.nodes.filter((node) => nodeTypesStore.isTriggerNode(node.type)),
+	(workflowDocumentStore.value?.allNodes ?? []).filter((node) =>
+		nodeTypesStore.isTriggerNode(node.type),
+	),
 );
 
 const issuesByType = computed(() => {
@@ -132,7 +145,7 @@ function formatIssueMessage(issue: string | string[]): string {
 
 // Helper to get node type
 function getNodeTypeByName(nodeName: string) {
-	const node = workflowsStore.workflow.nodes.find((n) => n.name === nodeName);
+	const node = workflowDocumentStore.value?.getNodeByName(nodeName);
 
 	if (!node) return null;
 	return nodeTypesStore.getNodeType(node.type);
@@ -152,6 +165,18 @@ const executeButtonTooltip = computed(() =>
 		: '',
 );
 
+const showUnpinSection = computed(
+	() =>
+		builderStore.isCodeBuilder &&
+		builderStore.hasTodosHiddenByPinnedData &&
+		builderStore.hasHadSuccessfulExecution,
+);
+
+function onUnpinAll() {
+	builderStore.unpinAllNodes();
+	builderStore.trackWorkflowBuilderJourney('user_clicked_unpin_all');
+}
+
 async function onExecute() {
 	if (hasValidationIssues.value) {
 		return;
@@ -162,7 +187,7 @@ async function onExecute() {
 	const selectedTriggerNode =
 		workflowsStore.selectedTriggerNodeName ?? availableTriggerNodes.value[0]?.name;
 	const selectedTriggerNodeType = selectedTriggerNode
-		? workflowsStore.getNodeByName(selectedTriggerNode)
+		? workflowDocumentStore.value?.getNodeByName(selectedTriggerNode)
 		: null;
 
 	// If the selected trigger is a chat node, open logs panel instead of executing
@@ -195,7 +220,7 @@ function scrollIntoView() {
 
 function trackBuilderPlaceholders(issue: WorkflowValidationIssue) {
 	builderStore.trackWorkflowBuilderJourney('user_clicked_todo', {
-		node_type: workflowsStore.getNodeByName(issue.node)?.type,
+		node_type: workflowDocumentStore.value?.getNodeByName(issue.node)?.type,
 		type: issue.type,
 	});
 }
@@ -266,7 +291,17 @@ onBeforeUnmount(() => {
 		<!-- No Issues Section -->
 		<template v-else-if="triggerNodes.length > 0">
 			<p :class="$style.noIssuesMessage">
-				{{ i18n.baseText('aiAssistant.builder.executeMessage.noIssues') }}
+				{{
+					builderStore.hasTodosHiddenByPinnedData
+						? i18n.baseText('aiAssistant.builder.executeMessage.noIssuesWithPinData')
+						: i18n.baseText('aiAssistant.builder.executeMessage.noIssues')
+				}}
+				<N8nTooltip v-if="builderStore.hasTodosHiddenByPinnedData" placement="top">
+					<template #content>
+						{{ i18n.baseText('aiAssistant.builder.executeMessage.unpinTooltip') }}
+					</template>
+					<N8nIcon icon="circle-help" size="small" :class="$style.infoIcon" />
+				</N8nTooltip>
 			</p>
 		</template>
 
@@ -293,6 +328,26 @@ onBeforeUnmount(() => {
 				@select-trigger-node="workflowsStore.setSelectedTriggerNodeName"
 			/>
 		</N8nTooltip>
+
+		<!-- Unpin All Section -->
+		<div v-if="showUnpinSection" :class="$style.unpinSection">
+			<N8nButton
+				type="secondary"
+				size="medium"
+				icon="pin"
+				:label="i18n.baseText('aiAssistant.builder.executeMessage.unpinAll')"
+				@click="onUnpinAll"
+			/>
+			<span :class="$style.unpinIndividuallyText">
+				{{ i18n.baseText('aiAssistant.builder.executeMessage.unpinIndividually') }}
+				<N8nTooltip placement="top">
+					<template #content>
+						{{ i18n.baseText('aiAssistant.builder.executeMessage.unpinTooltip') }}
+					</template>
+					<N8nIcon icon="circle-help" size="small" :class="$style.infoIcon" />
+				</N8nTooltip>
+			</span>
+		</div>
 	</div>
 </template>
 
@@ -348,5 +403,25 @@ onBeforeUnmount(() => {
 
 .runButton {
 	align-self: stretch;
+}
+
+.unpinSection {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	gap: var(--spacing--2xs);
+}
+
+.unpinIndividuallyText {
+	font-size: var(--font-size--2xs);
+	color: var(--color--text--tint-1);
+	display: inline-flex;
+	align-items: center;
+	gap: var(--spacing--4xs);
+}
+
+.infoIcon {
+	color: var(--color--text--tint-1);
+	cursor: help;
 }
 </style>

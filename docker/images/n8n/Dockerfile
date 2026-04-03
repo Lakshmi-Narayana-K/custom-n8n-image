@@ -1,4 +1,4 @@
-ARG NODE_VERSION=22.22.0
+ARG NODE_VERSION=24.13.1
 ARG N8N_VERSION=snapshot
 
 # --- Stage 1: compiled artifact from CI ---
