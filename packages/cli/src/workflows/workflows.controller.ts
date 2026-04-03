@@ -37,7 +37,7 @@ import { PROJECT_OWNER_ROLE_SLUG } from '@n8n/permissions';
 import { In, type FindOptionsRelations } from '@n8n/typeorm';
 import axios from 'axios';
 import express from 'express';
-import { calculateWorkflowChecksum } from 'n8n-workflow';
+import { calculateWorkflowChecksum, type IDataObject } from 'n8n-workflow';
 import { CollaborationService } from '../collaboration/collaboration.service';
 
 import { WorkflowCreationService } from './workflow-creation.service';

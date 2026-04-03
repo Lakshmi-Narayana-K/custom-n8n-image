@@ -97,7 +97,9 @@ const renderComponent = createComponentRenderer(WorkflowHeaderDraftPublishAction
 				template: '<div data-test-id="workflow-history-button-stub"></div>',
 			},
 			N8nTooltip: {
-				template: '<div><slot name="content" /><slot /></div>',
+				props: ['content'],
+				template:
+					'<div><span v-if="content">{{ content }}</span><slot name="content" /><slot /></div>',
 			},
 		},
 	},
@@ -183,16 +185,16 @@ describe('WorkflowHeaderDraftPublishActions', () => {
 			expect(queryByTestId('workflow-active-version-indicator')).not.toBeInTheDocument();
 		});
 
-		it('should show active version indicator when there is an active version', () => {
+		it('should not show active version indicator in header when split publish UI is hidden (Nxtwave)', () => {
 			documentStore.setActiveState({
 				activeVersionId: 'active-version-1',
 				activeVersion: createMockActiveVersion('active-version-1'),
 			});
 
-			const { getByTestId } = renderComponent();
+			const { queryByTestId } = renderComponent();
 
-			expect(getByTestId('workflow-active-version-info')).toBeInTheDocument();
-			expect(getByTestId('workflow-active-version-indicator')).toBeInTheDocument();
+			expect(queryByTestId('workflow-active-version-info')).not.toBeInTheDocument();
+			expect(queryByTestId('workflow-active-version-indicator')).not.toBeInTheDocument();
 		});
 
 		it('should use latest activation date from workflowPublishHistory when available', () => {
@@ -233,7 +235,7 @@ describe('WorkflowHeaderDraftPublishActions', () => {
 				activeVersion: activeVersionWithHistory,
 			});
 
-			const { getByTestId } = renderComponent({
+			const { queryByTestId } = renderComponent({
 				global: {
 					stubs: {
 						N8nTooltip: {
@@ -247,16 +249,16 @@ describe('WorkflowHeaderDraftPublishActions', () => {
 				},
 			});
 
-			expect(getByTestId('workflow-active-version-info')).toBeInTheDocument();
-			expect(getByTestId('time-ago-stub')).toHaveTextContent(latestActivationDate);
+			expect(queryByTestId('workflow-active-version-info')).not.toBeInTheDocument();
+			expect(queryByTestId('time-ago-stub')).not.toBeInTheDocument();
 		});
 
-		it('should show active version indicator when user does not have workflow:publish permission but workflow is currently published', () => {
+		it('should not show active version indicator when split publish UI is hidden (Nxtwave)', () => {
 			documentStore.setActiveState({
 				activeVersionId: 'active-version-1',
 				activeVersion: createMockActiveVersion('active-version-1'),
 			});
-			const { getByTestId } = renderComponent({
+			const { queryByTestId } = renderComponent({
 				props: {
 					...defaultWorkflowProps,
 					workflowPermissions: {
@@ -267,8 +269,8 @@ describe('WorkflowHeaderDraftPublishActions', () => {
 				},
 			});
 
-			expect(getByTestId('workflow-active-version-indicator')).toBeInTheDocument();
-			expect(getByTestId('workflow-active-version-info')).toBeInTheDocument();
+			expect(queryByTestId('workflow-active-version-indicator')).not.toBeInTheDocument();
+			expect(queryByTestId('workflow-active-version-info')).not.toBeInTheDocument();
 		});
 	});
 
@@ -663,7 +665,7 @@ describe('WorkflowHeaderDraftPublishActions', () => {
 			expect(container).toBeInTheDocument();
 		});
 
-		it('should be disabled when user lacks workflow:unpublish permission', async () => {
+		it('should render publish button when user lacks workflow:unpublish (version dropdown hidden)', () => {
 			setupEnabledPublishButton();
 
 			const { getByTestId } = renderComponent({
@@ -676,12 +678,7 @@ describe('WorkflowHeaderDraftPublishActions', () => {
 				},
 			});
 
-			const versionMenuButton = getByTestId('version-menu-button');
-			await userEvent.click(versionMenuButton);
-
-			const unpublishItem = getByTestId('version-menu-item-unpublish');
-			expect(unpublishItem).toBeInTheDocument();
-			expect(unpublishItem.closest('.el-dropdown-menu__item')).toHaveClass('is-disabled');
+			expect(getByTestId('workflow-open-publish-modal-button')).toBeInTheDocument();
 		});
 	});
 

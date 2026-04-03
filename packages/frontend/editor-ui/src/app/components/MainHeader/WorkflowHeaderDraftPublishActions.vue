@@ -12,14 +12,7 @@ import {
 	AutoSaveState,
 	EnterpriseEditionFeature,
 } from '@/app/constants';
-import {
-	type ActionDropdownItem,
-	N8nActionDropdown,
-	N8nButton,
-	N8nIconButton,
-	N8nTooltip,
-	N8nBadge
-} from '@n8n/design-system';
+import { N8nButton, N8nTooltip, N8nBadge } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
 import { useUIStore } from '@/app/stores/ui.store';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
@@ -332,6 +325,13 @@ const publishButtonConfig = computed(() => {
 	return configs[workflowPublishState.value];
 });
 
+/** Tooltip for the Nxtwave Publish button (split control with version info is commented out). */
+const nxtwavePublishTooltipContent = computed(() => {
+	if (isWorkflowPublishDisabled.value) return workflowPublishDisabledTooltip.value;
+	if (isPublishLimitReached.value) return workflowPublishLimitTooltip.value;
+	return publishButtonConfig.value.tooltip ?? '';
+});
+
 const shouldHidePublishButton = computed(() => {
 	if (props.isNewWorkflow) return false;
 	return props.isArchived || (!hasUpdatePermission.value && !hasPublishPermission.value);
@@ -360,6 +360,7 @@ const latestPublishDate = computed(() => {
 	return latestPublish?.createdAt;
 });
 
+/* Nxtwave: upstream Publish split button + version dropdown (commented out in template)
 const enum VERSION_ACTIONS {
 	PUBLISH = 'publish',
 	NAME_VERSION = 'name-version',
@@ -395,6 +396,7 @@ const versionMenuActions = computed<Array<ActionDropdownItem<VERSION_ACTIONS>>>(
 
 	return actions;
 });
+*/
 
 const onNameVersion = async () => {
 	// If there are unsaved changes, save the workflow first
@@ -486,6 +488,7 @@ const onUnpublish = () => {
 	});
 };
 
+/* Nxtwave: tied to version dropdown (commented out)
 const onDropdownMenuSelect = async (action: VERSION_ACTIONS) => {
 	switch (action) {
 		case VERSION_ACTIONS.PUBLISH:
@@ -501,6 +504,7 @@ const onDropdownMenuSelect = async (action: VERSION_ACTIONS) => {
 			break;
 	}
 };
+*/
 
 useKeybindings({
 	shift_p: {
@@ -543,6 +547,8 @@ defineExpose({
 <template>
 	<div :class="$style.container">
 		<CollaborationPane v-if="!isNewWorkflow" />
+		<!-- Nxtwave: hidden upstream Publish / Published split control + chevron dropdown (see N8n publish button below) -->
+		<!--
 		<div v-if="!shouldHidePublishButton" :class="$style.publishButtonWrapper">
 			<div :class="$style.buttonGroup">
 				<N8nTooltip
@@ -611,24 +617,23 @@ defineExpose({
 				</N8nActionDropdown>
 			</div>
 		</div>
-		<div v-if="!isArchived && workflowPermissions.update" :class="$style.publishButtonWrapper">
+		-->
+		<div v-if="!isArchived && !shouldHidePublishButton" :class="$style.publishButtonWrapper">
 			<N8nTooltip
-				:content="
-					isWorkflowPublishDisabled ? workflowPublishDisabledTooltip : workflowPublishLimitTooltip
-				"
-				:disabled="!isPublishingBlocked"
+				:content="nxtwavePublishTooltipContent"
+				:disabled="!nxtwavePublishTooltipContent"
 				placement="bottom"
 			>
 				<div
 					:class="{
 						[$style.publishButtonInner]: true,
-						[$style.publishButtonInnerDisabled]: isPublishingBlocked,
+						[$style.publishButtonInnerDisabled]: shouldDisablePublishButton || isPublishingBlocked,
 					}"
 				>
 					<N8nButton
 						type="secondary"
 						data-test-id="workflow-open-publish-modal-button"
-						:disabled="isPublishingBlocked"
+						:disabled="shouldDisablePublishButton || isPublishingBlocked"
 						@click="onPublishButtonClick"
 					>
 						<span :class="$style.publishButtonLabel">

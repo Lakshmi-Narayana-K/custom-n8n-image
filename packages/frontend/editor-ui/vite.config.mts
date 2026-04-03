@@ -23,6 +23,7 @@ const { NODE_ENV } = process.env;
 const browsers = browserslist.loadConfig({ path: process.cwd() });
 
 const packagesDir = resolve(__dirname, '..', '..');
+const lodashPackageRoot = resolve(__dirname, 'node_modules/lodash');
 
 const alias = [
 	{ find: '@', replacement: resolve(__dirname, 'src') },
@@ -71,13 +72,21 @@ const alias = [
 		find: /^@n8n\/utils(.+)$/,
 		replacement: resolve(packagesDir, '@n8n', 'utils', 'src$1'),
 	},
+	{
+		find: /^lodash\.throttle$/,
+		replacement: resolve(lodashPackageRoot, 'throttle.js'),
+	},
+	{
+		find: /^lodash\.orderby$/i,
+		replacement: resolve(lodashPackageRoot, 'orderBy.js'),
+	},
 	...['orderBy', 'camelCase', 'cloneDeep', 'startCase'].map((name) => ({
 		find: new RegExp(`^lodash.${name}$`, 'i'),
-		replacement: `lodash/${name}`,
+		replacement: resolve(lodashPackageRoot, `${name}.js`),
 	})),
 	{
 		find: /^lodash\.(.+)$/,
-		replacement: 'lodash/$1',
+		replacement: `${lodashPackageRoot.replace(/\\/g, '/')}/$1.js`,
 	},
 	{
 		// For sanitize-html

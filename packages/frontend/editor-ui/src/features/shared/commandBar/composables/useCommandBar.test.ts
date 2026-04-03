@@ -5,6 +5,21 @@ import { waitFor } from '@testing-library/vue';
 import { describe, it, beforeEach, vi, expect } from 'vitest';
 import { useCommandBar } from './useCommandBar';
 import { VIEWS } from '@/app/constants';
+import { ROLE } from '@n8n/api-types';
+
+const mockCurrentUser = vi.fn<{ id: string; role: string } | null>(() => null);
+const mockIsInstanceOwner = vi.fn(() => false);
+
+vi.mock('@/features/settings/users/users.store', () => ({
+	useUsersStore: () => ({
+		get currentUser() {
+			return mockCurrentUser();
+		},
+		get isInstanceOwner() {
+			return mockIsInstanceOwner();
+		},
+	}),
+}));
 
 vi.mock('@n8n/i18n', async (importOriginal) => ({
 	...(await importOriginal()),
@@ -110,6 +125,8 @@ describe('useCommandBar', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		currentRoute.value = { name: VIEWS.WORKFLOW, params: {} };
+		mockCurrentUser.mockReturnValue(null);
+		mockIsInstanceOwner.mockReturnValue(false);
 	});
 
 	it('aggregates items for WORKFLOW view and exposes placeholder/context', async () => {
@@ -151,5 +168,28 @@ describe('useCommandBar', () => {
 				expect.arrayContaining(['wfn-cmd', 'proj-cmd', 'cred-cmd', 'dt-cmd', 'gen-cmd']),
 			),
 		);
+	});
+
+	it('limits command bar to recent + workflow navigation for non-owner users', async () => {
+		mockCurrentUser.mockReturnValue({ id: 'u1', role: ROLE.Admin });
+		mockIsInstanceOwner.mockReturnValue(false);
+		renderHarness();
+		await waitFor(() => expect(api.items.value.length).toBeGreaterThan(0));
+
+		const ids = api.items.value.map((i) => i.id);
+		expect(ids).toContain('wfn-cmd');
+		expect(ids).not.toContain('node-cmd');
+		expect(ids).not.toContain('wf-cmd');
+		expect(ids).not.toContain('gen-cmd');
+	});
+
+	it('shows full command groups for instance owner', async () => {
+		mockCurrentUser.mockReturnValue({ id: 'u1', role: ROLE.Owner });
+		mockIsInstanceOwner.mockReturnValue(true);
+		renderHarness();
+		await waitFor(() => expect(api.items.value.length).toBeGreaterThan(0));
+
+		const ids = api.items.value.map((i) => i.id);
+		expect(ids).toEqual(expect.arrayContaining(['node-cmd', 'wf-cmd', 'wfn-cmd', 'gen-cmd']));
 	});
 });

@@ -478,45 +478,17 @@ defineExpose({ focus, blur, select });
 	&.disabled {
 		cursor: not-allowed;
 		opacity: 0.6;
+		background-color: var(--color--background--light-3);
+	}
+
+	&.readonly {
+		background-color: var(--color--background--light-3);
 	}
 }
 
 .isTextarea {
 	align-items: flex-start;
 	padding-inline: 0;
-}
-
-.inputWrapper {
-	display: inline-flex;
-	align-items: center;
-	flex: 1;
-	min-width: 0;
-	gap: var(--spacing--3xs);
-	border-radius: var(--input--radius--top-left, var(--input--radius, var(--radius)))
-		var(--input--radius--top-right, var(--input--radius, var(--radius)))
-		var(--input--radius--bottom-right, var(--input--radius, var(--radius)))
-		var(--input--radius--bottom-left, var(--input--radius, var(--radius)));
-	border: var(--input--border-width, var(--border-width))
-		var(--input--border-style, var(--border-style)) var(--input--border-color, var(--border-color));
-	background-color: var(--input--color--background, var(--color--background--light-2));
-
-	&:hover:not(.disabled):not(:focus-within) {
-		border-color: var(--input--border-color--hover, var(--color--foreground--shade-1));
-	}
-
-	&:focus-within {
-		border-color: var(--input--border-color--focus, var(--color--secondary));
-	}
-
-	&.disabled {
-		background-color: var(--color--background--light-3);
-		cursor: not-allowed;
-		opacity: 0.6;
-	}
-
-	&.readonly {
-		background-color: var(--color--background--light-3);
-	}
 }
 
 .disabled {

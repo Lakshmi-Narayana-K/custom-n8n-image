@@ -27,7 +27,6 @@ import {
 	CHAT_WORKFLOW_AGENTS_VIEW,
 } from '@/features/ai/chatHub/constants';
 import { useUsersStore } from '@/features/settings/users/users.store';
-import { ROLE } from '@n8n/api-types';
 
 export function useCommandBar() {
 	const nodeTypesStore = useNodeTypesStore();
@@ -44,11 +43,9 @@ export function useCommandBar() {
 	const activeNodeId = ref<string | null>(null);
 	const lastQuery = ref('');
 
-	const isMember = computed(() => {
-		const user = usersStore.currentUser;
-		if (!user) return false;
-		const userRole = user.isDefaultUser ? ROLE.Default : user.role;
-		return userRole === ROLE.Member;
+	const shouldLimitCommandBarToNonCritical = computed(() => {
+		if (!usersStore.currentUser) return false;
+		return !usersStore.isInstanceOwner;
 	});
 
 	const currentProjectName = computed(() => {
@@ -225,8 +222,7 @@ export function useCommandBar() {
 				groups = fallbackViewCommands;
 		}
 
-		// Filter for member users - keep only Recent and Workflows sections
-		if (isMember.value) {
+		if (shouldLimitCommandBarToNonCritical.value) {
 			return groups.filter(
 				(group) => group === recentResourcesGroup || group === workflowNavigationGroup,
 			);

@@ -132,7 +132,7 @@ const isPublishLimitReached = computed(
 );
 
 const actions = computed<Array<UserAction<IUser>>>(() =>
-	workflowHistoryActionTypes
+	availableActionTypes
 		.filter((value) => !(value === 'publish' && activeWorkflow.value?.isArchived))
 		.map((value) => ({
 			label: i18n.baseText(`workflowHistory.item.actions.${value}`),

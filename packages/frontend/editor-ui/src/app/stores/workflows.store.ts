@@ -760,6 +760,8 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 	}
 
 	function resetWorkflow() {
+		const previousWorkflowId = workflow.value.id;
+
 		workflow.value = createEmptyWorkflow();
 
 		const maxPublishCount = getMemberPublishMaxCountFromEnv();
@@ -772,7 +774,10 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 		} else {
 			workflow.value.nxtwavePublish = undefined;
 		}
-		workflowChecksum.value = '';
+
+		if (previousWorkflowId) {
+			useWorkflowDocumentStore(createWorkflowDocumentId(previousWorkflowId)).setChecksum('');
+		}
 	}
 
 	function setUsedCredentials(data: IUsedCredential[]) {
@@ -785,8 +790,10 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 
 	function setWorkflowVersionId(versionId: string, newChecksum?: string) {
 		workflow.value.versionId = versionId;
-		if (newChecksum) {
-			workflowChecksum.value = newChecksum;
+		if (newChecksum && workflow.value.id) {
+			useWorkflowDocumentStore(createWorkflowDocumentId(workflow.value.id)).setChecksum(
+				newChecksum,
+			);
 		}
 	}
 
