@@ -1918,6 +1918,7 @@ export const useWorkflowsStore = defineStore(STORES.WORKFLOWS, () => {
 		getActivationError,
 		resetWorkflow,
 		setWorkflowNxtwavePublish,
+		setWorkflowVersionId,
 		addNodeExecutionStartedData,
 		setWorkflowActiveVersion,
 		setWorkflowVersionData,
