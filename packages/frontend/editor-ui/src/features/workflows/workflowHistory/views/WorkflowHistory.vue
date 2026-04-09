@@ -123,17 +123,16 @@ const publishedWorkflowVersionId = computed(() => {
 	return publishedVersionId;
 });
 
-const isDraftPublishEnabled = IS_DRAFT_PUBLISH_ENABLED;
 const isWorkflowPublishDisabled = computed(() =>
 	checkEnvFeatureFlag.value('DISABLE_WORKFLOW_PUBLISH'),
 );
 const isPublishLimitReached = computed(
-	() => activeWorkflow.value?.nxtwavePublish?.isLimitReached ?? false,
+	() => publishedWorkflow.value?.nxtwavePublish?.isLimitReached ?? false,
 );
 
 const actions = computed<Array<UserAction<IUser>>>(() =>
-	availableActionTypes
-		.filter((value) => !(value === 'publish' && activeWorkflow.value?.isArchived))
+	availableActionTypes.value
+		.filter((value) => !(value === 'publish' && publishedWorkflow.value?.isArchived))
 		.map((value) => ({
 			label: i18n.baseText(`workflowHistory.item.actions.${value}`),
 			disabled:
