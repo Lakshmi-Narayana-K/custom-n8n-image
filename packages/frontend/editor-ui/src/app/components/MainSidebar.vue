@@ -29,6 +29,7 @@ import ResourceCenterTooltip from '@/experiments/resourceCenter/components/Resou
 import { useResourceCenterStore } from '@/experiments/resourceCenter/stores/resourceCenter.store';
 import { RESOURCE_CENTER_EXPERIMENT } from '@/app/constants';
 import { useSidebarExpandedExperiment } from '@/experiments/sidebarExpanded';
+import { trackTemplatesClick, TemplateClickSource } from '@/experiments/utils';
 
 const cloudPlanStore = useCloudPlanStore();
 const rootStore = useRootStore();
@@ -305,6 +306,9 @@ const handleSelect = (key: string) => {
 			trackHelpItemClick(key);
 			break;
 		}
+		case 'templates':
+			trackTemplatesClick(TemplateClickSource.sidebarButton);
+			break;
 		case 'insights':
 			telemetry.track('User clicked insights link from side menu');
 			break;
