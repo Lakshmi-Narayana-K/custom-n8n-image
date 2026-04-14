@@ -42,8 +42,9 @@ const isChatLinkAvailable = computed(() => {
 	return (
 		!isMember.value &&
 		settingsStore.isChatFeatureEnabled &&
-		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } }),
-);
+		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } })
+	);
+});
 const isInstanceAiAvailable = computed(() => settingsStore.isModuleActive('instance-ai'));
 const hasMultipleVerifiedUsers = computed(
 	() => usersStore.allUsers.filter((user) => !user.isPendingUser).length > 1,

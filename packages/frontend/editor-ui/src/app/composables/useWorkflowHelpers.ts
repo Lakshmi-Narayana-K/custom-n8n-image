@@ -986,10 +986,6 @@ export function useWorkflowHelpers() {
 		workflowsListStore.addWorkflow(workflowData);
 		workflowsStore.setDescription(workflowData.description);
 		ws.setWorkflowId(workflowData.id);
-		ws.setWorkflowName({
-			newName: workflowData.name,
-			setStateDirty: uiStore.stateIsDirty,
-		});
 		workflowsStore.setWorkflowVersionId(workflowData.versionId, workflowData.checksum);
 		workflowsStore.setWorkflowNxtwavePublish(workflowData.nxtwavePublish);
 		workflowsStore.setWorkflowVersionData({

@@ -5,7 +5,6 @@ import { JsonWebTokenError } from 'jsonwebtoken';
 import {
 	BinaryDataService,
 	FileNotFoundError,
-	getWebhookSandboxCSP,
 	getHtmlSandboxCSP,
 	isValidNonDefaultMode,
 } from 'n8n-core';
@@ -94,7 +93,6 @@ export class BinaryDataController {
 			res.setHeader('Content-Type', mimeType);
 		}
 
-		res.setHeader('Content-Security-Policy', getWebhookSandboxCSP());
 		res.setHeader('Content-Security-Policy', getHtmlSandboxCSP());
 
 		if (action === 'download') {
