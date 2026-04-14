@@ -343,6 +343,7 @@ export class FrontendService {
 				},
 				customRoles: false,
 				personalSpacePolicy: false,
+				dataRedaction: false,
 			},
 			mfa: {
 				enabled: false,
@@ -488,6 +489,7 @@ export class FrontendService {
 			namedVersions: this.license.isLicensed(LICENSE_FEATURES.NAMED_VERSIONS),
 			customRoles: this.licenseState.isCustomRolesLicensed(),
 			personalSpacePolicy: this.licenseState.isPersonalSpacePolicyLicensed(),
+			dataRedaction: this.licenseState.isDataRedactionLicensed(),
 		});
 
 		if (this.license.isLdapEnabled()) {

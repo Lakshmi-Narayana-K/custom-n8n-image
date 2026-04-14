@@ -441,8 +441,7 @@ export class ScheduleTrigger implements INodeType {
 			}
 		}
 
-		const executeTrigger = (recurrence: IRecurrenceRule) => {
-			// Only block scheduled runs (do not affect manual executions)
+		const executeTrigger = (recurrence: IRecurrenceRule, skipRecurrenceCheck = false) => {
 			if (this.getMode() !== 'manual') {
 				const globalStaticData = this.getWorkflowStaticData('global') as Record<string, unknown>;
 				const meta = globalStaticData.__nxtwaveWorkflowPublish as
@@ -457,8 +456,10 @@ export class ScheduleTrigger implements INodeType {
 				}
 			}
 
-			const shouldTrigger = recurrenceCheck(recurrence, staticData.recurrenceRules, timezone);
-			if (!shouldTrigger) return;
+			if (!skipRecurrenceCheck) {
+				const shouldTrigger = recurrenceCheck(recurrence, staticData.recurrenceRules, timezone);
+				if (!shouldTrigger) return;
+			}
 
 			const momentTz = moment.tz(timezone);
 			const resultData = {
@@ -515,7 +516,7 @@ export class ScheduleTrigger implements INodeType {
 						});
 					}
 				}
-				executeTrigger(recurrence);
+				executeTrigger(recurrence, true);
 			};
 
 			return { manualTriggerFunction };

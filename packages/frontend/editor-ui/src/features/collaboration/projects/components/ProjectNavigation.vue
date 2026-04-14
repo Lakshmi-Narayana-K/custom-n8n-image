@@ -10,6 +10,7 @@ import { computed, onBeforeMount, onBeforeUnmount } from 'vue';
 import { useProjectsStore } from '../projects.store';
 import type { ProjectListItem } from '../projects.types';
 import { CHAT_VIEW } from '@/features/ai/chatHub/constants';
+import { INSTANCE_AI_VIEW } from '@/features/ai/instanceAi/constants';
 
 import { N8nMenuItem, N8nText } from '@n8n/design-system';
 import { hasPermission } from '@/app/utils/rbac/permissions';
@@ -41,9 +42,9 @@ const isChatLinkAvailable = computed(() => {
 	return (
 		!isMember.value &&
 		settingsStore.isChatFeatureEnabled &&
-		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } })
-	);
-});
+		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } }),
+);
+const isInstanceAiAvailable = computed(() => settingsStore.isModuleActive('instance-ai'));
 const hasMultipleVerifiedUsers = computed(
 	() => usersStore.allUsers.filter((user) => !user.isPendingUser).length > 1,
 );
@@ -98,6 +99,13 @@ const activeTabId = computed(() => {
 	);
 });
 
+const instanceAi = computed<IMenuItem>(() => ({
+	id: 'instance-ai',
+	icon: 'sparkles',
+	label: 'Instance AI',
+	route: { to: { name: INSTANCE_AI_VIEW } },
+}));
+
 const chat = computed<IMenuItem>(() => ({
 	id: 'chat',
 	icon: 'message-circle',
@@ -147,6 +155,13 @@ onBeforeUnmount(() => {
 				:compact="props.collapsed"
 				:active="activeTabId === 'shared'"
 				data-test-id="project-shared-menu-item"
+			/>
+			<N8nMenuItem
+				v-if="isInstanceAiAvailable"
+				:item="instanceAi"
+				:compact="props.collapsed"
+				:active="activeTabId === 'instance-ai'"
+				data-test-id="project-instance-ai-menu-item"
 			/>
 			<N8nMenuItem
 				v-if="isChatLinkAvailable"
