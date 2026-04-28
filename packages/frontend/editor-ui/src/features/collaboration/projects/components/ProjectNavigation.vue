@@ -42,10 +42,15 @@ const isChatLinkAvailable = computed(() => {
 	return (
 		!isMember.value &&
 		settingsStore.isChatFeatureEnabled &&
-		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } })
-	);
+		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } }),
+);
 });
-const isInstanceAiAvailable = computed(() => settingsStore.isModuleActive('instance-ai'));
+const isInstanceAiNavVisible = computed(() => {
+	if (!settingsStore.isModuleActive('instance-ai')) return false;
+	const ms = settingsStore.moduleSettings['instance-ai'];
+	return ms?.enabled !== false;
+});
+
 const hasMultipleVerifiedUsers = computed(
 	() => usersStore.allUsers.filter((user) => !user.isPendingUser).length > 1,
 );
@@ -158,7 +163,7 @@ onBeforeUnmount(() => {
 				data-test-id="project-shared-menu-item"
 			/>
 			<N8nMenuItem
-				v-if="isInstanceAiAvailable"
+				v-if="isInstanceAiNavVisible"
 				:item="instanceAi"
 				:compact="props.collapsed"
 				:active="activeTabId === 'instance-ai'"

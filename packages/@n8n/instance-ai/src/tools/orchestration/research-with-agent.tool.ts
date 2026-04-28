@@ -19,6 +19,7 @@ import {
 	withTraceContextActor,
 } from './tracing-utils';
 import { registerWithMastra } from '../../agent/register-with-mastra';
+import { buildSubAgentBriefing } from '../../agent/sub-agent-briefing';
 import { createLlmStepTraceHooks } from '../../runtime/resumable-stream-executor';
 import { consumeStreamWithHitl } from '../../stream/consume-with-hitl';
 import {
@@ -85,12 +86,12 @@ export async function startResearchAgentTask(
 		},
 	});
 
-	const conversationCtx = input.conversationContext
-		? `\n\n[CONVERSATION CONTEXT: ${input.conversationContext}]`
-		: '';
-	const briefing = input.constraints
-		? `${input.goal}${conversationCtx}\n\nConstraints: ${input.constraints}`
-		: `${input.goal}${conversationCtx}`;
+	const briefing = await buildSubAgentBriefing({
+		task: input.goal,
+		conversationContext: input.conversationContext,
+		additionalContext: input.constraints ? `Constraints: ${input.constraints}` : undefined,
+		runningTasks: context.getRunningTaskSummaries?.(),
+	});
 	const traceContext = await createDetachedSubAgentTracing(context, {
 		agentId: subAgentId,
 		role: 'web-researcher',
@@ -112,7 +113,7 @@ export async function startResearchAgentTask(
 		role: 'web-researcher',
 		traceContext,
 		plannedTaskId: input.plannedTaskId,
-		run: async (signal, drainCorrections) => {
+		run: async (signal, drainCorrections, waitForCorrection) => {
 			return await withTraceContextActor(traceContext, async () => {
 				const subAgent = new Agent({
 					id: subAgentId,
@@ -161,6 +162,7 @@ export async function startResearchAgentTask(
 						abortSignal: signal,
 						waitForConfirmation: context.waitForConfirmation,
 						drainCorrections,
+						waitForCorrection,
 						llmStepTraceHooks,
 					});
 
@@ -177,6 +179,25 @@ export async function startResearchAgentTask(
 	};
 }
 
+export const researchWithAgentInputSchema = z.object({
+	goal: z
+		.string()
+		.describe(
+			'What to research, e.g. "How does Shopify webhook authentication work ' +
+				'and what scopes are needed for inventory updates?"',
+		),
+	constraints: z
+		.string()
+		.optional()
+		.describe('Optional constraints, e.g. "Focus on REST API, not GraphQL"'),
+	conversationContext: z
+		.string()
+		.optional()
+		.describe(
+			'Brief summary of the conversation so far — what was discussed, decisions made, and information gathered. The agent uses this to avoid repeating information the user already knows.',
+		),
+});
+
 export function createResearchWithAgentTool(context: OrchestrationContext) {
 	return createTool({
 		id: 'research-with-agent',
@@ -185,29 +206,12 @@ export function createResearchWithAgentTool(context: OrchestrationContext) {
 			'to answer a complex question. Returns immediately with a task ID — results ' +
 			'arrive when the research completes. Use when the question requires multiple ' +
 			'searches and page reads, or needs synthesis from several sources.',
-		inputSchema: z.object({
-			goal: z
-				.string()
-				.describe(
-					'What to research, e.g. "How does Shopify webhook authentication work ' +
-						'and what scopes are needed for inventory updates?"',
-				),
-			constraints: z
-				.string()
-				.optional()
-				.describe('Optional constraints, e.g. "Focus on REST API, not GraphQL"'),
-			conversationContext: z
-				.string()
-				.optional()
-				.describe(
-					'Brief summary of the conversation so far — what was discussed, decisions made, and information gathered. The agent uses this to avoid repeating information the user already knows.',
-				),
-		}),
+		inputSchema: researchWithAgentInputSchema,
 		outputSchema: z.object({
 			result: z.string(),
 			taskId: z.string(),
 		}),
-		execute: async (input) => {
+		execute: async (input: z.infer<typeof researchWithAgentInputSchema>) => {
 			const result = await startResearchAgentTask(context, input);
 			return await Promise.resolve({ result: result.result, taskId: result.taskId });
 		},
