@@ -3,7 +3,7 @@ name: Build n8n and Create Docker Image
 on:
   workflow_dispatch:
   push:
-    branches: [ "dev/2.16.0" ]
+    branches: [ "dev/2.17.8" ]
 
 env:
   IMAGE_NAME: n8n-custom

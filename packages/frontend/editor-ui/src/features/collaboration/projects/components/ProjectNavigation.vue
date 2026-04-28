@@ -42,8 +42,8 @@ const isChatLinkAvailable = computed(() => {
 	return (
 		!isMember.value &&
 		settingsStore.isChatFeatureEnabled &&
-		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } }),
-);
+		hasPermission(['rbac'], { rbac: { scope: 'chatHub:message' } })
+	);
 });
 const isInstanceAiNavVisible = computed(() => {
 	if (!settingsStore.isModuleActive('instance-ai')) return false;
