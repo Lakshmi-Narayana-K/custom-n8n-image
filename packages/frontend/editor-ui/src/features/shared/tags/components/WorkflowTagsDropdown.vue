@@ -54,8 +54,11 @@ function handleBlur() {
 	emit('blur');
 }
 
-// Fetch all tags when the component is created
-void tagsStore.fetchAll();
+async function onDropdownVisibleChange(visible: boolean) {
+	if (visible) {
+		await tagsStore.fetchAll();
+	}
+}
 </script>
 
 <template>
@@ -71,5 +74,6 @@ void tagsStore.fetchAll();
 		@manage-tags="handleManageTags"
 		@esc="handleEsc"
 		@blur="handleBlur"
+		@visible-change="onDropdownVisibleChange"
 	/>
 </template>

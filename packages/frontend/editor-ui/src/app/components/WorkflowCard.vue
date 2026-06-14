@@ -49,6 +49,7 @@ import { useWorkflowActivate } from '@/app/composables/useWorkflowActivate';
 import { createEventBus } from '@n8n/utils/event-bus';
 import { useDynamicCredentials } from '@/features/resolvers/composables/useDynamicCredentials';
 import { useDependencies } from '@/app/composables/useDependencies';
+import { ROLE } from '@n8n/api-types';
 
 const WORKFLOW_LIST_ITEM_ACTIONS = {
 	OPEN: 'open',
@@ -146,6 +147,11 @@ const canCreateWorkflow = computed(
 	() => globalPermissions.value.create ?? projectPermissions.value.create,
 );
 
+const isGlobalOwnerOrAdmin = computed(() => {
+	const role = usersStore.currentUser?.role;
+	return role === ROLE.Owner || role === ROLE.Admin;
+});
+
 const showCardBreadcrumbs = computed(() => {
 	return props.showOwnershipBadge && !isSomeoneElsesWorkflow.value && cardBreadcrumbs.value.length;
 });
@@ -193,6 +199,7 @@ const actions = computed(() => {
 	}
 
 	if (
+		isGlobalOwnerOrAdmin.value &&
 		workflowPermissions.value.read &&
 		canCreateWorkflow.value &&
 		!props.readOnly &&

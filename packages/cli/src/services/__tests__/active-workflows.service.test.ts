@@ -1,28 +1,35 @@
 import { GLOBAL_ADMIN_ROLE, GLOBAL_MEMBER_ROLE, WorkflowEntity } from '@n8n/db';
-import type { User, SharedWorkflowRepository, WorkflowRepository } from '@n8n/db';
+import type { User, WorkflowRepository } from '@n8n/db';
 import { mock } from 'jest-mock-extended';
 
 import type { ActivationErrorsService } from '@/activation-errors.service';
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
+import type { License } from '@/license';
 import { ActiveWorkflowsService } from '@/services/active-workflows.service';
 import type { WorkflowFinderService } from '@/workflows/workflow-finder.service';
+import type { WorkflowSharingService } from '@/workflows/workflow-sharing.service';
 
 describe('ActiveWorkflowsService', () => {
 	const user = mock<User>();
 	const workflowRepository = mock<WorkflowRepository>();
-	const sharedWorkflowRepository = mock<SharedWorkflowRepository>();
+	const workflowSharingService = mock<WorkflowSharingService>();
 	const workflowFinderService = mock<WorkflowFinderService>();
 	const activationErrorsService = mock<ActivationErrorsService>();
+	const license = mock<License>();
 	const service = new ActiveWorkflowsService(
 		mock(),
 		workflowRepository,
-		sharedWorkflowRepository,
 		activationErrorsService,
 		workflowFinderService,
+		workflowSharingService,
+		license,
 	);
 	const activeIds = ['1', '2', '3', '4'];
 
-	beforeEach(() => jest.clearAllMocks());
+	beforeEach(() => {
+		jest.clearAllMocks();
+		license.isSharingEnabled.mockReturnValue(true);
+	});
 
 	describe('getAllActiveIdsInStorage', () => {
 		it('should filter out any workflow ids that have activation errors', async () => {
@@ -45,16 +52,26 @@ describe('ActiveWorkflowsService', () => {
 			const ids = await service.getAllActiveIdsFor(user);
 
 			expect(ids).toEqual(['2', '3', '4']);
-			expect(sharedWorkflowRepository.getSharedWorkflowIds).not.toHaveBeenCalled();
+			expect(workflowSharingService.getSharedWorkflowIds).not.toHaveBeenCalled();
 		});
 
 		it('should filter out workflow ids that the user does not have access to', async () => {
 			user.role = GLOBAL_MEMBER_ROLE;
-			sharedWorkflowRepository.getSharedWorkflowIds.mockResolvedValue(['3']);
+			workflowSharingService.getSharedWorkflowIds.mockResolvedValue(['2', '3']);
+			const ids = await service.getAllActiveIdsFor(user);
+
+			expect(ids).toEqual(['2', '3']);
+			expect(workflowSharingService.getSharedWorkflowIds).toHaveBeenCalledWith(user, {
+				scopes: ['workflow:read'],
+			});
+		});
+
+		it('should intersect user accessible ids with active workflow ids', async () => {
+			user.role = GLOBAL_MEMBER_ROLE;
+			workflowSharingService.getSharedWorkflowIds.mockResolvedValue(['3', '5', '6']);
 			const ids = await service.getAllActiveIdsFor(user);
 
 			expect(ids).toEqual(['3']);
-			expect(sharedWorkflowRepository.getSharedWorkflowIds).toHaveBeenCalledWith(activeIds);
 		});
 	});
 

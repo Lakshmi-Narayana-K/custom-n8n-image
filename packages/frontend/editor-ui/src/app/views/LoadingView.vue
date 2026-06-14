@@ -12,15 +12,13 @@ import { N8nSpinner } from '@n8n/design-system';
 
 <style lang="scss" module>
 .wrapper {
-	top: 0;
-	left: 0;
-	width: 100%;
-	height: 100%;
-	position: absolute;
+	position: fixed;
+	inset: 0;
+	z-index: 9997;
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	background-color: var(--color--background--light-2);
+	background-color: var(--color--background--light-2, var(--canvas--color--background, #121212));
 }
 
 .spinner {

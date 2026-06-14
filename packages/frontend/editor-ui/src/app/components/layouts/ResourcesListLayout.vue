@@ -592,7 +592,7 @@ defineExpose({
 		<template #header>
 			<slot name="header" />
 		</template>
-		<div v-if="loading" class="resource-list-loading">
+		<div v-if="loading" class="resource-list-loading resource-list-loading-instant">
 			<N8nLoading :rows="25" :shrink-last="false" />
 		</div>
 		<template v-else>

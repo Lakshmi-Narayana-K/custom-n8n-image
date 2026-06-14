@@ -44,6 +44,7 @@ const emit = defineEmits<{
 	esc: [];
 	blur: [];
 	'manage-tags': [];
+	'visible-change': [visible: boolean];
 }>();
 
 const MANAGE_KEY = '__manage';
@@ -196,6 +197,7 @@ function onVisibleChange(visible: boolean) {
 	} else {
 		focused.value = true;
 	}
+	emit('visible-change', visible);
 }
 
 function onRemoveTag() {

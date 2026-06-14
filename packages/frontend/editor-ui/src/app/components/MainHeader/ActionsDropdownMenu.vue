@@ -40,6 +40,7 @@ import { useCollaborationStore } from '@/features/collaboration/collaboration/co
 import { ResourceType } from '@/features/collaboration/projects/projects.utils';
 import { useMoveResourceToProjectToast } from '@/features/collaboration/projects/composables/useMoveResourceToProjectToast';
 import { injectWorkflowDocumentStore } from '@/app/stores/workflowDocument.store';
+import { ROLE } from '@n8n/api-types';
 
 const props = defineProps<{
 	workflowPermissions: PermissionsRecord['workflow'];
@@ -84,6 +85,11 @@ const onExecutionsTab = computed(() => {
 });
 
 const collaborationReadOnly = computed(() => collaborationStore.shouldBeReadOnly);
+
+const isGlobalOwnerOrAdmin = computed(() => {
+	const role = usersStore.currentUser?.role;
+	return role === ROLE.Owner || role === ROLE.Admin;
+});
 
 const isSharingEnabled = computed(
 	() => settingsStore.isEnterpriseFeatureEnabled[EnterpriseEditionFeature.Sharing],
@@ -159,11 +165,13 @@ const workflowMenuItems = computed<Array<ActionDropdownItem<WORKFLOW_MENU_ACTION
 			!sourceControlStore.preferences.branchReadOnly) ||
 		props.isNewWorkflow
 	) {
-		actions.unshift({
-			id: WORKFLOW_MENU_ACTIONS.DUPLICATE,
-			label: locale.baseText('menuActions.duplicate'),
-			disabled: !onWorkflowPage.value || !props.id,
-		});
+		if (isGlobalOwnerOrAdmin.value) {
+			actions.unshift({
+				id: WORKFLOW_MENU_ACTIONS.DUPLICATE,
+				label: locale.baseText('menuActions.duplicate'),
+				disabled: !onWorkflowPage.value || !props.id,
+			});
+		}
 		actions.unshift({
 			id: WORKFLOW_MENU_ACTIONS.EDIT_DESCRIPTION,
 			label: locale.baseText('menuActions.editDescription'),

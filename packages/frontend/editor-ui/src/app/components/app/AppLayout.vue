@@ -1,4 +1,5 @@
 <script lang="ts" setup>
+import LoadingView from '@/app/views/LoadingView.vue';
 import { defineAsyncComponent, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
@@ -38,7 +39,7 @@ function onMounted(element: Element) {
 </script>
 
 <template>
-	<div v-if="!initialized" />
+	<LoadingView v-if="!initialized" />
 	<Suspense v-else>
 		<SettingsLayout v-if="route.meta.layout === 'settings'" @mounted="onMounted" />
 		<WorkflowLayout v-else-if="route.meta.layout === 'workflow'" @mounted="onMounted" />

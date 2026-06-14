@@ -24,6 +24,8 @@ import { canvasEventBus } from '@/features/workflows/canvas/canvas.eventBus';
 import type { IWorkflowToShare } from '@/Interface';
 import { saveAs } from 'file-saver';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import { useUsersStore } from '@/features/settings/users/users.store';
+import { ROLE } from '@n8n/api-types';
 import {
 	useWorkflowDocumentStore,
 	createWorkflowDocumentId,
@@ -60,6 +62,7 @@ export function useWorkflowCommands(): CommandGroup {
 	const uiStore = useUIStore();
 	const tagsStore = useTagsStore();
 	const workflowsStore = useWorkflowsStore();
+	const usersStore = useUsersStore();
 	const sourceControlStore = useSourceControlStore();
 	const collaborationStore = useCollaborationStore();
 
@@ -86,6 +89,11 @@ export function useWorkflowCommands(): CommandGroup {
 	const hasPermission = (permission: keyof typeof workflowPermissions.value) =>
 		(workflowPermissions.value[permission] === true && !isReadOnly.value) ||
 		!workflowsStore.isWorkflowSaved[workflowsStore.workflowId];
+
+	const isGlobalOwnerOrAdmin = computed(() => {
+		const role = usersStore.currentUser?.role;
+		return role === ROLE.Owner || role === ROLE.Admin;
+	});
 
 	const credentialCommands = computed<CommandBarItem[]>(() => {
 		const credentials = uniqBy(
@@ -277,7 +285,7 @@ export function useWorkflowCommands(): CommandGroup {
 				},
 			},
 		},
-		...(hasPermission('create')
+		...(isGlobalOwnerOrAdmin.value && hasPermission('create')
 			? [
 					{
 						id: ITEM_ID.DUPLICATE_WORKFLOW,

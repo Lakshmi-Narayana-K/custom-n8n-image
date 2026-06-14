@@ -6,6 +6,7 @@ import type {
 	RouteLocationNormalized,
 } from 'vue-router';
 import { createRouter, createWebHistory, isNavigationFailure, RouterView } from 'vue-router';
+import { nextTick, ref } from 'vue';
 import { generateNanoId } from '@n8n/utils';
 import { useExternalHooks } from '@/app/composables/useExternalHooks';
 import { useSettingsStore } from '@/app/stores/settings.store';
@@ -1008,6 +1009,30 @@ function withCanvasReadOnlyMeta(route: RouteRecordRaw) {
 	return route;
 }
 
+/** True while route guards run — drives the slim top progress bar only. */
+export const routerNavigating = ref(false);
+
+const ROUTE_LOADER_MIN_MS = 120;
+let routeNavigationStartedAt = 0;
+
+function finishRouteNavigation() {
+	const elapsed = Date.now() - routeNavigationStartedAt;
+	const remaining = Math.max(0, ROUTE_LOADER_MIN_MS - elapsed);
+	const clear = () => {
+		routerNavigating.value = false;
+	};
+
+	void nextTick(() => {
+		requestAnimationFrame(() => {
+			if (remaining > 0) {
+				setTimeout(clear, remaining);
+				return;
+			}
+			clear();
+		});
+	});
+}
+
 const router = createRouter({
 	history: createWebHistory(import.meta.env.DEV ? '/' : (window.BASE_PATH ?? '/')),
 	scrollBehavior(to: RouteLocationNormalized, _, savedPosition) {
@@ -1021,6 +1046,11 @@ const router = createRouter({
 });
 
 router.beforeEach(async (to: RouteLocationNormalized, from, next) => {
+	// Slim top bar only when changing pages — not for query/hash-only updates.
+	if (to.path !== from.path || to.name !== from.name) {
+		routerNavigating.value = true;
+		routeNavigationStartedAt = Date.now();
+	}
 	try {
 		/**
 		 * Initialize application core
@@ -1081,10 +1111,14 @@ router.beforeEach(async (to: RouteLocationNormalized, from, next) => {
 		} else {
 			console.error(failure);
 		}
+		routerNavigating.value = false;
 	}
 });
 
 router.afterEach((to, from) => {
+	if (to.path !== from.path || to.name !== from.name) {
+		finishRouteNavigation();
+	}
 	try {
 		const telemetry = useTelemetry();
 		const uiStore = useUIStore();
