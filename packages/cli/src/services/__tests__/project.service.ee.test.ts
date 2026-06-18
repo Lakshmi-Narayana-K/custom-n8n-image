@@ -22,6 +22,8 @@ describe('ProjectService', () => {
 	const roleService = mock<RoleService>();
 	const sharedCredentialsRepository = mock<SharedCredentialsRepository>();
 	const moduleRegistry = mock<ModuleRegistry>({ entities: [] });
+	const cacheService = mock<import('@/services/cache/cache.service').CacheService>();
+	cacheService.get.mockResolvedValue(undefined);
 	const projectService = new ProjectService(
 		mock(),
 		projectRepository,
@@ -30,6 +32,7 @@ describe('ProjectService', () => {
 		sharedCredentialsRepository,
 		mock(),
 		moduleRegistry,
+		cacheService,
 	);
 
 	describe('getAccessibleProjectsAndCount', () => {

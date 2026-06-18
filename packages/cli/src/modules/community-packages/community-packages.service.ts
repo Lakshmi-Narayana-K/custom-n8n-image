@@ -23,7 +23,10 @@ import { FeatureNotLicensedError } from '@/errors/feature-not-licensed.error';
 import { License } from '@/license';
 import { LoadNodesAndCredentials } from '@/load-nodes-and-credentials';
 import { Publisher } from '@/scaling/pubsub/publisher.service';
+import { CacheService } from '@/services/cache/cache.service';
 import { toError } from '@/utils';
+
+import { COMMUNITY_NODE_TYPES_INSTALLED_CACHE_KEY } from './community-node-types.cache-keys';
 
 import { getCommunityNodeTypes, type StrapiCommunityNodeType } from './community-node-types-utils';
 import { CommunityPackagesConfig } from './community-packages.config';
@@ -69,6 +72,7 @@ export class CommunityPackagesService {
 		private readonly publisher: Publisher,
 		private readonly license: License,
 		private readonly config: CommunityPackagesConfig,
+		private readonly cacheService: CacheService,
 	) {}
 
 	async init() {
@@ -357,10 +361,15 @@ export class CommunityPackagesService {
 	async removePackage(packageName: string, installedPackage: InstalledPackages): Promise<void> {
 		await this.removeNpmPackage(packageName);
 		await this.removePackageFromDatabase(installedPackage);
+		await this.invalidateInstalledPackagesCache();
 		void this.publisher.publishCommand({
 			command: 'community-package-uninstall',
 			payload: { packageName },
 		});
+	}
+
+	private async invalidateInstalledPackagesCache() {
+		await this.cacheService.delete(COMMUNITY_NODE_TYPES_INSTALLED_CACHE_KEY);
 	}
 
 	private getNpmRegistry() {
@@ -429,6 +438,7 @@ export class CommunityPackagesService {
 					await this.removePackageFromDatabase(options.installedPackage);
 				}
 				const installedPackage = await this.persistInstalledPackage(loader);
+				await this.invalidateInstalledPackagesCache();
 				void this.publisher.publishCommand({
 					command: isUpdate ? 'community-package-update' : 'community-package-install',
 					payload: { packageName, packageVersion },
@@ -461,11 +471,13 @@ export class CommunityPackagesService {
 		packageVersion,
 	}: { packageName: string; packageVersion: string }) {
 		await this.installOrUpdateNpmPackage(packageName, packageVersion);
+		await this.invalidateInstalledPackagesCache();
 	}
 
 	@OnPubSubEvent('community-package-uninstall')
 	async handleUninstallEvent({ packageName }: { packageName: string }) {
 		await this.removeNpmPackage(packageName);
+		await this.invalidateInstalledPackagesCache();
 	}
 
 	private async installOrUpdateNpmPackage(packageName: string, packageVersion: string) {

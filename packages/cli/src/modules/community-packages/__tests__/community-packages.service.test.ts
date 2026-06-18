@@ -64,6 +64,7 @@ describe('CommunityPackagesService', () => {
 
 	const logger = mock<Logger>();
 	const publisher = mock<Publisher>();
+	const cacheService = mock<import('@/services/cache/cache.service').CacheService>();
 
 	const communityPackagesService = new CommunityPackagesService(
 		instanceSettings,
@@ -73,6 +74,7 @@ describe('CommunityPackagesService', () => {
 		publisher,
 		license,
 		config,
+		cacheService,
 	);
 
 	beforeEach(() => {

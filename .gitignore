@@ -63,3 +63,25 @@ packages/cli/src/commands/export/outputs
 .n8n
 lefthook-local.yml
 .playwright-mcp
+
+# Load testing & ECS infra (local/dev only — not part of n8n product code)
+load-test/
+load-test-scripts/
+browser_load_test*.py
+browser_results_*.csv
+realistic_results_*.csv
+run_meta_*.json
+metrics_*users_*.json
+http_load_test*.py
+load_test.py
+collect_aws_metrics.py
+generate_report.py
+db_query_counter.py
+push_to_ec2.sh
+ec2_setup.sh
+Report-Generated-*.html
+Report-Static.html
+.ec2_instance_id
+.ec2_ip
+seed_manifest_*.json
+seed_prod_simulation.py

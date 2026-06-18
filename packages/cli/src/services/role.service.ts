@@ -1,6 +1,7 @@
 import type { RoleAssignmentsResponse, RoleProjectMembersResponse } from '@n8n/api-types';
 import { CreateRoleDto, UpdateRoleDto } from '@n8n/api-types';
 import { LicenseState, Logger } from '@n8n/backend-common';
+import { Time } from '@n8n/constants';
 import {
 	CredentialsEntity,
 	SharedCredentials,
@@ -39,14 +40,19 @@ import { NotFoundError } from '@/errors/response-errors/not-found.error';
 import { isUniqueConstraintError } from '@/response-helper';
 
 import { RoleCacheService } from './role-cache.service';
+import { CacheService } from './cache/cache.service';
 
 @Service()
 export class RoleService {
+	private static readonly ROLES_LIST_CACHE_KEY = 'roles:list';
+	private static readonly ROLES_LIST_CACHE_TTL = 5 * Time.minutes.toMilliseconds;
+
 	constructor(
 		private readonly license: LicenseState,
 		private readonly roleRepository: RoleRepository,
 		private readonly scopeRepository: ScopeRepository,
 		private readonly roleCacheService: RoleCacheService,
+		private readonly cacheService: CacheService,
 		private readonly logger: Logger,
 	) {}
 
@@ -61,22 +67,39 @@ export class RoleService {
 	}
 
 	async getAllRoles(withCount: boolean = false): Promise<RoleDTO[]> {
-		const roles = await this.roleRepository.findAll();
-
-		if (!withCount) {
-			return roles.map((r) => this.dbRoleToRoleDTO(r));
+		const cacheKey = `${RoleService.ROLES_LIST_CACHE_KEY}:${withCount}`;
+		const cached = await this.cacheService.get<RoleDTO[]>(cacheKey);
+		if (cached !== undefined) {
+			return cached;
 		}
 
-		const [roleCounts, projectCounts] = await Promise.all([
-			this.roleRepository.findAllRoleCounts(),
-			this.roleRepository.findAllProjectCounts(),
-		]);
+		const roles = await this.roleRepository.findAll();
 
-		return roles.map((role) => {
-			const usedByUsers = roleCounts[role.slug] ?? 0;
-			const usedByProjects = projectCounts[role.slug] ?? 0;
-			return this.dbRoleToRoleDTO(role, usedByUsers, usedByProjects);
-		});
+		let result: RoleDTO[];
+		if (!withCount) {
+			result = roles.map((r) => this.dbRoleToRoleDTO(r));
+		} else {
+			const [roleCounts, projectCounts] = await Promise.all([
+				this.roleRepository.findAllRoleCounts(),
+				this.roleRepository.findAllProjectCounts(),
+			]);
+
+			result = roles.map((role) => {
+				const usedByUsers = roleCounts[role.slug] ?? 0;
+				const usedByProjects = projectCounts[role.slug] ?? 0;
+				return this.dbRoleToRoleDTO(role, usedByUsers, usedByProjects);
+			});
+		}
+
+		await this.cacheService.set(cacheKey, result, RoleService.ROLES_LIST_CACHE_TTL);
+		return result;
+	}
+
+	private async invalidateRolesListCache() {
+		await this.cacheService.deleteMany([
+			`${RoleService.ROLES_LIST_CACHE_KEY}:true`,
+			`${RoleService.ROLES_LIST_CACHE_KEY}:false`,
+		]);
 	}
 
 	async getRole(slug: string, withCount: boolean = false): Promise<RoleDTO> {
@@ -142,6 +165,7 @@ export class RoleService {
 
 		// Invalidate cache after role deletion
 		await this.roleCacheService.invalidateCache();
+		await this.invalidateRolesListCache();
 
 		return this.dbRoleToRoleDTO(role);
 	}
@@ -176,6 +200,7 @@ export class RoleService {
 
 			// Invalidate cache after role update
 			await this.roleCacheService.invalidateCache();
+			await this.invalidateRolesListCache();
 
 			return this.dbRoleToRoleDTO(updatedRole);
 		} catch (error) {
@@ -213,6 +238,7 @@ export class RoleService {
 
 			// Invalidate cache after role creation
 			await this.roleCacheService.invalidateCache();
+			await this.invalidateRolesListCache();
 
 			return this.dbRoleToRoleDTO(createdRole);
 		} catch (error) {

@@ -1,7 +1,10 @@
 import type { CommunityNodeType } from '@n8n/api-types';
 import { inProduction, Logger } from '@n8n/backend-common';
+import { Time } from '@n8n/constants';
 import { Service } from '@n8n/di';
 import { ensureError, isToolType, NodeConnectionTypes } from 'n8n-workflow';
+
+import { CacheService } from '@/services/cache/cache.service';
 
 import cloneDeep from 'lodash/cloneDeep';
 import {
@@ -11,6 +14,7 @@ import {
 	type CommunityNodesMetadata,
 } from './community-node-types-utils';
 import { CommunityPackagesConfig } from './community-packages.config';
+import { COMMUNITY_NODE_TYPES_INSTALLED_CACHE_KEY } from './community-node-types.cache-keys';
 import { CommunityPackagesService } from './community-packages.service';
 import { buildStrapiUpdateQuery } from './strapi-utils';
 
@@ -22,6 +26,7 @@ const STRAPI_ARRAY_LIMIT = 100;
 
 @Service()
 export class CommunityNodeTypesService {
+	private static readonly INSTALLED_CACHE_TTL = 5 * Time.minutes.toMilliseconds;
 	private communityNodeTypes: Map<string, StrapiCommunityNodeType> = new Map();
 
 	private lastUpdateTimestamp = 0;
@@ -30,6 +35,7 @@ export class CommunityNodeTypesService {
 		private readonly logger: Logger,
 		private config: CommunityPackagesConfig,
 		private communityPackagesService: CommunityPackagesService,
+		private readonly cacheService: CacheService,
 	) {}
 
 	private async detectUpdates(
@@ -197,10 +203,24 @@ export class CommunityNodeTypesService {
 	}
 
 	private async createIsInstalled() {
-		const installedPackages = (await this.communityPackagesService.getAllInstalledPackages()) ?? [];
-		const installedPackageNames = new Set(installedPackages.map((p) => p.packageName));
+		let installedPackageNames = await this.cacheService.get<string[]>(
+			COMMUNITY_NODE_TYPES_INSTALLED_CACHE_KEY,
+		);
 
-		return (nodeTypeName: string) => installedPackageNames.has(nodeTypeName.split('.')[0]);
+		if (installedPackageNames === undefined) {
+			const installedPackages =
+				(await this.communityPackagesService.getAllInstalledPackages()) ?? [];
+			installedPackageNames = installedPackages.map((p) => p.packageName);
+			await this.cacheService.set(
+				COMMUNITY_NODE_TYPES_INSTALLED_CACHE_KEY,
+				installedPackageNames,
+				CommunityNodeTypesService.INSTALLED_CACHE_TTL,
+			);
+		}
+
+		const nameSet = new Set(installedPackageNames);
+
+		return (nodeTypeName: string) => nameSet.has(nodeTypeName.split('.')[0]);
 	}
 
 	async getCommunityNodeTypes(): Promise<CommunityNodeType[]> {

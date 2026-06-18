@@ -1,5 +1,6 @@
 import type { CreateCredentialDto } from '@n8n/api-types';
 import { Logger } from '@n8n/backend-common';
+import { Time } from '@n8n/constants';
 import {
 	Project,
 	CredentialsEntity,
@@ -53,6 +54,7 @@ import { validateOAuthUrl } from '@/oauth/validate-oauth-url';
 import { userHasScopes } from '@/permissions.ee/check-access';
 import type { CredentialRequest, ListQuery } from '@/requests';
 import { CredentialsTester } from '@/services/credentials-tester.service';
+import { CacheService } from '@/services/cache/cache.service';
 import { OwnershipService } from '@/services/ownership.service';
 import { ProjectService } from '@/services/project.service.ee';
 import { RoleService } from '@/services/role.service';
@@ -90,6 +92,8 @@ type GetManyCredentialsOptions = {
 
 @Service()
 export class CredentialsService {
+	private static readonly WORKFLOW_CREDS_CACHE_TTL = 1 * Time.minutes.toMilliseconds;
+
 	constructor(
 		private readonly credentialsRepository: CredentialsRepository,
 		private readonly credentialDependencyService: CredentialDependencyService,
@@ -108,6 +112,7 @@ export class CredentialsService {
 		private readonly credentialsHelper: CredentialsHelper,
 		private readonly externalSecretsConfig: ExternalSecretsConfig,
 		private readonly externalSecretsProviderAccessCheckService: SecretsProviderAccessCheckService,
+		private readonly cacheService: CacheService,
 	) {}
 
 	private async addGlobalCredentials(
@@ -488,6 +493,26 @@ export class CredentialsService {
 		user: User,
 		options: { workflowId: string } | { projectId: string },
 	) {
+		const cacheKey =
+			'workflowId' in options
+				? `credentials:workflow:${user.id}:${options.workflowId}`
+				: `credentials:workflow:${user.id}:project:${options.projectId}`;
+
+		type WorkflowCredential = {
+			id: string;
+			name: string;
+			type: string;
+			scopes: Scope[];
+			isManaged: boolean;
+			isGlobal: boolean;
+			isResolvable: boolean;
+		};
+
+		const cached = await this.cacheService.get<WorkflowCredential[]>(cacheKey);
+		if (cached !== undefined) {
+			return cached;
+		}
+
 		// necessary to get the scopes
 		const projectRelations = await this.projectService.getProjectRelationsForUser(user);
 
@@ -508,7 +533,7 @@ export class CredentialsService {
 			(c) => allCredentialsForWorkflow.includes(c.id) || c.isGlobal,
 		);
 
-		return intersection
+		const result = intersection
 			.map((c) => this.roleService.addScopes(c, user, projectRelations))
 			.map((c) => ({
 				id: c.id,
@@ -519,6 +544,9 @@ export class CredentialsService {
 				isGlobal: c.isGlobal,
 				isResolvable: c.isResolvable,
 			}));
+
+		await this.cacheService.set(cacheKey, result, CredentialsService.WORKFLOW_CREDS_CACHE_TTL);
+		return result;
 	}
 
 	async findAllGlobalCredentialIds(includeData: boolean = false): Promise<CredentialsEntity[]> {

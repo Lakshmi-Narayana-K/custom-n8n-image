@@ -33,12 +33,24 @@ describe('CommunityNodeTypesService', () => {
 			verifiedEnabled: true,
 			aiNodeSdkVersion: 1,
 		};
-		communityPackagesServiceMock = {};
+		communityPackagesServiceMock = {
+			getAllInstalledPackages: jest.fn().mockResolvedValue([]),
+		};
+		const cacheServiceMock = {
+			get: jest.fn().mockResolvedValue(undefined),
+			set: jest.fn().mockResolvedValue(undefined),
+			delete: jest.fn().mockResolvedValue(undefined),
+		};
 
 		if (mockDateNow.mockRestore) mockDateNow.mockRestore();
 		if (mockMathRandom.mockRestore) mockMathRandom.mockRestore();
 
-		service = new CommunityNodeTypesService(loggerMock, configMock, communityPackagesServiceMock);
+		service = new CommunityNodeTypesService(
+			loggerMock,
+			configMock,
+			communityPackagesServiceMock,
+			cacheServiceMock as any,
+		);
 	});
 
 	afterEach(() => {

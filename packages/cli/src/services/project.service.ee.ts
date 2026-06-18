@@ -1,6 +1,6 @@
 import type { CreateProjectDto, ProjectType, UpdateProjectDto } from '@n8n/api-types';
 import { LicenseState, ModuleRegistry } from '@n8n/backend-common';
-import { UNLIMITED_LICENSE_QUOTA } from '@n8n/constants';
+import { Time, UNLIMITED_LICENSE_QUOTA } from '@n8n/constants';
 import {
 	type User,
 	Project,
@@ -33,6 +33,7 @@ import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
 import { NotFoundError } from '@/errors/response-errors/not-found.error';
 
 import { RoleService } from './role.service';
+import { CacheService } from './cache/cache.service';
 
 export class TeamProjectOverQuotaError extends UserError {
 	constructor(limit: number) {
@@ -65,6 +66,9 @@ class ProjectNotFoundError extends NotFoundError {
 
 @Service()
 export class ProjectService {
+	private static readonly PROJECT_CACHE_TTL = 2 * Time.minutes.toMilliseconds;
+	private static readonly PROJECTS_COUNT_CACHE_KEY = 'projects:count';
+
 	constructor(
 		private readonly sharedWorkflowRepository: SharedWorkflowRepository,
 		private readonly projectRepository: ProjectRepository,
@@ -73,7 +77,28 @@ export class ProjectService {
 		private readonly sharedCredentialsRepository: SharedCredentialsRepository,
 		private readonly licenseState: LicenseState,
 		private readonly moduleRegistry: ModuleRegistry,
+		private readonly cacheService: CacheService,
 	) {}
+
+	private projectRelationsCacheKey(userId: string) {
+		return `projects:relations:${userId}`;
+	}
+
+	private projectPersonalCacheKey(userId: string) {
+		return `projects:personal:${userId}`;
+	}
+
+	private async invalidateProjectCaches(userIds: string[] = []) {
+		await this.cacheService.delete(ProjectService.PROJECTS_COUNT_CACHE_KEY);
+		if (userIds.length > 0) {
+			await this.cacheService.deleteMany(
+				userIds.flatMap((userId) => [
+					this.projectRelationsCacheKey(userId),
+					this.projectPersonalCacheKey(userId),
+				]),
+			);
+		}
+	}
 
 	private get workflowService() {
 		return import('@/workflows/workflow.service').then(({ WorkflowService }) =>
@@ -207,7 +232,13 @@ export class ProjectService {
 		}
 
 		// 8. delete project
+		const projectRelations = await this.projectRelationRepository.find({
+			where: { projectId: project.id },
+			select: ['userId'],
+		});
+		const memberUserIds = projectRelations.map((relation) => relation.userId);
 		await this.projectRepository.remove(project);
+		await this.invalidateProjectCaches([user.id, ...memberUserIds]);
 
 		// 9. delete project relations
 		// Cascading deletes take care of this.
@@ -309,9 +340,14 @@ export class ProjectService {
 	async createTeamProject(adminUser: User, data: CreateProjectDto): Promise<Project> {
 		// This needs to be SERIALIZABLE otherwise the count would not block a
 		// concurrent transaction and we could insert multiple projects.
-		return await this.projectRepository.manager.transaction('SERIALIZABLE', async (trx) => {
-			return await this.createTeamProjectWithEntityManager(adminUser, data, trx);
-		});
+		const project = await this.projectRepository.manager.transaction(
+			'SERIALIZABLE',
+			async (trx) => {
+				return await this.createTeamProjectWithEntityManager(adminUser, data, trx);
+			},
+		);
+		await this.invalidateProjectCaches([adminUser.id]);
+		return project;
 	}
 
 	async updateProject(
@@ -328,14 +364,30 @@ export class ProjectService {
 	}
 
 	async getPersonalProject(user: User): Promise<Project | null> {
-		return await this.projectRepository.getPersonalProjectForUser(user.id);
+		const cacheKey = this.projectPersonalCacheKey(user.id);
+		const cached = await this.cacheService.get<Project | null>(cacheKey);
+		if (cached !== undefined) {
+			return cached;
+		}
+
+		const project = await this.projectRepository.getPersonalProjectForUser(user.id);
+		await this.cacheService.set(cacheKey, project, ProjectService.PROJECT_CACHE_TTL);
+		return project;
 	}
 
 	async getProjectRelationsForUser(user: User): Promise<ProjectRelation[]> {
-		return await this.projectRelationRepository.find({
+		const cacheKey = this.projectRelationsCacheKey(user.id);
+		const cached = await this.cacheService.get<ProjectRelation[]>(cacheKey);
+		if (cached !== undefined) {
+			return cached;
+		}
+
+		const relations = await this.projectRelationRepository.find({
 			where: { userId: user.id },
 			relations: ['project', 'role'],
 		});
+		await this.cacheService.set(cacheKey, relations, ProjectService.PROJECT_CACHE_TTL);
+		return relations;
 	}
 
 	async syncProjectRelations(
@@ -362,6 +414,14 @@ export class ProjectService {
 		const newRelations = relations.filter(
 			(relation) => !project.projectRelations.some((r) => r.userId === relation.userId),
 		);
+
+		const affectedUserIds = [
+			...new Set([
+				...project.projectRelations.map((relation) => relation.userId),
+				...relations.map((relation) => relation.userId),
+			]),
+		];
+		await this.invalidateProjectCaches(affectedUserIds);
 
 		return { project, newRelations };
 	}
@@ -400,6 +460,7 @@ export class ProjectService {
 				role: { slug: relation.role },
 			})),
 		);
+		await this.invalidateProjectCaches(relations.map((relation) => relation.userId));
 	}
 
 	/**
@@ -458,6 +519,7 @@ export class ProjectService {
 				})),
 			);
 			added.push(...toInsert);
+			await this.invalidateProjectCaches(toInsert.map((relation) => relation.userId));
 		}
 
 		return { project, added, conflicts };
@@ -502,6 +564,7 @@ export class ProjectService {
 		}
 
 		await this.projectRelationRepository.delete({ projectId: project.id, userId });
+		await this.invalidateProjectCaches([userId]);
 	}
 
 	async changeUserRoleInProject(projectId: string, userId: string, role: AssignableProjectRole) {
@@ -529,6 +592,7 @@ export class ProjectService {
 		}
 
 		await this.projectRelationRepository.update({ projectId, userId }, { role: { slug: role } });
+		await this.invalidateProjectCaches([userId]);
 	}
 
 	async pruneRelations(em: EntityManager, project: Project) {
@@ -661,6 +725,19 @@ export class ProjectService {
 	}
 
 	async getProjectCounts(): Promise<Record<ProjectType, number>> {
-		return await this.projectRepository.getProjectCounts();
+		const cached = await this.cacheService.get<Record<ProjectType, number>>(
+			ProjectService.PROJECTS_COUNT_CACHE_KEY,
+		);
+		if (cached !== undefined) {
+			return cached;
+		}
+
+		const counts = await this.projectRepository.getProjectCounts();
+		await this.cacheService.set(
+			ProjectService.PROJECTS_COUNT_CACHE_KEY,
+			counts,
+			ProjectService.PROJECT_CACHE_TTL,
+		);
+		return counts;
 	}
 }
