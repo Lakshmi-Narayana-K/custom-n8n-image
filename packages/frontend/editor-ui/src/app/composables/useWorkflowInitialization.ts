@@ -99,25 +99,35 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 		return (Array.isArray(name) ? name[0] : name) ?? '';
 	});
 
-	async function loadCredentials() {
-		let options: { workflowId: string } | { projectId: string };
-
+	/**
+	 * Builds the options object used to fetch credentials for the current workflow.
+	 * Kept separate so it can be called lazily (on node panel open) rather than
+	 * blocking the workflow canvas load.
+	 */
+	function buildCredentialOptions(): { workflowId: string } | { projectId: string } {
 		if (workflowId.value && !isNewWorkflowRoute.value) {
-			options = { workflowId: workflowId.value };
-		} else {
-			const queryParam =
-				typeof route.query?.projectId === 'string' ? route.query?.projectId : undefined;
-			const projectId = queryParam ?? projectsStore.personalProject?.id;
-			if (projectId === undefined) {
-				throw new Error(
-					'Could not find projectId in the query nor could I find the personal project in the project store',
-				);
-			}
-
-			options = { projectId };
+			return { workflowId: workflowId.value };
 		}
 
-		await credentialsStore.fetchAllCredentialsForWorkflow(options);
+		const queryParam =
+			typeof route.query?.projectId === 'string' ? route.query?.projectId : undefined;
+		const projectId = queryParam ?? projectsStore.personalProject?.id;
+		if (projectId === undefined) {
+			throw new Error(
+				'Could not find projectId in the query nor could I find the personal project in the project store',
+			);
+		}
+
+		return { projectId };
+	}
+
+	/**
+	 * Lazily loads credentials for the current workflow on demand.
+	 * The credentials store deduplicates concurrent calls so it is safe to
+	 * call this multiple times (e.g. from different node panels).
+	 */
+	async function loadCredentials() {
+		await credentialsStore.fetchAllCredentialsForWorkflow(buildCredentialOptions());
 	}
 
 	/**
@@ -198,8 +208,12 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 			const promises: Array<Promise<unknown>> = [
 				workflowsListStore.fetchActiveWorkflows(),
 				credentialsStore.fetchCredentialTypes(true),
-				loadCredentials(),
 			];
+
+			// Credentials are not needed to render the canvas — load them in the
+			// background so the workflow nodes appear faster. The credential picker
+			// in node panels calls loadCredentials() on demand via the store.
+			void loadCredentials();
 
 			if (settingsStore.isEnterpriseFeatureEnabled[EnterpriseEditionFeature.Variables]) {
 				promises.push(environmentsStore.fetchAllVariables());

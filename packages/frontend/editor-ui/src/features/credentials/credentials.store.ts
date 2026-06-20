@@ -312,15 +312,33 @@ export const useCredentialsStore = defineStore(STORES.CREDENTIALS, () => {
 		return credentials;
 	};
 
+	// In-flight promise deduplicator — prevents multiple concurrent callers
+	// (e.g. several node panels opening at the same time) from sending
+	// redundant requests for the same workflow's credentials.
+	const _credentialFetchInFlight = new Map<string, Promise<ICredentialsResponse[]>>();
+
 	const fetchAllCredentialsForWorkflow = async (
 		options: { workflowId: string } | { projectId: string },
 	): Promise<ICredentialsResponse[]> => {
-		const credentials = await credentialsApi.getAllCredentialsForWorkflow(
-			rootStore.restApiContext,
-			options,
-		);
-		setCredentials(credentials);
-		return credentials;
+		const cacheKey = 'workflowId' in options ? options.workflowId : `project:${options.projectId}`;
+
+		const inflight = _credentialFetchInFlight.get(cacheKey);
+		if (inflight) return inflight;
+
+		const promise = credentialsApi
+			.getAllCredentialsForWorkflow(rootStore.restApiContext, options)
+			.then((credentials) => {
+				setCredentials(credentials);
+				_credentialFetchInFlight.delete(cacheKey);
+				return credentials;
+			})
+			.catch((err: unknown) => {
+				_credentialFetchInFlight.delete(cacheKey);
+				throw err;
+			});
+
+		_credentialFetchInFlight.set(cacheKey, promise);
+		return promise;
 	};
 
 	const getCredentialData = async ({

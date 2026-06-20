@@ -66,6 +66,8 @@ lefthook-local.yml
 
 # Load testing & ECS infra (local/dev only — not part of n8n product code)
 load-test/
+load-test-prod/
+load-test-alpha/
 load-test-scripts/
 browser_load_test*.py
 browser_results_*.csv

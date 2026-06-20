@@ -44,6 +44,10 @@ export class WorkflowIndexService {
 
 	init() {
 		this.eventService.on('server-started', async (): Promise<void> => {
+			// Stagger startup indexing across instances to avoid thundering herd on DB
+			// when many tasks start simultaneously (e.g. scale-out events).
+			const jitterMs = Math.floor(Math.random() * 30_000);
+			await new Promise<void>((resolve) => setTimeout(resolve, jitterMs));
 			this.logger.info('Building workflow dependency index...');
 			await this.buildIndex().catch((e) => this.errorReporter.error(e));
 		});

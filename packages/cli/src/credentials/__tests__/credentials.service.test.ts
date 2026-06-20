@@ -5,6 +5,7 @@ import type {
 	SharedCredentialsRepository,
 	ProjectRepository,
 	UserRepository,
+	WorkflowRepository,
 	User,
 } from '@n8n/db';
 import { GLOBAL_OWNER_ROLE, GLOBAL_MEMBER_ROLE } from '@n8n/db';
@@ -35,6 +36,7 @@ import type { CredentialsTester } from '@/services/credentials-tester.service';
 import type { OwnershipService } from '@/services/ownership.service';
 import type { ProjectService } from '@/services/project.service.ee';
 import type { RoleService } from '@/services/role.service';
+import type { CacheService } from '@/services/cache/cache.service';
 
 const ownerUser = mock<User>({ id: 'owner-id', role: GLOBAL_OWNER_ROLE });
 const memberUser = mock<User>({ id: 'member-id', role: GLOBAL_MEMBER_ROLE });
@@ -75,6 +77,8 @@ describe('CredentialsService', () => {
 	const credentialsHelper = mock<CredentialsHelper>();
 	const externalSecretsConfig = mock<ExternalSecretsConfig>();
 	const externalSecretsProviderAccessCheckService = mock<SecretsProviderAccessCheckService>();
+	const cacheService = mock<CacheService>();
+	const workflowRepository = mock<WorkflowRepository>();
 
 	const service = new CredentialsService(
 		credentialsRepository,
@@ -94,6 +98,8 @@ describe('CredentialsService', () => {
 		credentialsHelper,
 		externalSecretsConfig,
 		externalSecretsProviderAccessCheckService,
+		cacheService,
+		workflowRepository,
 	);
 
 	beforeEach(() => {
@@ -1605,15 +1611,20 @@ describe('CredentialsService', () => {
 			roleService.addScopes.mockImplementation(
 				(c) => ({ ...c, scopes: ['credential:read'] }) as any,
 			);
+			// Cache always misses in unit tests so real logic runs
+			cacheService.get.mockResolvedValue(undefined);
+			cacheService.set.mockResolvedValue(undefined);
 		});
 
 		it('should include global credentials for workflows', async () => {
 			// ARRANGE
-			credentialsFinderService.findCredentialsForUser.mockResolvedValue([
-				regularCredential,
-				globalCredential,
-			]);
+			credentialsFinderService.findCredentialsForUser.mockResolvedValue([regularCredential]);
 			credentialsRepository.findAllCredentialsForWorkflow.mockResolvedValue([regularCredential]);
+			credentialsFinderService.fetchAllGlobalCredentials.mockResolvedValue([globalCredential]);
+			// workflow node uses cred-2 (the global credential)
+			workflowRepository.findOne.mockResolvedValue({
+				nodes: [{ credentials: { oauth2: { id: 'cred-2', name: 'Global Credential' } } }],
+			} as any);
 
 			// ACT
 			const result = await service.getCredentialsAUserCanUseInAWorkflow(user, {
@@ -1633,13 +1644,11 @@ describe('CredentialsService', () => {
 			);
 		});
 
-		it('should include global credentials for projects', async () => {
-			// ARRANGE
-			credentialsFinderService.findCredentialsForUser.mockResolvedValue([
-				regularCredential,
-				globalCredential,
-			]);
+		it('should include global credentials for projects (all globals, no node filter)', async () => {
+			// ARRANGE - project-scoped: no workflow nodes, so all globals are included
+			credentialsFinderService.findCredentialsForUser.mockResolvedValue([regularCredential]);
 			credentialsRepository.findAllCredentialsForProject.mockResolvedValue([regularCredential]);
+			credentialsFinderService.fetchAllGlobalCredentials.mockResolvedValue([globalCredential]);
 
 			// ACT
 			const result = await service.getCredentialsAUserCanUseInAWorkflow(user, {
@@ -1661,14 +1670,16 @@ describe('CredentialsService', () => {
 
 		it('should not duplicate credentials when user has access to global credential through project', async () => {
 			// ARRANGE - Both regular and global credentials are in workflow's project
-			credentialsFinderService.findCredentialsForUser.mockResolvedValue([
-				regularCredential,
-				globalCredential,
-			]);
+			credentialsFinderService.findCredentialsForUser.mockResolvedValue([regularCredential]);
 			credentialsRepository.findAllCredentialsForWorkflow.mockResolvedValue([
 				regularCredential,
 				globalCredential,
 			]);
+			credentialsFinderService.fetchAllGlobalCredentials.mockResolvedValue([globalCredential]);
+			// workflow node uses cred-2 (the global credential)
+			workflowRepository.findOne.mockResolvedValue({
+				nodes: [{ credentials: { oauth2: { id: 'cred-2', name: 'Global Credential' } } }],
+			} as any);
 
 			// ACT
 			const result = await service.getCredentialsAUserCanUseInAWorkflow(user, {
@@ -1678,7 +1689,7 @@ describe('CredentialsService', () => {
 			// ASSERT
 			expect(result).toHaveLength(2);
 			const credIds = result.map((c) => c.id);
-			expect(credIds).toEqual(['cred-1', 'cred-2']);
+			expect(credIds).toEqual(expect.arrayContaining(['cred-1', 'cred-2']));
 			// Verify no duplicates
 			expect(new Set(credIds).size).toBe(2);
 		});

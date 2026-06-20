@@ -7,9 +7,9 @@ type CacheBackend = z.infer<typeof cacheBackendSchema>;
 
 @Config
 class MemoryConfig {
-	/** Maximum size of the in-memory cache in bytes. Default: 3 MiB. */
+	/** Maximum size of the in-memory cache in bytes. Default: 100 MiB. */
 	@Env('N8N_CACHE_MEMORY_MAX_SIZE')
-	maxSize: number = 3 * 1024 * 1024; // 3 MiB
+	maxSize: number = 100 * 1024 * 1024; // 100 MiB
 
 	/** Time to live in milliseconds for entries in the memory cache. Default: 1 hour. */
 	@Env('N8N_CACHE_MEMORY_TTL')

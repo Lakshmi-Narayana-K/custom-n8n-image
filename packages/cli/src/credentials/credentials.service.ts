@@ -9,6 +9,7 @@ import {
 	ProjectRepository,
 	SharedCredentialsRepository,
 	UserRepository,
+	WorkflowRepository,
 } from '@n8n/db';
 import type { User, ICredentialsDb, ScopesField } from '@n8n/db';
 import { Service } from '@n8n/di';
@@ -92,7 +93,11 @@ type GetManyCredentialsOptions = {
 
 @Service()
 export class CredentialsService {
-	private static readonly WORKFLOW_CREDS_CACHE_TTL = 1 * Time.minutes.toMilliseconds;
+	private static readonly WORKFLOW_CREDS_CACHE_TTL = 30 * Time.minutes.toMilliseconds;
+
+	/** Shared across all users — global credentials don't change per-user. */
+	private static readonly GLOBAL_CREDS_CACHE_KEY = 'credentials:global-list';
+	private static readonly GLOBAL_CREDS_CACHE_TTL = 30 * Time.minutes.toMilliseconds;
 
 	constructor(
 		private readonly credentialsRepository: CredentialsRepository,
@@ -113,6 +118,7 @@ export class CredentialsService {
 		private readonly externalSecretsConfig: ExternalSecretsConfig,
 		private readonly externalSecretsProviderAccessCheckService: SecretsProviderAccessCheckService,
 		private readonly cacheService: CacheService,
+		private readonly workflowRepository: WorkflowRepository,
 	) {}
 
 	private async addGlobalCredentials(
@@ -516,7 +522,7 @@ export class CredentialsService {
 		// necessary to get the scopes
 		const projectRelations = await this.projectService.getProjectRelationsForUser(user);
 
-		// get all credentials the user has access to (including global credentials)
+		// get all non-global credentials the user has direct access to
 		const allCredentials = await this.credentialsFinderService.findCredentialsForUser(user, [
 			'credential:read',
 		]);
@@ -527,13 +533,56 @@ export class CredentialsService {
 				? (await this.findAllCredentialIdsForWorkflow(options.workflowId)).map((c) => c.id)
 				: (await this.findAllCredentialIdsForProject(options.projectId)).map((c) => c.id);
 
-		// the intersection of both is all credentials the user can use in this
-		// workflow or project
-		const intersection = allCredentials.filter(
-			(c) => allCredentialsForWorkflow.includes(c.id) || c.isGlobal,
-		);
+		// Fix 4: resolve the set of credential IDs actually referenced by
+		// this workflow's nodes so we only include the relevant globals instead
+		// of every global credential in the instance (can be 41k+).
+		// For project-scoped requests (new/unsaved workflow) there are no nodes
+		// yet, so we keep all globals to give the credential picker a full choice.
+		const workflowNodeCredIds =
+			'workflowId' in options
+				? await this.getCredentialIdsUsedByWorkflowNodes(options.workflowId)
+				: null;
 
-		const result = intersection
+		// Fix 3: cache raw global credentials (id/name/type/flags only — no scopes,
+		// which are per-user) in a shared key so one DB query serves all users
+		// instead of N×users separate queries.
+		type RawGlobalCredential = Pick<
+			CredentialsEntity,
+			'id' | 'name' | 'type' | 'isManaged' | 'isGlobal' | 'isResolvable' | 'shared'
+		>;
+		let rawGlobalCredentials = await this.cacheService.get<RawGlobalCredential[]>(
+			CredentialsService.GLOBAL_CREDS_CACHE_KEY,
+		);
+		if (rawGlobalCredentials === undefined) {
+			rawGlobalCredentials = await this.credentialsFinderService.fetchAllGlobalCredentials();
+			await this.cacheService.set(
+				CredentialsService.GLOBAL_CREDS_CACHE_KEY,
+				rawGlobalCredentials,
+				CredentialsService.GLOBAL_CREDS_CACHE_TTL,
+			);
+		}
+
+		// Fix 4: only include globals actually referenced by this workflow's nodes.
+		// When workflowNodeCredIds is null (project-scoped), include all globals.
+		const relevantGlobalIds = workflowNodeCredIds !== null ? new Set(workflowNodeCredIds) : null;
+		const relevantGlobals = rawGlobalCredentials
+			.filter((c) => relevantGlobalIds === null || relevantGlobalIds.has(c.id))
+			// Add per-user scopes at serve time — scopes depend on user role
+			// and must not be stored in the shared cache.
+			.map((c) => this.roleService.addScopes(c as CredentialsEntity, user, projectRelations))
+			.map((c) => ({
+				id: c.id,
+				name: c.name,
+				type: c.type,
+				scopes: c.scopes,
+				isManaged: c.isManaged,
+				isGlobal: c.isGlobal,
+				isResolvable: c.isResolvable,
+			}));
+
+		// Union: non-global creds the user/workflow can access + relevant globals
+		const nonGlobal = allCredentials
+			.filter((c) => !c.isGlobal && allCredentialsForWorkflow.includes(c.id))
 			.map((c) => this.roleService.addScopes(c, user, projectRelations))
 			.map((c) => ({
 				id: c.id,
@@ -545,8 +594,35 @@ export class CredentialsService {
 				isResolvable: c.isResolvable,
 			}));
 
+		const result = [...nonGlobal, ...relevantGlobals];
+
 		await this.cacheService.set(cacheKey, result, CredentialsService.WORKFLOW_CREDS_CACHE_TTL);
 		return result;
+	}
+
+	/**
+	 * Returns the set of credential IDs that are wired into nodes of the
+	 * given workflow (draft nodes). Falls back to an empty array if the
+	 * workflow cannot be found.
+	 */
+	private async getCredentialIdsUsedByWorkflowNodes(workflowId: string): Promise<string[]> {
+		const workflow = await this.workflowRepository.findOne({
+			where: { id: workflowId },
+			select: ['nodes'],
+		});
+
+		if (!workflow?.nodes) {
+			return [];
+		}
+
+		const ids: string[] = [];
+		for (const node of workflow.nodes) {
+			if (!node.credentials) continue;
+			for (const cred of Object.values(node.credentials)) {
+				if (cred?.id) ids.push(cred.id);
+			}
+		}
+		return ids;
 	}
 
 	async findAllGlobalCredentialIds(includeData: boolean = false): Promise<CredentialsEntity[]> {

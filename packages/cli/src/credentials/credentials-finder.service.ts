@@ -30,6 +30,14 @@ export class CredentialsFinderService {
 	}
 
 	/**
+	 * Public wrapper around fetchGlobalCredentials for use in the shared
+	 * credentials cache — returns all global credentials without a transaction.
+	 */
+	async fetchAllGlobalCredentials(): Promise<CredentialsEntity[]> {
+		return this.fetchGlobalCredentials();
+	}
+
+	/**
 	 * Checks if the scopes allow read-only access to global credentials.
 	 * Global credentials can be accessed with credential:read scope only.
 	 */
