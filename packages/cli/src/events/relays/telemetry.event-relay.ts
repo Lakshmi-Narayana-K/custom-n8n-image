@@ -32,6 +32,7 @@ import { N8N_VERSION } from '@/constants';
 import { EventService } from '@/events/event.service';
 import type { RelayEventMap } from '@/events/maps/relay.event-map';
 import { determineFinalExecutionStatus } from '@/execution-lifecycle/shared/shared-hook-functions';
+import { classifyExecutionErrorCategory } from '@/services/performance-error-category';
 import type { IExecutionTrackProperties } from '@/interfaces';
 import { License } from '@/license';
 import { NodeTypes } from '@/node-types';
@@ -1018,15 +1019,18 @@ export class TelemetryEventRelay extends EventRelay {
 					}
 
 					this.telemetry.track('Manual workflow exec finished', manualExecEventProperties);
-
-					if (runData.startedAt && runData.stoppedAt) {
-						this.performanceMetricsService.record({
-							event_name: 'workflow_execute',
-							duration_ms: runData.stoppedAt.getTime() - runData.startedAt.getTime(),
-							workflow_id: workflow.id,
-						});
-					}
 				}
+			}
+
+			if (runData.startedAt && runData.stoppedAt) {
+				this.performanceMetricsService.record({
+					event_name: 'workflow_execute',
+					duration_ms: runData.stoppedAt.getTime() - runData.startedAt.getTime(),
+					workflow_id: workflow.id,
+					user_id: userId,
+					status: executionStatus,
+					error_category: classifyExecutionErrorCategory(executionStatus, runData),
+				});
 			}
 		}
 

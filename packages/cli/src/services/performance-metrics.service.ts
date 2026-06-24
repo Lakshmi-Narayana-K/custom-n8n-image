@@ -19,6 +19,8 @@ export type PerformanceEventPayload = {
 	workflow_fetch_ms?: number;
 	last_successful_ms?: number;
 	user_id?: string;
+	status?: string;
+	error_category?: string;
 };
 
 @Service()
@@ -45,6 +47,8 @@ export class PerformanceMetricsService {
 			workflow_fetch_ms: payload.workflow_fetch_ms,
 			last_successful_ms: payload.last_successful_ms,
 			user_id: payload.user_id,
+			status: payload.status,
+			error_category: payload.error_category,
 		});
 	}
 }
