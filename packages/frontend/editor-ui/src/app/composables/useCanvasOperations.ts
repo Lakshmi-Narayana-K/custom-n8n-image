@@ -23,6 +23,7 @@ import { useI18n } from '@n8n/i18n';
 import { useNodeHelpers } from '@/app/composables/useNodeHelpers';
 import { type PinDataSource, usePinnedData } from '@/app/composables/usePinnedData';
 import { useTelemetry } from '@/app/composables/useTelemetry';
+import { reportPerformanceEvent } from '@/app/composables/usePerformanceReporter';
 import { useToast } from '@/app/composables/useToast';
 import { useWorkflowHelpers } from '@/app/composables/useWorkflowHelpers';
 import { getExecutionErrorToastConfiguration } from '@/features/execution/executions/executions.utils';
@@ -469,6 +470,7 @@ export function useCanvasOperations() {
 	}
 
 	function deleteNode(id: string, { trackHistory = false, trackBulk = true } = {}) {
+		const deleteStartedAt = performance.now();
 		const node = workflowDocumentStore?.value?.getNodeById(id);
 		if (!node) {
 			return;
@@ -497,6 +499,15 @@ export function useCanvasOperations() {
 		}
 
 		trackDeleteNode(id);
+
+		if (node.type !== STICKY_NODE_TYPE) {
+			reportPerformanceEvent({
+				event_name: 'node_delete',
+				duration_ms: Math.round(performance.now() - deleteStartedAt),
+				workflow_id: workflowsStore.workflowId,
+				node_type: node.type,
+			});
+		}
 	}
 
 	function deleteNodes(ids: string[], { trackHistory = true, trackBulk = true } = {}) {
@@ -862,6 +873,7 @@ export function useCanvasOperations() {
 		nodeTypeDescription: INodeTypeDescription,
 		options: AddNodeOptions = {},
 	): INodeUi {
+		const addStartedAt = performance.now();
 		checkMaxNodesOfTypeReached(nodeTypeDescription);
 
 		const nodeData = resolveNodeData(node, nodeTypeDescription, {
@@ -905,6 +917,15 @@ export function useCanvasOperations() {
 
 			if (options.telemetry) {
 				trackAddNode(nodeData, options, nextView);
+			}
+
+			if (!isStickyNode) {
+				reportPerformanceEvent({
+					event_name: 'node_add',
+					duration_ms: Math.round(performance.now() - addStartedAt),
+					workflow_id: workflowsStore.workflowId,
+					node_type: nodeData.type,
+				});
 			}
 
 			if (!isStickyNode) {

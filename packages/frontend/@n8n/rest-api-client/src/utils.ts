@@ -6,6 +6,7 @@ import { ApplicationError, jsonParse } from 'n8n-workflow';
 import type { GenericValue, IDataObject } from 'n8n-workflow';
 
 import type { IRestApiContext } from './types';
+import { recordApiTiming } from './performance-timing';
 
 const getBrowserId = () => {
 	let browserId = localStorage.getItem(BROWSER_ID_STORAGE_KEY);
@@ -130,10 +131,14 @@ export async function request(config: {
 		options.paramsSerializer = legacyParamSerializer;
 	}
 
+	const requestStartedAt = performance.now();
+
 	try {
 		const response = await axios.request(options);
+		recordApiTiming(endpoint, performance.now() - requestStartedAt);
 		return response.data;
 	} catch (error) {
+		recordApiTiming(endpoint, performance.now() - requestStartedAt);
 		if (error.message === 'Network Error') {
 			throw new ResponseError("Can't connect to n8n.", {
 				errorCode: NO_NETWORK_ERROR_CODE,

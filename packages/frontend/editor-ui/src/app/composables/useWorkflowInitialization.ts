@@ -19,6 +19,13 @@ import { useBuilderStore } from '@/features/ai/assistant/builder.store';
 import { useAITemplatesStarterCollectionStore } from '@/experiments/aiTemplatesStarterCollection/stores/aiTemplatesStarterCollection.store';
 import { useReadyToRunWorkflowsStore } from '@/experiments/readyToRunWorkflows/stores/readyToRunWorkflows.store';
 import { useTelemetry } from '@/app/composables/useTelemetry';
+import { reportPerformanceEvent } from '@/app/composables/usePerformanceReporter';
+import {
+	computeOpenWorkflowServerSideMs,
+	endPerformanceScenario,
+	getOpenWorkflowPhaseDurationsMs,
+	startPerformanceScenario,
+} from '@n8n/rest-api-client';
 import { useExecutionDebugging } from '@/features/execution/executions/composables/useExecutionDebugging';
 import { getSampleWorkflowByTemplateId } from '@/features/workflows/templates/utils/workflowSamples';
 import { EnterpriseEditionFeature, VIEWS } from '@/app/constants';
@@ -29,6 +36,47 @@ import {
 	createWorkflowDocumentId,
 	disposeWorkflowDocumentStore,
 } from '@/app/stores/workflowDocument.store';
+
+function startOpenWorkflowMeasurement(): void {
+	startPerformanceScenario('open_workflow');
+}
+
+function cancelOpenWorkflowMeasurement(): void {
+	endPerformanceScenario();
+}
+
+function reportOpenWorkflowMeasurement(workflowId: string, nodeCount: number): void {
+	const result = endPerformanceScenario();
+	if (!result || result.scenario !== 'open_workflow') {
+		return;
+	}
+
+	const phases = getOpenWorkflowPhaseDurationsMs(result.apiTimings);
+	const serverSideMs = computeOpenWorkflowServerSideMs(result.apiTimings);
+
+	if (serverSideMs !== null) {
+		reportPerformanceEvent({
+			event_name: 'workflow_open',
+			duration_ms: serverSideMs,
+			workflow_id: workflowId,
+			node_count: nodeCount,
+			measurement: 'server_side',
+			settings_ms: phases.settings_ms ?? undefined,
+			parallel_ms: phases.parallel_ms ?? undefined,
+			credentials_ms: phases.credentials_ms ?? undefined,
+			workflow_fetch_ms: phases.workflow_fetch_ms ?? undefined,
+			last_successful_ms: phases.last_successful_ms ?? undefined,
+		});
+	}
+
+	reportPerformanceEvent({
+		event_name: 'workflow_open',
+		duration_ms: result.wallClockMs,
+		workflow_id: workflowId,
+		node_count: nodeCount,
+		measurement: 'wall_clock',
+	});
+}
 
 export function useWorkflowInitialization(workflowState: WorkflowState) {
 	const route = useRoute();
@@ -308,9 +356,10 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 	}
 
 	async function initializeWorkspaceForExistingWorkflow(id: string) {
+		let loaded = false;
+
 		try {
 			const workflowData = await workflowsListStore.fetchWorkflow(id);
-
 			await openWorkflow(workflowData);
 
 			// Track telemetry for onboarding and experiment workflows
@@ -337,7 +386,8 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 				workflowData.homeProject,
 				workflowData.sharedWithProjects,
 			);
-			void workflowsStore.fetchLastSuccessfulExecution();
+			await workflowsStore.fetchLastSuccessfulExecution();
+			loaded = true;
 		} catch (error) {
 			if ((error as { httpStatusCode?: number }).httpStatusCode === 404) {
 				return await router.replace({
@@ -359,6 +409,12 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 		} finally {
 			uiStore.nodeViewInitialized = true;
 			initializedWorkflowId.value = workflowId.value;
+
+			if (loaded) {
+				reportOpenWorkflowMeasurement(id, workflowsStore.workflow.nodes?.length ?? 0);
+			} else {
+				cancelOpenWorkflowMeasurement();
+			}
 		}
 	}
 
@@ -368,6 +424,7 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 		// when detected, ensuring WorkflowLayout doesn't interfere with template import.
 		if (uiStore.isBlankRedirect) {
 			uiStore.isBlankRedirect = false;
+			cancelOpenWorkflowMeasurement();
 			isLoading.value = false;
 			return;
 		}
@@ -376,12 +433,14 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 		// Must be checked before workflowId since template routes use route.params.id, not name
 		const handledTemplate = await handleTemplateImportRoute();
 		if (handledTemplate) {
+			cancelOpenWorkflowMeasurement();
 			isLoading.value = false;
 			return;
 		}
 
 		// Skip if no workflowId (shouldn't happen for non-template routes in WorkflowLayout)
 		if (!workflowId.value) {
+			cancelOpenWorkflowMeasurement();
 			isLoading.value = false;
 			return;
 		}
@@ -393,6 +452,7 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 			// Still need to handle debug mode when navigating to debug route
 			// even if the workflow is already initialized (e.g., from executions tab)
 			await handleDebugModeRoute();
+			cancelOpenWorkflowMeasurement();
 			isLoading.value = false;
 			return;
 		}
@@ -404,6 +464,7 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 
 			if (isDemoRoute.value) {
 				await initializeWorkspaceForNewWorkflow();
+				cancelOpenWorkflowMeasurement();
 				return;
 			}
 
@@ -411,6 +472,7 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 				const exists = await workflowsListStore.checkWorkflowExists(workflowId.value);
 				if (!exists && route.meta?.nodeView === true) {
 					await initializeWorkspaceForNewWorkflow();
+					cancelOpenWorkflowMeasurement();
 					return;
 				} else {
 					await router.replace({
@@ -457,5 +519,6 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 		handleDebugModeRoute,
 		initializeWorkflow,
 		cleanup,
+		startOpenWorkflowMeasurement,
 	};
 }

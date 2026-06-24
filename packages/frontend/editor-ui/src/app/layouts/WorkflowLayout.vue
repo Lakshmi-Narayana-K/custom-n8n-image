@@ -37,6 +37,7 @@ const {
 	initializeWorkflow,
 	handleDebugModeRoute,
 	cleanup,
+	startOpenWorkflowMeasurement,
 } = useWorkflowInitialization(workflowState);
 
 useProvideWorkflowId();
@@ -50,6 +51,7 @@ const { setup: setupPostMessages, cleanup: cleanupPostMessages } = usePostMessag
 onMounted(async () => {
 	pushConnectionStore.pushConnect();
 	setupPostMessages();
+	startOpenWorkflowMeasurement();
 	await initializeData();
 	await initializeWorkflow();
 });
@@ -58,6 +60,7 @@ watch(
 	workflowId,
 	async (newId, oldId) => {
 		if (newId !== oldId && newId) {
+			startOpenWorkflowMeasurement();
 			await initializeWorkflow(true);
 		}
 	},

@@ -53,6 +53,8 @@ export { ForgotPasswordRequestDto } from './password-reset/forgot-password-reque
 export { ResolvePasswordTokenQueryDto } from './password-reset/resolve-password-token-query.dto';
 export { ChangePasswordRequestDto } from './password-reset/change-password-request.dto';
 
+export { PerformanceEventRequestDto } from './performance/performance-event-request.dto';
+
 export { CreateProjectDto } from './project/create-project.dto';
 export { UpdateProjectDto, UpdateProjectWithRelationsDto } from './project/update-project.dto';
 export { DeleteProjectDto } from './project/delete-project.dto';

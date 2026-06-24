@@ -44,6 +44,7 @@ import '@/controllers/oauth/oauth2-credential.controller';
 import '@/controllers/orchestration.controller';
 import '@/controllers/owner.controller';
 import '@/controllers/password-reset.controller';
+import '@/controllers/performance-events.controller';
 import '@/controllers/project.controller';
 import '@/controllers/role.controller';
 import '@/controllers/tags.controller';

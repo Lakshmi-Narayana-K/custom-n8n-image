@@ -35,6 +35,7 @@ import { determineFinalExecutionStatus } from '@/execution-lifecycle/shared/shar
 import type { IExecutionTrackProperties } from '@/interfaces';
 import { License } from '@/license';
 import { NodeTypes } from '@/node-types';
+import { PerformanceMetricsService } from '@/services/performance-metrics.service';
 
 import { EventRelay } from './event-relay';
 import { Telemetry } from '../../telemetry';
@@ -63,6 +64,7 @@ export class TelemetryEventRelay extends EventRelay {
 		private readonly sharedWorkflowRepository: SharedWorkflowRepository,
 		private readonly projectRelationRepository: ProjectRelationRepository,
 		private readonly credentialsRepository: CredentialsRepository,
+		private readonly performanceMetricsService: PerformanceMetricsService,
 	) {
 		super(eventService);
 	}
@@ -1016,6 +1018,14 @@ export class TelemetryEventRelay extends EventRelay {
 					}
 
 					this.telemetry.track('Manual workflow exec finished', manualExecEventProperties);
+
+					if (runData.startedAt && runData.stoppedAt) {
+						this.performanceMetricsService.record({
+							event_name: 'workflow_execute',
+							duration_ms: runData.stoppedAt.getTime() - runData.startedAt.getTime(),
+							workflow_id: workflow.id,
+						});
+					}
 				}
 			}
 		}

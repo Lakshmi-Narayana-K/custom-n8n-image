@@ -28,6 +28,7 @@ import { N8N_VERSION } from '@/constants';
 import { EventService } from '@/events/event.service';
 import type { RelayEventMap } from '@/events/maps/relay.event-map';
 import { TelemetryEventRelay, getSemanticVersioning } from '@/events/relays/telemetry.event-relay';
+import type { PerformanceMetricsService } from '@/services/performance-metrics.service';
 import type { License } from '@/license';
 import type { Telemetry } from '@/telemetry';
 
@@ -111,6 +112,7 @@ describe('TelemetryEventRelay', () => {
 	const sharedWorkflowRepository = mock<SharedWorkflowRepository>();
 	const projectRelationRepository = mock<ProjectRelationRepository>();
 	const credentialsRepository = mock<CredentialsRepository>();
+	const performanceMetricsService = mock<PerformanceMetricsService>();
 	const eventService = new EventService();
 
 	let telemetryEventRelay: TelemetryEventRelay;
@@ -129,6 +131,7 @@ describe('TelemetryEventRelay', () => {
 			sharedWorkflowRepository,
 			projectRelationRepository,
 			credentialsRepository,
+			performanceMetricsService,
 		);
 
 		await telemetryEventRelay.init();
@@ -155,6 +158,7 @@ describe('TelemetryEventRelay', () => {
 				sharedWorkflowRepository,
 				projectRelationRepository,
 				credentialsRepository,
+				performanceMetricsService,
 			);
 			// @ts-expect-error Private method
 			const setupListenersSpy = jest.spyOn(telemetryEventRelay, 'setupListeners');
@@ -180,6 +184,7 @@ describe('TelemetryEventRelay', () => {
 				sharedWorkflowRepository,
 				projectRelationRepository,
 				credentialsRepository,
+				performanceMetricsService,
 			);
 			// @ts-expect-error Private method
 			const setupListenersSpy = jest.spyOn(telemetryEventRelay, 'setupListeners');
