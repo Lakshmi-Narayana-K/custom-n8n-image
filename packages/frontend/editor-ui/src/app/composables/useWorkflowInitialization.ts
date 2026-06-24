@@ -21,9 +21,9 @@ import { useReadyToRunWorkflowsStore } from '@/experiments/readyToRunWorkflows/s
 import { useTelemetry } from '@/app/composables/useTelemetry';
 import { reportPerformanceEvent } from '@/app/composables/usePerformanceReporter';
 import {
+	computeNewWorkflowServerSideMs,
 	computeOpenWorkflowServerSideMs,
 	endPerformanceScenario,
-	getOpenWorkflowPhaseDurationsMs,
 	startPerformanceScenario,
 } from '@n8n/rest-api-client';
 import { useExecutionDebugging } from '@/features/execution/executions/composables/useExecutionDebugging';
@@ -51,7 +51,6 @@ function reportOpenWorkflowMeasurement(workflowId: string, nodeCount: number): v
 		return;
 	}
 
-	const phases = getOpenWorkflowPhaseDurationsMs(result.apiTimings);
 	const serverSideMs = computeOpenWorkflowServerSideMs(result.apiTimings);
 
 	if (serverSideMs !== null) {
@@ -61,11 +60,6 @@ function reportOpenWorkflowMeasurement(workflowId: string, nodeCount: number): v
 			workflow_id: workflowId,
 			node_count: nodeCount,
 			measurement: 'server_side',
-			settings_ms: phases.settings_ms ?? undefined,
-			parallel_ms: phases.parallel_ms ?? undefined,
-			credentials_ms: phases.credentials_ms ?? undefined,
-			workflow_fetch_ms: phases.workflow_fetch_ms ?? undefined,
-			last_successful_ms: phases.last_successful_ms ?? undefined,
 		});
 	}
 
@@ -84,12 +78,16 @@ function reportNewWorkflowMeasurement(projectId: string): void {
 		return;
 	}
 
-	reportPerformanceEvent({
-		event_name: 'workflow_open',
-		duration_ms: result.wallClockMs,
-		project_id: projectId,
-		measurement: 'new_workflow',
-	});
+	const criticalPathMs = computeNewWorkflowServerSideMs(result.apiTimings);
+
+	if (criticalPathMs !== null) {
+		reportPerformanceEvent({
+			event_name: 'workflow_open',
+			duration_ms: criticalPathMs,
+			project_id: projectId,
+			measurement: 'new_workflow',
+		});
+	}
 }
 
 export function useWorkflowInitialization(workflowState: WorkflowState) {

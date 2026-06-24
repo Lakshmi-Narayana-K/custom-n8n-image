@@ -1,14 +1,9 @@
 const RECENT_API_TIMING_LIMIT = 250;
 const RECENT_API_TIMING_TTL_MS = 120_000;
 
-const OPEN_WORKFLOW_PARALLEL_ENDPOINTS = [
-	'module-settings',
-	'my-projects',
-	'projects/count',
-	'data-tables-global/limits',
-	'projects/personal',
-	'/roles',
-] as const;
+const SETTINGS_KEYWORDS = ['/settings'] as const;
+const LAST_SUCCESSFUL_KEYWORDS = ['last-successful'] as const;
+const NEW_WORKFLOW_KEYWORDS = ['/workflows/new'] as const;
 
 type ApiTiming = {
 	endpoint: string;
@@ -25,15 +20,8 @@ type ActiveScenario = {
 export type PerformanceScenarioResult = {
 	scenario: string;
 	wallClockMs: number;
+	startedAt: number;
 	apiTimings: ApiTiming[];
-};
-
-export type OpenWorkflowPhaseDurations = {
-	settings_ms: number | null;
-	parallel_ms: number | null;
-	credentials_ms: number | null;
-	workflow_fetch_ms: number | null;
-	last_successful_ms: number | null;
 };
 
 let activeScenario: ActiveScenario | null = null;
@@ -52,26 +40,55 @@ function pruneRecentApiTimings(now: number): void {
 	}
 }
 
-function mergeTimingsForOpenWorkflow(timings: ApiTiming[]): ApiTiming[] {
-	pruneRecentApiTimings(performance.now());
-	return [...recentApiTimings, ...timings];
+function matchesEndpoint(endpoint: string, keywords: readonly string[]): boolean {
+	return keywords.some((keyword) => endpoint.includes(keyword));
 }
 
-function firstDuration(timings: ApiTiming[], keywords: readonly string[]): number | null {
+function isExistingWorkflowFetchEndpoint(endpoint: string): boolean {
+	return endpoint.includes('/workflows/') && !endpoint.includes('/workflows/new');
+}
+
+function requestStartedAt(timing: ApiTiming): number {
+	return timing.recordedAt - timing.durationMs;
+}
+
+function findFirstTiming(timings: ApiTiming[], keywords: readonly string[]): ApiTiming | null {
 	for (const timing of timings) {
-		if (keywords.some((keyword) => timing.endpoint.includes(keyword))) {
-			return timing.durationMs;
+		if (matchesEndpoint(timing.endpoint, keywords)) {
+			return timing;
 		}
 	}
 	return null;
 }
 
-function maxDuration(timings: ApiTiming[], keywords: readonly string[]): number | null {
-	const values = timings
-		.filter((timing) => keywords.some((keyword) => timing.endpoint.includes(keyword)))
-		.map((timing) => timing.durationMs);
+function findLastTiming(timings: ApiTiming[], keywords: readonly string[]): ApiTiming | null {
+	let last: ApiTiming | null = null;
+	for (const timing of timings) {
+		if (matchesEndpoint(timing.endpoint, keywords)) {
+			last = timing;
+		}
+	}
+	return last;
+}
 
-	return values.length > 0 ? Math.max(...values) : null;
+function findFirstExistingWorkflowFetch(timings: ApiTiming[]): ApiTiming | null {
+	for (const timing of timings) {
+		if (isExistingWorkflowFetchEndpoint(timing.endpoint)) {
+			return timing;
+		}
+	}
+	return null;
+}
+
+function resolveStartAt(timings: ApiTiming[], fallback: ApiTiming | null): number | null {
+	const settings = findFirstTiming(timings, SETTINGS_KEYWORDS);
+	if (settings) {
+		return requestStartedAt(settings);
+	}
+	if (fallback) {
+		return requestStartedAt(fallback);
+	}
+	return null;
 }
 
 export function startPerformanceScenario(name: string): void {
@@ -90,6 +107,7 @@ export function endPerformanceScenario(): PerformanceScenarioResult | null {
 	const result: PerformanceScenarioResult = {
 		scenario: activeScenario.name,
 		wallClockMs: Math.round(performance.now() - activeScenario.startedAt),
+		startedAt: activeScenario.startedAt,
 		apiTimings: activeScenario.apiTimings,
 	};
 	activeScenario = null;
@@ -117,37 +135,67 @@ export function recordApiTiming(endpoint: string, durationMs: number): void {
 }
 
 /**
- * Mirrors generate_report.py server_side_open_wf(): sum sequential API phase
- * bottlenecks (settings + parallel group + credentials + workflow + last-successful).
+ * Existing workflow: /settings request start → last-successful response end.
+ * Falls back to existing-workflow fetch start when /settings was not called in this open.
  */
 export function computeOpenWorkflowServerSideMs(timings: ApiTiming[]): number | null {
-	const merged = mergeTimingsForOpenWorkflow(timings);
-	const settings = firstDuration(merged, ['/settings']);
-	const parallel = maxDuration(merged, OPEN_WORKFLOW_PARALLEL_ENDPOINTS);
-	const credentials = maxDuration(merged, ['credentials/for-workflow', 'active-workflows']);
-	const workflowFetch = firstDuration(merged, ['/workflows/']);
-	const lastSuccessful = firstDuration(merged, ['last-successful']);
-
-	if (
-		settings === null ||
-		parallel === null ||
-		credentials === null ||
-		workflowFetch === null ||
-		lastSuccessful === null
-	) {
+	if (!timings.length) {
 		return null;
 	}
 
-	return settings + parallel + credentials + workflowFetch + lastSuccessful;
+	const lastSuccessful = findLastTiming(timings, LAST_SUCCESSFUL_KEYWORDS);
+	if (!lastSuccessful) {
+		return null;
+	}
+
+	const startAt = resolveStartAt(timings, findFirstExistingWorkflowFetch(timings));
+	const endAt = lastSuccessful.recordedAt;
+
+	if (startAt === null || endAt <= startAt) {
+		return null;
+	}
+
+	return Math.round(endAt - startAt);
 }
 
-export function getOpenWorkflowPhaseDurationsMs(timings: ApiTiming[]): OpenWorkflowPhaseDurations {
-	const merged = mergeTimingsForOpenWorkflow(timings);
-	return {
-		settings_ms: firstDuration(merged, ['/settings']),
-		parallel_ms: maxDuration(merged, OPEN_WORKFLOW_PARALLEL_ENDPOINTS),
-		credentials_ms: maxDuration(merged, ['credentials/for-workflow', 'active-workflows']),
-		workflow_fetch_ms: firstDuration(merged, ['/workflows/']),
-		last_successful_ms: firstDuration(merged, ['last-successful']),
-	};
+function findFirstExistsCheck(timings: ApiTiming[]): ApiTiming | null {
+	for (const timing of timings) {
+		if (timing.endpoint.includes('/exists')) {
+			return timing;
+		}
+	}
+	return null;
+}
+
+/**
+ * New workflow: /settings request start → GET /workflows/new response end.
+ * /settings is usually fetched at app boot before the scenario starts, so
+ * falls back to the /workflows/{id}/exists check start — the first API fired
+ * inside the open_workflow scenario window for a new workflow.
+ */
+export function computeNewWorkflowServerSideMs(timings: ApiTiming[]): number | null {
+	if (!timings.length) {
+		return null;
+	}
+
+	const newWorkflow = findLastTiming(timings, NEW_WORKFLOW_KEYWORDS);
+	if (!newWorkflow) {
+		return null;
+	}
+
+	const settings = findFirstTiming(timings, SETTINGS_KEYWORDS);
+	const existsCheck = findFirstExistsCheck(timings);
+	const startAnchor = settings ?? existsCheck;
+	if (!startAnchor) {
+		return null;
+	}
+
+	const startAt = requestStartedAt(startAnchor);
+	const endAt = newWorkflow.recordedAt;
+
+	if (endAt <= startAt) {
+		return null;
+	}
+
+	return Math.round(endAt - startAt);
 }
