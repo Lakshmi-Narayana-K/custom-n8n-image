@@ -6,6 +6,7 @@ export class PerformanceEventRequestDto extends Z.class({
 	event_name: z.string(),
 	duration_ms: z.number().finite(),
 	workflow_id: z.string().optional(),
+	project_id: z.string().optional(),
 	node_type: z.string().optional(),
 	node_count: z.number().optional(),
 	fetch_duration_ms: z.number().optional(),

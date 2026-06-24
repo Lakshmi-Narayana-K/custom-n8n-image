@@ -5,6 +5,7 @@ export type PerformanceEventPayload = {
 	event_name: string;
 	duration_ms: number;
 	workflow_id?: string;
+	project_id?: string;
 	node_type?: string;
 	node_count?: number;
 	fetch_duration_ms?: number;
@@ -33,6 +34,7 @@ export class PerformanceMetricsService {
 			event_name: payload.event_name,
 			duration_ms: payload.duration_ms,
 			workflow_id: payload.workflow_id,
+			project_id: payload.project_id,
 			node_type: payload.node_type,
 			node_count: payload.node_count,
 			fetch_duration_ms: payload.fetch_duration_ms,

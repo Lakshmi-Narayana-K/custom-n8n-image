@@ -5,6 +5,7 @@ export type PerformanceEventPayload = {
 	event_name: string;
 	duration_ms: number;
 	workflow_id?: string;
+	project_id?: string;
 	node_type?: string;
 	node_count?: number;
 	fetch_duration_ms?: number;

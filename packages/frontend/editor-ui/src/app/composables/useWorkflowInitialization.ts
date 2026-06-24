@@ -78,6 +78,20 @@ function reportOpenWorkflowMeasurement(workflowId: string, nodeCount: number): v
 	});
 }
 
+function reportNewWorkflowMeasurement(projectId: string): void {
+	const result = endPerformanceScenario();
+	if (!result || result.scenario !== 'open_workflow') {
+		return;
+	}
+
+	reportPerformanceEvent({
+		event_name: 'workflow_open',
+		duration_ms: result.wallClockMs,
+		project_id: projectId,
+		measurement: 'new_workflow',
+	});
+}
+
 export function useWorkflowInitialization(workflowState: WorkflowState) {
 	const route = useRoute();
 	const router = useRouter();
@@ -472,7 +486,11 @@ export function useWorkflowInitialization(workflowState: WorkflowState) {
 				const exists = await workflowsListStore.checkWorkflowExists(workflowId.value);
 				if (!exists && route.meta?.nodeView === true) {
 					await initializeWorkspaceForNewWorkflow();
-					cancelOpenWorkflowMeasurement();
+					const projectId =
+						typeof route.query?.projectId === 'string'
+							? route.query.projectId
+							: (projectsStore.personalProject?.id ?? 'unknown');
+					reportNewWorkflowMeasurement(projectId);
 					return;
 				} else {
 					await router.replace({

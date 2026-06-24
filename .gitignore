@@ -87,3 +87,4 @@ Report-Static.html
 .ec2_ip
 seed_manifest_*.json
 seed_prod_simulation.py
+packages/cli/bin/.cache/
