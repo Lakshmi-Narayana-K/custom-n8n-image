@@ -24,6 +24,8 @@ import { N8N_VERSION, SETTINGS_LICENSE_CERT_KEY } from './constants';
 const LICENSE_RENEWAL_DISABLED_WARNING =
 	'Automatic license renewal is disabled. The license will not renew automatically, and access to licensed features may be lost!';
 
+const LICENSE_STATUS_LOG_INTERVAL_MS = 24 * Time.hours.toMilliseconds;
+
 export type FeatureReturnType = Partial<
 	{
 		planName: string;
@@ -39,6 +41,8 @@ export class License implements LicenseProvider {
 	private isShuttingDown = false;
 
 	private refreshCallbacks: LicenseRefreshCallback[] = [];
+
+	private statusLogInterval: NodeJS.Timeout | undefined;
 
 	constructor(
 		private readonly logger: Logger,
@@ -121,11 +125,29 @@ export class License implements LicenseProvider {
 			await this.manager.initialize();
 
 			this.logger.debug('License initialized');
+
+			if (isMainInstance) {
+				this.logLicenseStatus();
+				this.statusLogInterval ??= setInterval(
+					() => this.logLicenseStatus(),
+					LICENSE_STATUS_LOG_INTERVAL_MS,
+				);
+			}
 		} catch (error: unknown) {
 			if (error instanceof Error) {
 				this.logger.error('Could not initialize license manager sdk', { error });
 			}
 		}
+	}
+
+	private logLicenseStatus() {
+		const expiryDate = this.getExpiryDate();
+		this.logger.info('n8n license status', {
+			type: 'n8n_license_status',
+			plan_name: this.getPlanName(),
+			expires_at: expiryDate ? expiryDate.toISOString() : null,
+			days_remaining: this.getExpiringInDays() ?? null,
+		});
 	}
 
 	async loadCertStr(): Promise<TLicenseBlock> {
@@ -242,6 +264,11 @@ export class License implements LicenseProvider {
 		// Shut down License manager to unclaim any floating entitlements
 		// Note: While this saves a new license cert to DB, the previous entitlements are still kept in memory so that the shutdown process can complete
 		this.isShuttingDown = true;
+
+		if (this.statusLogInterval) {
+			clearInterval(this.statusLogInterval);
+			this.statusLogInterval = undefined;
+		}
 
 		if (!this.manager) {
 			return;
