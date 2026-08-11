@@ -141,12 +141,12 @@ export class License implements LicenseProvider {
 	}
 
 	private logLicenseStatus() {
-		const expiryDate = this.getExpiryDate();
+		const terminationDate = this.getTerminationDate();
 		this.logger.info('n8n license status', {
 			type: 'n8n_license_status',
 			plan_name: this.getPlanName(),
-			expires_at: expiryDate ? expiryDate.toISOString() : null,
-			days_remaining: this.getExpiringInDays() ?? null,
+			expires_at: terminationDate ? terminationDate.toISOString() : null,
+			days_remaining: this.getTerminatingInDays() ?? null,
 		});
 	}
 
