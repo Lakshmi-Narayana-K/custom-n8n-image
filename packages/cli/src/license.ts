@@ -141,13 +141,30 @@ export class License implements LicenseProvider {
 	}
 
 	private logLicenseStatus() {
-		const terminationDate = this.getTerminationDate();
+		const mainPlan = this.getMainPlan();
+		const subscriptionEnd = mainPlan?.validTo ?? null;
+		const certExpiry = this.getExpiryDate();
+
 		this.logger.info('n8n license status', {
 			type: 'n8n_license_status',
 			plan_name: this.getPlanName(),
-			expires_at: terminationDate ? terminationDate.toISOString() : null,
-			days_remaining: this.getTerminatingInDays() ?? null,
+			expires_at: subscriptionEnd ? subscriptionEnd.toISOString() : null,
+			days_remaining: subscriptionEnd ? this.daysUntil(subscriptionEnd) : null,
+
+			consumer_id: this.getConsumerId(),
+			cert_expires_at: certExpiry ? certExpiry.toISOString() : null,
+			is_valid: this.manager?.isValid(false) ?? false,
 		});
+	}
+
+	private daysUntil(targetDate: Date): number {
+		const targetTime = targetDate.getTime();
+		if (Number.isNaN(targetTime)) return 0;
+
+		const diffMs = targetTime - Date.now();
+		const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+		return Math.max(0, diffDays);
 	}
 
 	async loadCertStr(): Promise<TLicenseBlock> {
