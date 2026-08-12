@@ -120,12 +120,10 @@ export async function oAuth1CredentialAuthorize(
 	context: IRestApiContext,
 	data: ICredentialsResponse,
 ): Promise<string> {
-	return await makeRestApiRequest(
-		context,
-		'GET',
-		'/oauth1-credential/auth',
-		data as unknown as IDataObject,
-	);
+	// Only the credential id is needed: the backend re-fetches the stored credential by id.
+	// Sending the full object inflates the GET query string (homeProject, scopes, etc.) and
+	// can push the request past proxy header size limits (HTTP 431).
+	return await makeRestApiRequest(context, 'GET', '/oauth1-credential/auth', { id: data.id });
 }
 
 // Get OAuth2 Authorization URL using the stored credentials
@@ -133,12 +131,10 @@ export async function oAuth2CredentialAuthorize(
 	context: IRestApiContext,
 	data: ICredentialsResponse,
 ): Promise<string> {
-	return await makeRestApiRequest(
-		context,
-		'GET',
-		'/oauth2-credential/auth',
-		data as unknown as IDataObject,
-	);
+	// Only the credential id is needed: the backend re-fetches the stored credential by id.
+	// Sending the full object inflates the GET query string (homeProject, scopes, etc.) and
+	// can push the request past proxy header size limits (HTTP 431).
+	return await makeRestApiRequest(context, 'GET', '/oauth2-credential/auth', { id: data.id });
 }
 
 export async function testCredential(
