@@ -141,8 +141,9 @@ export class License implements LicenseProvider {
 	}
 
 	private logLicenseStatus() {
-		const mainPlan = this.getMainPlan();
-		const subscriptionEnd = mainPlan?.validTo ?? null;
+		const subscriptionEnd = this.getCurrentEntitlements()
+			.map((entitlement) => entitlement.validTo)
+			.sort((left, right) => right.getTime() - left.getTime())[0];
 		const certExpiry = this.getExpiryDate();
 
 		this.logger.info('n8n license status', {
