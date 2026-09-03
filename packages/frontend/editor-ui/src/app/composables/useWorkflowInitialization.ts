@@ -22,7 +22,8 @@ import { useTelemetry } from '@/app/composables/useTelemetry';
 import { reportPerformanceEvent } from '@/app/composables/usePerformanceReporter';
 import {
 	computeNewWorkflowServerSideMs,
-	computeOpenWorkflowServerSideMs,
+	computeOpenWorkflowMeasurement,
+	computeOpenWorkflowWallClockMs,
 	endPerformanceScenario,
 	startPerformanceScenario,
 } from '@n8n/rest-api-client';
@@ -51,24 +52,36 @@ function reportOpenWorkflowMeasurement(workflowId: string, nodeCount: number): v
 		return;
 	}
 
-	const serverSideMs = computeOpenWorkflowServerSideMs(result.apiTimings);
+	const measurement = computeOpenWorkflowMeasurement(
+		result.apiTimings,
+		workflowId,
+		result.pauseIntervals,
+	);
+	const wallClockMs = computeOpenWorkflowWallClockMs(
+		result.apiTimings,
+		result.startedAt,
+		result.wallClockMs,
+		result.pauseIntervals,
+	);
 
-	if (serverSideMs !== null) {
+	if (measurement !== null) {
 		reportPerformanceEvent({
 			event_name: 'workflow_open',
-			duration_ms: serverSideMs,
+			duration_ms: measurement.criticalPathMs,
 			workflow_id: workflowId,
 			node_count: nodeCount,
 			measurement: 'server_side',
+			server_side_duration_ms: measurement.criticalPathMs,
 		});
 	}
 
 	reportPerformanceEvent({
 		event_name: 'workflow_open',
-		duration_ms: result.wallClockMs,
+		duration_ms: wallClockMs,
 		workflow_id: workflowId,
 		node_count: nodeCount,
 		measurement: 'wall_clock',
+		server_side_duration_ms: measurement?.criticalPathMs,
 	});
 }
 

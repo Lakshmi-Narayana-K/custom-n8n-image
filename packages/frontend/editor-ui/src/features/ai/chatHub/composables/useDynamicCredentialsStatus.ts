@@ -6,6 +6,7 @@ import {
 	revokeDynamicCredential,
 } from '@/features/ai/chatHub/chat.api';
 import type { WorkflowExecutionStatus } from '@n8n/api-types';
+import { pausePerformanceScenario, resumePerformanceScenario } from '@n8n/rest-api-client';
 
 export interface DynamicCredentialItem {
 	credentialId: string;
@@ -115,6 +116,13 @@ export function useDynamicCredentialsStatus(workflowId: Ref<string | null>) {
 			const params =
 				'scrollbars=no,resizable=yes,status=no,titlebar=no,location=no,toolbar=no,menubar=no,width=500,height=700';
 			const oauthPopup = window.open(oauthUrl, 'OAuth Authorization', params);
+			if (!oauthPopup) {
+				cred.error = 'Failed to open authorization window';
+				cred.isConnecting = false;
+				return;
+			}
+
+			pausePerformanceScenario();
 
 			// Listen for OAuth callback via BroadcastChannel
 			const oauthChannel = new BroadcastChannel('oauth-callback');
@@ -123,6 +131,7 @@ export function useDynamicCredentialsStatus(workflowId: Ref<string | null>) {
 			const settle = async () => {
 				if (settled) return;
 				settled = true;
+				resumePerformanceScenario();
 				oauthChannel.close();
 				clearInterval(pollInterval);
 				await pollUntilConfigured(credentialId);

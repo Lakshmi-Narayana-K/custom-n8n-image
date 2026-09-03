@@ -8,6 +8,7 @@ import { useCredentialsStore } from '../credentials.store';
 import type { ICredentialsResponse } from '../credentials.types';
 import { useTelemetry } from '@/app/composables/useTelemetry';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import { pausePerformanceScenario, resumePerformanceScenario } from '@n8n/rest-api-client';
 
 /**
  * Composable for OAuth credential type detection and authorization.
@@ -152,39 +153,45 @@ export function useCredentialOAuth() {
 	}
 
 	async function waitForOAuthCallback(popup: Window, signal?: AbortSignal): Promise<boolean> {
-		return await new Promise((resolve) => {
-			const oauthChannel = new BroadcastChannel('oauth-callback');
-			let settled = false;
+		pausePerformanceScenario();
 
-			const settle = (result: boolean) => {
-				if (settled) return;
-				settled = true;
-				oauthChannel.close();
-				resolve(result);
-			};
+		try {
+			return await new Promise((resolve) => {
+				const oauthChannel = new BroadcastChannel('oauth-callback');
+				let settled = false;
 
-			signal?.addEventListener('abort', () => {
-				settle(false);
-			});
+				const settle = (result: boolean) => {
+					if (settled) return;
+					settled = true;
+					oauthChannel.close();
+					resolve(result);
+				};
 
-			oauthChannel.addEventListener('message', (event: MessageEvent) => {
-				popup.close();
-
-				if (event.data === 'success') {
-					toast.showMessage({
-						title: i18n.baseText('nodeCredentials.oauth.accountConnected'),
-						type: 'success',
-					});
-					settle(true);
-				} else {
-					toast.showMessage({
-						title: i18n.baseText('nodeCredentials.oauth.accountConnectionFailed'),
-						type: 'error',
-					});
+				signal?.addEventListener('abort', () => {
 					settle(false);
-				}
+				});
+
+				oauthChannel.addEventListener('message', (event: MessageEvent) => {
+					popup.close();
+
+					if (event.data === 'success') {
+						toast.showMessage({
+							title: i18n.baseText('nodeCredentials.oauth.accountConnected'),
+							type: 'success',
+						});
+						settle(true);
+					} else {
+						toast.showMessage({
+							title: i18n.baseText('nodeCredentials.oauth.accountConnectionFailed'),
+							type: 'error',
+						});
+						settle(false);
+					}
+				});
 			});
-		});
+		} finally {
+			resumePerformanceScenario();
+		}
 	}
 
 	/**

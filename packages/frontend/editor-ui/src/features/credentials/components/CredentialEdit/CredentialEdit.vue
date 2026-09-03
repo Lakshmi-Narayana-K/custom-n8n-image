@@ -43,6 +43,7 @@ import { useProjectsStore } from '@/features/collaboration/projects/projects.sto
 import { useExternalSecretsStore } from '@/features/integrations/externalSecrets.ee/externalSecrets.ee.store';
 import { useRootStore } from '@n8n/stores/useRootStore';
 import { sendUserEvent, type DynamicNotification } from '@n8n/rest-api-client/api/cloudPlans';
+import { pausePerformanceScenario, resumePerformanceScenario } from '@n8n/rest-api-client';
 import { isExpression, isTestableExpression } from '@/app/utils/expressions';
 import {
 	getAppNameFromCredType,
@@ -1225,6 +1226,16 @@ async function oAuthCredentialAuthorize() {
 		'scrollbars=no,resizable=yes,status=no,titlebar=noe,location=no,toolbar=no,menubar=no,width=500,height=700';
 	const oauthPopup = window.open(url, 'OAuth Authorization', params);
 
+	if (!oauthPopup) {
+		toast.showError(
+			new Error(i18n.baseText('credentialEdit.credentialEdit.showError.invalidOAuthUrl.message')),
+			i18n.baseText('credentialEdit.credentialEdit.showError.invalidOAuthUrl.title'),
+		);
+		return;
+	}
+
+	pausePerformanceScenario();
+
 	credentialData.value = {
 		...credentialData.value,
 		oauthTokenData: null as unknown as CredentialInformation,
@@ -1232,6 +1243,9 @@ async function oAuthCredentialAuthorize() {
 
 	const oauthChannel = new BroadcastChannel('oauth-callback');
 	const receiveMessage = (event: MessageEvent) => {
+		resumePerformanceScenario();
+		oauthChannel.removeEventListener('message', receiveMessage);
+
 		const successfullyConnected = event.data === 'success';
 
 		const trackProperties: ITelemetryTrackProperties = {
@@ -1252,8 +1266,6 @@ async function oAuthCredentialAuthorize() {
 		void handleDynamicNotification(successfullyConnected);
 
 		if (successfullyConnected) {
-			oauthChannel.removeEventListener('message', receiveMessage);
-
 			// Set some kind of data that status changes.
 			// As data does not get displayed directly it does not matter what data.
 			credentialData.value = {
