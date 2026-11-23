@@ -8,7 +8,7 @@ import type {
 	INodeTypeBaseDescription,
 	INodeTypeDescription,
 } from 'n8n-workflow';
-import { NodeConnectionTypes } from 'n8n-workflow';
+import { NodeConnectionTypes, requestUrl } from 'n8n-workflow';
 
 import { calendarFields, calendarOperations } from './description/CalendarDescription';
 import { contactFields, contactNotes, contactOperations } from './description/ContactDescription';
@@ -61,9 +61,6 @@ const versionDescription: INodeTypeDescription = {
 	subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
 	defaults: {
 		name: 'HighLevel',
-	},
-	builderHint: {
-		message: 'To add notes to contacts, set additionalFields.notes',
 	},
 	usableAsTool: true,
 	inputs: [NodeConnectionTypes.Main],
@@ -128,8 +125,7 @@ export class HighLevelV2 implements INodeType {
 					this,
 					'highLevelOAuth2Api',
 					{
-						// eslint-disable-next-line @typescript-eslint/restrict-template-expressions
-						url: `https://services.leadconnectorhq.com/locations/${locationId}/customFields?model=contact`,
+						url: requestUrl`https://services.leadconnectorhq.com/locations/${locationId}/customFields?model=contact`,
 						headers: {
 							Accept: 'application/json',
 							'Content-Type': 'application/json',
@@ -165,8 +161,7 @@ export class HighLevelV2 implements INodeType {
 					this,
 					'highLevelOAuth2Api',
 					{
-						// eslint-disable-next-line @typescript-eslint/restrict-template-expressions
-						url: `https://services.leadconnectorhq.com/locations/${locationId}/timezones`,
+						url: requestUrl`https://services.leadconnectorhq.com/locations/${locationId}/timezones`,
 						headers: {
 							Accept: 'application/json',
 							'Content-Type': 'application/json',

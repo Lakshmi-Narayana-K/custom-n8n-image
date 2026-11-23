@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 
 import { useI18n } from '../../composables/useI18n';
 import type { IUser, SelectSize } from '../../types';
+import N8nAvatar from '../N8nAvatar';
 import N8nOption from '../N8nOption';
 import N8nSelect from '../N8nSelect';
 import N8nUserInfo from '../N8nUserInfo';
@@ -17,6 +18,14 @@ interface UserSelectProps {
 	remote?: boolean;
 	remoteMethod?: (query: string) => void;
 	loading?: boolean;
+	/** Set to false to keep the dropdown in the local stacking context, e.g. inside N8nDialog */
+	teleported?: boolean;
+	/** Show only the name of the selected user. The options still show the email. */
+	hideEmailInLabel?: boolean;
+	/** Show the avatar of the selected user before the name. */
+	showAvatar?: boolean;
+	/** Show the border only on hover and focus, for a picker inside a table row or a list. */
+	borderless?: boolean;
 }
 
 const props = withDefaults(defineProps<UserSelectProps>(), {
@@ -26,6 +35,10 @@ const props = withDefaults(defineProps<UserSelectProps>(), {
 	currentUserId: '',
 	remote: false,
 	loading: false,
+	teleported: true,
+	hideEmailInLabel: false,
+	showAvatar: false,
+	borderless: false,
 });
 
 const emit = defineEmits<{
@@ -88,8 +101,24 @@ const setFilter = (value: string = '') => {
 const onBlur = () => emit('blur');
 const onFocus = () => emit('focus');
 
-const getLabel = (user: IUser) =>
-	(!user.fullName ? user.email : `${user.fullName} (${user.email})`) ?? '';
+const selectedUser = computed(() => props.users.find((user) => user.id === props.modelValue));
+
+const showSelectedAvatar = computed(() => props.showAvatar && !!selectedUser.value);
+
+// A user can have only a full name. The avatar then takes its initials from it.
+const avatarNames = computed(() => {
+	const user = selectedUser.value;
+	if (!user) return {};
+	if (user.firstName || user.lastName) {
+		return { firstName: user.firstName, lastName: user.lastName };
+	}
+	return { firstName: user.fullName };
+});
+
+const getLabel = (user: IUser) => {
+	if (!user.fullName) return user.email ?? '';
+	return props.hideEmailInLabel ? user.fullName : `${user.fullName} (${user.email})`;
+};
 </script>
 
 <template>
@@ -101,17 +130,25 @@ const getLabel = (user: IUser) =>
 		:filter-method="setFilter"
 		:placeholder="placeholder || t('nds.userSelect.selectUser')"
 		:default-first-option="true"
-		teleported
+		:teleported="teleported"
 		:popper-class="$style.limitPopperWidth"
 		:no-data-text="t('nds.userSelect.noMatchingUsers')"
 		:size="size"
 		:remote="remote"
 		:loading="loading"
+		:class="{ [$style.withAvatar]: showSelectedAvatar, [$style.borderless]: borderless }"
 		@blur="onBlur"
 		@focus="onFocus"
 	>
-		<template v-if="$slots.prefix" #prefix>
-			<slot name="prefix" />
+		<template v-if="showSelectedAvatar || $slots.prefix" #prefix>
+			<N8nAvatar
+				v-if="showSelectedAvatar"
+				size="xsmall"
+				:first-name="avatarNames.firstName"
+				:last-name="avatarNames.lastName"
+				data-test-id="user-select-avatar"
+			/>
+			<slot v-else name="prefix" />
 		</template>
 		<N8nOption
 			v-for="user in sortedUsers"
@@ -131,6 +168,16 @@ const getLabel = (user: IUser) =>
 .itemContainer {
 	--select--option--padding: var(--spacing--2xs) var(--spacing--sm);
 	--select--option--line-height: 1;
+}
+
+/* The select reserves room for an icon. The avatar is wider, so the text starts after it. */
+.withAvatar :global(.el-select .el-input--prefix .el-input__inner) {
+	padding-left: calc(var(--spacing--2xs) * 2 + var(--spacing--md));
+}
+
+.borderless:not(:hover, :focus-within) :global(.el-input__inner) {
+	border-color: transparent;
+	background-color: transparent;
 }
 
 :root .limitPopperWidth {

@@ -54,13 +54,6 @@ export class AgentV3 implements INodeType {
 			},
 			properties: [
 				{
-					displayName:
-						'Tip: Get a feel for agents with our quick <a href="https://docs.n8n.io/advanced-ai/intro-tutorial/" target="_blank">tutorial</a> or see an <a href="/workflows/templates/1954" target="_blank">example</a> of how this node works',
-					name: 'aiAgentStarterCallout',
-					type: 'callout',
-					default: '',
-				},
-				{
 					...promptTypeOptionsDeprecated,
 					displayOptions: { show: { '@version': [{ _cnd: { lt: 3.1 } }] } },
 				},
@@ -98,6 +91,10 @@ export class AgentV3 implements INodeType {
 					type: 'boolean',
 					default: false,
 					noDataExpression: true,
+					builderHint: {
+						propertyHint:
+							'Set to `true` when you need structured JSON output. The agent then requires an `outputParser` entry in its `subnodes` config (typically an `outputParserStructured` node defined via the `outputParser({...})` SDK factory). With `hasOutputParser: false` the agent returns a plain string in `$json.output`.',
+					},
 				},
 				{
 					displayName: `Connect an <a data-action='openSelectiveNodeCreator' data-action-parameter-connectiontype='${NodeConnectionTypes.AiOutputParser}'>output parser</a> on the canvas to specify the output format you require`,

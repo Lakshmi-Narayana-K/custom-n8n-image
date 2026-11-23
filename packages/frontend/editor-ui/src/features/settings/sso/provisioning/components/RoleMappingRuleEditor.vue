@@ -2,8 +2,8 @@
 import { computed, onMounted } from 'vue';
 import { N8nButton } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
-import { useRBACStore } from '@/app/stores/rbac.store';
-import { useRolesStore } from '@/app/stores/roles.store';
+import { useRBACStore } from '@n8n/stores/rbac.store';
+import { useRolesStore } from '@n8n/stores/roles.store';
 import { useProjectsStore } from '@/features/collaboration/projects/projects.store';
 import { useRoleMappingRules } from '../composables/useRoleMappingRules';
 import RuleSectionHeader from './RuleSectionHeader.vue';
@@ -17,6 +17,12 @@ const props = withDefaults(
 		showProjectRules: true,
 	},
 );
+
+// The default-condition role is owned by the parent provisioning form (it must
+// be shared with the IdP-managed-rules view, which has no rule editor) and
+// persisted via the provisioning config, so it's a two-way bound model rather
+// than local state.
+const defaultInstanceRole = defineModel<string>('defaultInstanceRole', { required: true });
 
 const i18n = useI18n();
 const rbacStore = useRBACStore();
@@ -32,7 +38,6 @@ const teamProjectOptions = computed(() =>
 const {
 	instanceRules,
 	projectRules,
-	fallbackInstanceRole,
 	isDirty,
 	addRule,
 	updateRule,
@@ -40,6 +45,7 @@ const {
 	reorder,
 	loadRules,
 	save,
+	discardProjectRules,
 } = useRoleMappingRules();
 
 function duplicateRule(id: string) {
@@ -60,7 +66,7 @@ onMounted(async () => {
 	await Promise.all([loadRules(), rolesStore.fetchRoles(), projectsStore.getAllProjects()]);
 });
 
-defineExpose({ isDirty, save });
+defineExpose({ isDirty, save, discardProjectRules });
 </script>
 <template>
 	<div :class="$style.editor" data-test-id="role-mapping-rule-editor">
@@ -73,13 +79,13 @@ defineExpose({ isDirty, save });
 		<RuleList
 			type="instance"
 			:rules="instanceRules"
-			:fallback-role="fallbackInstanceRole"
+			:fallback-role="defaultInstanceRole"
 			:disabled="!canEdit"
 			@reorder="(from, to) => reorder('instance', from, to)"
 			@update="updateRule"
 			@delete="deleteRule"
 			@duplicate="duplicateRule"
-			@update:fallback-role="fallbackInstanceRole = $event"
+			@update:fallback-role="defaultInstanceRole = $event"
 		/>
 		<div :class="$style.addButtonRow">
 			<N8nButton

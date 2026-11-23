@@ -1,5 +1,11 @@
 import mysql2 from 'mysql2/promise';
-import type { IDataObject, INode } from 'n8n-workflow';
+import type {
+	IDataObject,
+	IExecuteFunctions,
+	INode,
+	INodeExecutionData,
+	INodeParameters,
+} from 'n8n-workflow';
 
 import { createMockExecuteFunction } from '@test/nodes/Helpers';
 
@@ -27,11 +33,11 @@ const fakeConnection = {
 	format(query: string, values: any[]) {
 		return mysql2.format(query, values);
 	},
-	query: jest.fn(async (_query = '') => [{}]),
-	release: jest.fn(),
-	beginTransaction: jest.fn(),
-	commit: jest.fn(),
-	rollback: jest.fn(),
+	query: vi.fn(async (_query = '') => [{}]),
+	release: vi.fn(),
+	beginTransaction: vi.fn(),
+	commit: vi.fn(),
+	rollback: vi.fn(),
 };
 
 const createFakePool = (connection: IDataObject) => {
@@ -39,7 +45,7 @@ const createFakePool = (connection: IDataObject) => {
 		getConnection() {
 			return connection;
 		},
-		query: jest.fn(async () => [{}]),
+		query: vi.fn(async () => [{}]),
 	} as unknown as Mysql2Pool;
 };
 
@@ -47,7 +53,7 @@ const emptyInputItems = [{ json: {}, pairedItem: { item: 0, input: undefined } }
 
 describe('Test MySql V2, operations', () => {
 	afterEach(() => {
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 	});
 
 	it('should have all operations', () => {
@@ -82,7 +88,7 @@ describe('Test MySql V2, operations', () => {
 
 		const pool = createFakePool(fakeConnection);
 
-		const poolQuerySpy = jest.spyOn(pool, 'query');
+		const poolQuerySpy = vi.spyOn(pool, 'query');
 
 		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode);
 
@@ -118,7 +124,7 @@ describe('Test MySql V2, operations', () => {
 
 		const pool = createFakePool(fakeConnection);
 
-		const poolQuerySpy = jest.spyOn(pool, 'query');
+		const poolQuerySpy = vi.spyOn(pool, 'query');
 
 		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode);
 
@@ -168,7 +174,7 @@ describe('Test MySql V2, operations', () => {
 
 		const pool = createFakePool(fakeConnection);
 
-		const poolQuerySpy = jest.spyOn(pool, 'query');
+		const poolQuerySpy = vi.spyOn(pool, 'query');
 
 		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode);
 
@@ -228,6 +234,37 @@ describe('Test MySql V2, operations', () => {
 		await expect(promise).rejects.toThrow('Invalid where clause');
 	});
 
+	it('deleteTable: delete, should route prep error to error output when continueOnFail is true', async () => {
+		const nodeParameters: IDataObject = {
+			operation: 'deleteTable',
+			table: {
+				__rl: true,
+				value: 'test_table',
+				mode: 'list',
+				cachedResultName: 'test_table',
+			},
+			deleteCommand: 'delete',
+			where: {
+				values: [{ column: 'id', condition: '=1; select 1,2; -- -', value: '1' }],
+			},
+			options: {},
+		};
+
+		const mockRunQueries = vi.fn(async () => []);
+		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode, true);
+
+		const result = await deleteTable.execute.call(
+			fakeExecuteFunction,
+			emptyInputItems,
+			mockRunQueries as unknown as QueryRunner,
+		);
+
+		expect(result).toHaveLength(1);
+		expect(result[0].error).toBeDefined();
+		expect(result[0].pairedItem).toEqual({ item: 0 });
+		expect(mockRunQueries).not.toHaveBeenCalled();
+	});
+
 	it('executeQuery, should call runQueries with', async () => {
 		const nodeParameters: IDataObject = {
 			operation: 'executeQuery',
@@ -243,7 +280,7 @@ describe('Test MySql V2, operations', () => {
 
 		const fakeConnectionCopy = { ...fakeConnection };
 
-		fakeConnectionCopy.query = jest.fn(async (query?: string) => {
+		fakeConnectionCopy.query = vi.fn(async (query?: string) => {
 			const result = [];
 			if (query?.toLowerCase().includes('select')) {
 				result.push([{ id: 1, name: 'test 1' }]);
@@ -254,7 +291,7 @@ describe('Test MySql V2, operations', () => {
 		});
 		const pool = createFakePool(fakeConnectionCopy);
 
-		const connectionQuerySpy = jest.spyOn(fakeConnectionCopy, 'query');
+		const connectionQuerySpy = vi.spyOn(fakeConnectionCopy, 'query');
 
 		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode);
 
@@ -307,14 +344,17 @@ describe('Test MySql V2, operations', () => {
 
 		const fakeConnectionCopy = { ...fakeConnection };
 
-		fakeConnectionCopy.query = jest.fn(async (query?: string) => {
+		fakeConnectionCopy.query = vi.fn(async (query?: string) => {
 			return [{ query }];
 		});
 		const pool = createFakePool(fakeConnectionCopy);
 
-		const connectionQuerySpy = jest.spyOn(fakeConnectionCopy, 'query');
+		const connectionQuerySpy = vi.spyOn(fakeConnectionCopy, 'query');
 
-		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode);
+		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, {
+			...mySqlMockNode,
+			parameters: nodeParameters as INodeParameters,
+		});
 
 		const runQueries: QueryRunner = configureQueryRunner.call(
 			fakeExecuteFunction,
@@ -332,6 +372,161 @@ describe('Test MySql V2, operations', () => {
 		expect(result).toBeDefined();
 
 		expect(connectionQuerySpy).toBeCalledWith('SELECT * FROM users LIMIT 2, 5');
+	});
+
+	it('executeQuery, should keep a resolved value out of another parameter slot', async () => {
+		// Raw, unevaluated node config, as it's stored in the workflow.
+		const rawParameters: IDataObject = {
+			operation: 'executeQuery',
+			query: 'SELECT * FROM users WHERE name = $1 AND city = $2',
+			options: {
+				queryBatching: 'independently',
+				queryReplacement: '={{ $json.name }},Springfield',
+				nodeVersion: 2.5,
+			},
+		};
+		// What n8n would hand back for the whole evaluated "options" collection.
+		const evaluatedOptions: IDataObject = {
+			queryBatching: 'independently',
+			queryReplacement: 'Doe, Jane,Springfield',
+			nodeVersion: 2.5,
+		};
+
+		const fakeConnectionCopy = { ...fakeConnection };
+
+		fakeConnectionCopy.query = vi.fn(async (query?: string) => {
+			return [{ query }];
+		});
+		const pool = createFakePool(fakeConnectionCopy);
+
+		const connectionQuerySpy = vi.spyOn(fakeConnectionCopy, 'query');
+
+		const fakeExecuteFunction = createMockExecuteFunction(rawParameters, {
+			...mySqlMockNode,
+			parameters: rawParameters as INodeParameters,
+		});
+		fakeExecuteFunction.getNodeParameter = vi.fn().mockImplementation((name: string) => {
+			if (name === 'query') return rawParameters.query;
+			if (name === 'options') return evaluatedOptions;
+			return undefined;
+		});
+		fakeExecuteFunction.evaluateExpression = vi
+			.fn()
+			.mockImplementation((expr: string) => (expr === '{{ $json.name }}' ? 'Doe, Jane' : expr));
+
+		const runQueries: QueryRunner = configureQueryRunner.call(
+			fakeExecuteFunction,
+			evaluatedOptions,
+			pool,
+		);
+
+		await executeQuery.execute.call(
+			fakeExecuteFunction,
+			emptyInputItems,
+			runQueries,
+			evaluatedOptions,
+		);
+
+		expect(connectionQuerySpy).toBeCalledWith(
+			"SELECT * FROM users WHERE name = 'Doe, Jane' AND city = 'Springfield'",
+		);
+	});
+
+	it('executeQuery, should route parameter validation error to error output when continueOnFail is true', async () => {
+		const nodeParameters: IDataObject = {
+			operation: 'executeQuery',
+			query: '$1',
+			options: {},
+		};
+
+		const nodeOptions: IDataObject = { nodeVersion: 2.5 };
+		const mockRunQueries = vi.fn(async () => []);
+
+		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode, true);
+
+		const result = await executeQuery.execute.call(
+			fakeExecuteFunction,
+			emptyInputItems,
+			mockRunQueries as unknown as QueryRunner,
+			nodeOptions,
+		);
+
+		expect(result).toHaveLength(1);
+		expect(result[0].json).toHaveProperty('message');
+		expect(result[0].pairedItem).toEqual({ item: 0 });
+		expect(result[0].error).toBeDefined();
+		expect(result[0].error?.message).toContain('$1');
+		expect(mockRunQueries).not.toHaveBeenCalled();
+	});
+
+	it('executeQuery, should throw parameter validation error when continueOnFail is false', async () => {
+		const nodeParameters: IDataObject = {
+			operation: 'executeQuery',
+			query: '$1',
+			options: {},
+		};
+
+		const nodeOptions: IDataObject = { nodeVersion: 2.5 };
+		const mockRunQueries = vi.fn(async () => []);
+
+		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode, false);
+
+		const promise = executeQuery.execute.call(
+			fakeExecuteFunction,
+			emptyInputItems,
+			mockRunQueries as unknown as QueryRunner,
+			nodeOptions,
+		);
+
+		await expect(promise).rejects.toThrow(
+			'Parameter $1 referenced in query but no replacement value provided',
+		);
+		expect(mockRunQueries).not.toHaveBeenCalled();
+	});
+
+	it('executeQuery, should route error item before success items when a preceding item fails query preparation', async () => {
+		const nodeOptions: IDataObject = { nodeVersion: 2.5 };
+
+		const fakeExecuteFunction = {
+			getNodeParameter(parameterName: string, itemIndex: number, fallbackValue?: IDataObject) {
+				if (parameterName === 'query') {
+					return itemIndex === 0 ? '$1' : 'SELECT 1';
+				}
+				return fallbackValue ?? {};
+			},
+			getNode() {
+				return mySqlMockNode;
+			},
+			continueOnFail() {
+				return true;
+			},
+		} as unknown as IExecuteFunctions;
+
+		const successResult: INodeExecutionData = { json: { success: true }, pairedItem: { item: 1 } };
+		const mockRunQueries = vi.fn(async () => [successResult]);
+
+		const inputItems: INodeExecutionData[] = [
+			{ json: { a: 1 }, pairedItem: { item: 0, input: undefined } },
+			{ json: { b: 2 }, pairedItem: { item: 1, input: undefined } },
+		];
+
+		const result = await executeQuery.execute.call(
+			fakeExecuteFunction,
+			inputItems,
+			mockRunQueries as unknown as QueryRunner,
+			nodeOptions,
+		);
+
+		// Item 0 failed preparation → error item with original index 0 and top-level error
+		expect(result[0].json).toHaveProperty('message');
+		expect(result[0].pairedItem).toEqual({ item: 0 });
+		expect(result[0].error).toBeDefined();
+
+		// runQueries was called with the valid query carrying its original itemIndex (1)
+		expect(mockRunQueries).toHaveBeenCalledWith([{ query: 'SELECT 1', values: [], itemIndex: 1 }]);
+
+		// Success result from runQueries is appended after error items
+		expect(result[1].json).toEqual({ success: true });
 	});
 
 	it('select, should call runQueries with', async () => {
@@ -377,7 +572,7 @@ describe('Test MySql V2, operations', () => {
 
 		const pool = createFakePool(fakeConnection);
 
-		const connectionQuerySpy = jest.spyOn(fakeConnection, 'query');
+		const connectionQuerySpy = vi.spyOn(fakeConnection, 'query');
 
 		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode);
 
@@ -392,8 +587,8 @@ describe('Test MySql V2, operations', () => {
 		expect(result).toBeDefined();
 		expect(result).toEqual([{ json: { success: true }, pairedItem: { item: 0 } }]);
 
-		const connectionBeginTransactionSpy = jest.spyOn(fakeConnection, 'beginTransaction');
-		const connectionCommitSpy = jest.spyOn(fakeConnection, 'commit');
+		const connectionBeginTransactionSpy = vi.spyOn(fakeConnection, 'beginTransaction');
+		const connectionCommitSpy = vi.spyOn(fakeConnection, 'commit');
 
 		expect(connectionBeginTransactionSpy).toBeCalledTimes(1);
 
@@ -456,6 +651,38 @@ describe('Test MySql V2, operations', () => {
 		await expect(promise).rejects.toThrow('Invalid where clause');
 	});
 
+	it('select, should route prep error to error output when continueOnFail is true', async () => {
+		const nodeParameters: IDataObject = {
+			operation: 'select',
+			table: {
+				__rl: true,
+				value: 'test_table',
+				mode: 'list',
+				cachedResultName: 'test_table',
+			},
+			limit: 2,
+			where: {
+				values: [{ column: 'id', condition: '=1; select 1,2; -- -', value: '1' }],
+			},
+			combineConditions: 'OR',
+			options: {},
+		};
+
+		const mockRunQueries = vi.fn(async () => []);
+		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode, true);
+
+		const result = await select.execute.call(
+			fakeExecuteFunction,
+			emptyInputItems,
+			mockRunQueries as unknown as QueryRunner,
+		);
+
+		expect(result).toHaveLength(1);
+		expect(result[0].error).toBeDefined();
+		expect(result[0].pairedItem).toEqual({ item: 0 });
+		expect(mockRunQueries).not.toHaveBeenCalled();
+	});
+
 	it('select, should replace direction with ASC or DESC', async () => {
 		const nodeParameters: IDataObject = {
 			operation: 'select',
@@ -499,7 +726,7 @@ describe('Test MySql V2, operations', () => {
 
 		const pool = createFakePool(fakeConnection);
 
-		const connectionQuerySpy = jest.spyOn(fakeConnection, 'query');
+		const connectionQuerySpy = vi.spyOn(fakeConnection, 'query');
 
 		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode);
 
@@ -514,8 +741,8 @@ describe('Test MySql V2, operations', () => {
 		expect(result).toBeDefined();
 		expect(result).toEqual([{ json: { success: true }, pairedItem: { item: 0 } }]);
 
-		const connectionBeginTransactionSpy = jest.spyOn(fakeConnection, 'beginTransaction');
-		const connectionCommitSpy = jest.spyOn(fakeConnection, 'commit');
+		const connectionBeginTransactionSpy = vi.spyOn(fakeConnection, 'beginTransaction');
+		const connectionCommitSpy = vi.spyOn(fakeConnection, 'commit');
 
 		expect(connectionBeginTransactionSpy).toBeCalledTimes(1);
 
@@ -560,7 +787,7 @@ describe('Test MySql V2, operations', () => {
 
 		const pool = createFakePool(fakeConnection);
 
-		const connectionQuerySpy = jest.spyOn(fakeConnection, 'query');
+		const connectionQuerySpy = vi.spyOn(fakeConnection, 'query');
 
 		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode);
 
@@ -586,6 +813,37 @@ describe('Test MySql V2, operations', () => {
 		);
 	});
 
+	it('insert, should route prep error to error output when continueOnFail is true', async () => {
+		const nodeParameters: IDataObject = {
+			operation: 'insert',
+			table: {
+				__rl: true,
+				value: 'test_table',
+				mode: 'list',
+				cachedResultName: 'test_table',
+			},
+			dataMode: 'defineBelow',
+			valuesToSend: { notValues: [] },
+			options: { queryBatching: 'independently' },
+		};
+
+		const nodeOptions = nodeParameters.options as IDataObject;
+		const mockRunQueries = vi.fn(async () => []);
+		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode, true);
+
+		const result = await insert.execute.call(
+			fakeExecuteFunction,
+			emptyInputItems,
+			mockRunQueries as unknown as QueryRunner,
+			nodeOptions,
+		);
+
+		expect(result).toHaveLength(1);
+		expect(result[0].error).toBeDefined();
+		expect(result[0].pairedItem).toEqual({ item: 0 });
+		expect(mockRunQueries).not.toHaveBeenCalled();
+	});
+
 	it('update, should call runQueries with', async () => {
 		const nodeParameters: IDataObject = {
 			operation: 'update',
@@ -606,7 +864,7 @@ describe('Test MySql V2, operations', () => {
 
 		const pool = createFakePool(fakeConnection);
 
-		const connectionQuerySpy = jest.spyOn(fakeConnection, 'query');
+		const connectionQuerySpy = vi.spyOn(fakeConnection, 'query');
 
 		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode);
 
@@ -653,6 +911,38 @@ describe('Test MySql V2, operations', () => {
 		);
 	});
 
+	it('update, should route prep error to error output when continueOnFail is true', async () => {
+		const nodeParameters: IDataObject = {
+			operation: 'update',
+			table: {
+				__rl: true,
+				value: 'test_table',
+				mode: 'list',
+				cachedResultName: 'test_table',
+			},
+			columnToMatchOn: 'id',
+			dataMode: 'defineBelow',
+			valuesToSend: { notValues: [] },
+			options: {},
+		};
+
+		const nodeOptions = nodeParameters.options as IDataObject;
+		const mockRunQueries = vi.fn(async () => []);
+		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode, true);
+
+		const result = await update.execute.call(
+			fakeExecuteFunction,
+			emptyInputItems,
+			mockRunQueries as unknown as QueryRunner,
+			nodeOptions,
+		);
+
+		expect(result).toHaveLength(1);
+		expect(result[0].error).toBeDefined();
+		expect(result[0].pairedItem).toEqual({ item: 0 });
+		expect(mockRunQueries).not.toHaveBeenCalled();
+	});
+
 	it('upsert, should call runQueries with', async () => {
 		const nodeParameters: IDataObject = {
 			operation: 'upsert',
@@ -671,7 +961,7 @@ describe('Test MySql V2, operations', () => {
 
 		const pool = createFakePool(fakeConnection);
 
-		const poolQuerySpy = jest.spyOn(pool, 'query');
+		const poolQuerySpy = vi.spyOn(pool, 'query');
 
 		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode);
 
@@ -710,5 +1000,82 @@ describe('Test MySql V2, operations', () => {
 		expect(poolQuerySpy).toBeCalledWith(
 			"INSERT INTO `test_table`(`id`, `name`) VALUES(42,'test 4') ON DUPLICATE KEY UPDATE `name` = 'test 4';INSERT INTO `test_table`(`id`, `name`) VALUES(88,'test 88') ON DUPLICATE KEY UPDATE `name` = 'test 88'",
 		);
+	});
+
+	it('upsert, should route prep error to error output when continueOnFail is true', async () => {
+		const nodeParameters: IDataObject = {
+			operation: 'upsert',
+			table: {
+				__rl: true,
+				value: 'test_table',
+				mode: 'list',
+				cachedResultName: 'test_table',
+			},
+			columnToMatchOn: 'id',
+			dataMode: 'defineBelow',
+			valuesToSend: { notValues: [] },
+			options: {},
+		};
+
+		const nodeOptions = nodeParameters.options as IDataObject;
+		const mockRunQueries = vi.fn(async () => []);
+		const fakeExecuteFunction = createMockExecuteFunction(nodeParameters, mySqlMockNode, true);
+
+		const result = await upsert.execute.call(
+			fakeExecuteFunction,
+			emptyInputItems,
+			mockRunQueries as unknown as QueryRunner,
+			nodeOptions,
+		);
+
+		expect(result).toHaveLength(1);
+		expect(result[0].error).toBeDefined();
+		expect(result[0].pairedItem).toEqual({ item: 0 });
+		expect(mockRunQueries).not.toHaveBeenCalled();
+	});
+
+	it('executeQuery, should map pairedItem to original item index when a preceding item fails query preparation', async () => {
+		const nodeOptions: IDataObject = { nodeVersion: 2.5, queryBatching: 'independently' };
+
+		const pool = createFakePool(fakeConnection);
+		const fakeExecuteFunction = {
+			getNodeParameter(parameterName: string, itemIndex: number, fallbackValue?: IDataObject) {
+				if (parameterName === 'query') {
+					return itemIndex === 0 ? '$1' : 'INSERT INTO t VALUES (1)';
+				}
+				return fallbackValue ?? {};
+			},
+			getNode() {
+				return mySqlMockNode;
+			},
+			continueOnFail() {
+				return true;
+			},
+			helpers: {
+				constructExecutionMetaData: (data: INodeExecutionData[], meta: IDataObject) =>
+					data.map((d) => ({ ...d, ...meta })),
+			},
+		} as unknown as IExecuteFunctions;
+
+		const runQueries = configureQueryRunner.call(fakeExecuteFunction, nodeOptions, pool);
+
+		const inputItems: INodeExecutionData[] = [
+			{ json: { a: 1 }, pairedItem: { item: 0, input: undefined } },
+			{ json: { b: 2 }, pairedItem: { item: 1, input: undefined } },
+		];
+
+		const result = await executeQuery.execute.call(
+			fakeExecuteFunction,
+			inputItems,
+			runQueries,
+			nodeOptions,
+		);
+
+		// Error from item 0 keeps its original index
+		expect(result[0].pairedItem).toEqual({ item: 0 });
+		expect(result[0].error).toBeDefined();
+
+		// Successful query came from item 1 — its pairedItem must reference item 1, not 0
+		expect(result[1].pairedItem).toEqual({ item: 1 });
 	});
 });

@@ -10,6 +10,7 @@ import {
 	testSecretProviderConnectionResponseSchema,
 } from '@n8n/api-types';
 import { Logger } from '@n8n/backend-common';
+import { EventService } from '@n8n/backend-services';
 import type { SecretsProviderAccessRole, SecretsProviderConnection } from '@n8n/db';
 import {
 	ProjectSecretsProviderAccessRepository,
@@ -21,18 +22,16 @@ import { Cipher } from 'n8n-core';
 import type { IDataObject } from 'n8n-workflow';
 import { jsonParse } from 'n8n-workflow';
 
-import { ExternalSecretsProviderRegistry } from './provider-registry.service';
-
 import {
 	CredentialDependencyService,
 	EXTERNAL_SECRET_PROVIDER_DEPENDENCY_TYPE,
 } from '@/credentials/credential-dependency.service';
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { NotFoundError } from '@/errors/response-errors/not-found.error';
-import { EventService } from '@/events/event.service';
+import { BadRequestError, NotFoundError } from '@n8n/errors';
 import type { ProjectSummary } from '@/events/maps/relay.event-map';
 import { ExternalSecretsManager } from '@/modules/external-secrets.ee/external-secrets-manager.ee';
 import { RedactionService } from '@/modules/external-secrets.ee/redaction.service.ee';
+
+import { ExternalSecretsProviderRegistry } from './provider-registry.service';
 
 @Service()
 export class SecretsProvidersConnectionsService {
@@ -65,7 +64,7 @@ export class SecretsProvidersConnectionsService {
 			);
 		}
 
-		const encryptedSettings = this.encryptConnectionSettings(proposedConnection.settings);
+		const encryptedSettings = await this.encryptConnectionSettings(proposedConnection.settings);
 
 		const connection = this.repository.create({
 			...proposedConnection,
@@ -115,7 +114,7 @@ export class SecretsProvidersConnectionsService {
 		userRole?: string,
 	): Promise<SecretsProviderConnection> {
 		const connection = await this.findConnectionOrFail(providerKey);
-		this.applyConnectionUpdates(connection, updates);
+		await this.applyConnectionUpdates(connection, updates);
 		await this.repository.save(connection);
 
 		return await this.syncAndEmitUpdate(providerKey, userId, userRole);
@@ -133,7 +132,7 @@ export class SecretsProvidersConnectionsService {
 		userRole?: string,
 	): Promise<SecretsProviderConnection> {
 		const connection = await this.findConnectionOrFail(providerKey);
-		this.applyConnectionUpdates(connection, updates);
+		await this.applyConnectionUpdates(connection, updates);
 		await this.repository.save(connection);
 
 		if (updates.projectIds !== undefined) {
@@ -165,10 +164,10 @@ export class SecretsProvidersConnectionsService {
 		return await this.syncAndEmitUpdate(providerKey, userId, userRole);
 	}
 
-	private applyConnectionUpdates(
+	private async applyConnectionUpdates(
 		connection: SecretsProviderConnection,
 		updates: { type?: string; settings?: IDataObject; isEnabled?: boolean },
-	): void {
+	): Promise<void> {
 		if (updates.type !== undefined) {
 			connection.type = updates.type;
 			if (!updates.settings) {
@@ -178,9 +177,9 @@ export class SecretsProvidersConnectionsService {
 			}
 		}
 		if (updates.settings !== undefined) {
-			const savedSettings = this.decryptConnectionSettings(connection.encryptedSettings);
+			const savedSettings = await this.decryptConnectionSettings(connection.encryptedSettings);
 			const unredactedSettings = this.redactionService.unredact(updates.settings, savedSettings);
-			connection.encryptedSettings = this.encryptConnectionSettings(unredactedSettings);
+			connection.encryptedSettings = await this.encryptConnectionSettings(unredactedSettings);
 		}
 		if (updates.isEnabled !== undefined) {
 			connection.isEnabled = updates.isEnabled;
@@ -317,8 +316,10 @@ export class SecretsProvidersConnectionsService {
 		};
 	}
 
-	toPublicConnection(connection: SecretsProviderConnection): SecretProviderConnection {
-		const decryptedSettings = this.decryptConnectionSettings(connection.encryptedSettings);
+	async toPublicConnection(
+		connection: SecretsProviderConnection,
+	): Promise<SecretProviderConnection> {
+		const decryptedSettings = await this.decryptConnectionSettings(connection.encryptedSettings);
 		const properties = this.externalSecretsManager.getProviderProperties(connection.type);
 		const redactedSettings = this.redactionService.redact(decryptedSettings, properties);
 		const secretNames = this.externalSecretsManager.getSecretNames(connection.providerKey);
@@ -351,7 +352,7 @@ export class SecretsProvidersConnectionsService {
 		userRole?: string,
 	): Promise<TestSecretProviderConnectionResponse> {
 		const connection = await this.getConnection(providerKey);
-		const decryptedSettings = this.decryptConnectionSettings(connection.encryptedSettings);
+		const decryptedSettings = await this.decryptConnectionSettings(connection.encryptedSettings);
 		const result = await this.externalSecretsManager.testProviderSettings(
 			connection.type,
 			decryptedSettings,
@@ -463,8 +464,8 @@ export class SecretsProvidersConnectionsService {
 		}
 	}
 
-	private encryptConnectionSettings(settings: IDataObject): string {
-		return this.cipher.encrypt(settings);
+	private async encryptConnectionSettings(settings: IDataObject): Promise<string> {
+		return await this.cipher.encryptV2(settings);
 	}
 
 	async getConnectionForProject(
@@ -518,7 +519,9 @@ export class SecretsProvidersConnectionsService {
 		return connection;
 	}
 
-	private decryptConnectionSettings(encryptedSettings: string): IDataObject {
-		return jsonParse(this.cipher.decrypt(encryptedSettings));
+	private async decryptConnectionSettings(encryptedSettings: string): Promise<IDataObject> {
+		const decrypted = await this.cipher.decryptV2(encryptedSettings);
+		const parsed = jsonParse<IDataObject>(decrypted);
+		return parsed;
 	}
 }

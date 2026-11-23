@@ -1,5 +1,6 @@
 import {
 	OperationalError,
+	requestUrl,
 	type IGetNodeParameterOptions,
 	type ILoadOptionsFunctions,
 } from 'n8n-workflow';
@@ -27,9 +28,9 @@ describe('Azure Cosmos DB', () => {
 				},
 			};
 
-			const mockRequestWithAuthentication = jest.fn().mockReturnValue(mockResponse);
+			const mockRequestWithAuthentication = vi.fn().mockReturnValue(mockResponse);
 
-			const mockGetCredentials = jest.fn(async (type: string, _itemIndex?: number) => {
+			const mockGetCredentials = vi.fn(async (type: string, _itemIndex?: number) => {
 				if (type === 'microsoftAzureCosmosDbSharedKeyApi') {
 					return credentials.microsoftAzureCosmosDbSharedKeyApi;
 				}
@@ -57,7 +58,7 @@ describe('Azure Cosmos DB', () => {
 				'microsoftAzureCosmosDbSharedKeyApi',
 				expect.objectContaining({
 					method: 'GET',
-					url: 'https://n8n-us-east-account.documents.azure.com/dbs/database_1/colls',
+					url: requestUrl`https://n8n-us-east-account.documents.azure.com/dbs/database_1/colls`,
 					headers: {
 						[HeaderConstants.X_MS_CONTINUATION]: paginationToken,
 					},
@@ -87,9 +88,9 @@ describe('Azure Cosmos DB', () => {
 				},
 			};
 
-			const mockRequestWithAuthentication = jest.fn().mockReturnValue(mockResponse);
+			const mockRequestWithAuthentication = vi.fn().mockReturnValue(mockResponse);
 
-			const mockGetCurrentNodeParameter = jest.fn(
+			const mockGetCurrentNodeParameter = vi.fn(
 				(parameterName, options: IGetNodeParameterOptions) => {
 					if (parameterName === 'container' && options.extractValue) {
 						return 'Container1';
@@ -98,7 +99,7 @@ describe('Azure Cosmos DB', () => {
 				},
 			);
 
-			const mockGetCredentials = jest.fn(async (type: string, _itemIndex?: number) => {
+			const mockGetCredentials = vi.fn(async (type: string, _itemIndex?: number) => {
 				if (type === 'microsoftAzureCosmosDbSharedKeyApi') {
 					return credentials.microsoftAzureCosmosDbSharedKeyApi;
 				}
@@ -126,7 +127,7 @@ describe('Azure Cosmos DB', () => {
 				'microsoftAzureCosmosDbSharedKeyApi',
 				expect.objectContaining({
 					method: 'GET',
-					url: 'https://n8n-us-east-account.documents.azure.com/dbs/database_1/colls/Container1/docs',
+					url: requestUrl`https://n8n-us-east-account.documents.azure.com/dbs/database_1/colls/Container1/docs`,
 					headers: {
 						[HeaderConstants.X_MS_CONTINUATION]: paginationToken,
 					},

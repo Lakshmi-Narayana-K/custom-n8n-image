@@ -1,45 +1,49 @@
+import { N8N_NODES_API_VERSION } from '@n8n/constants';
 import { inProduction } from '@n8n/backend-common';
+import type { Mock } from 'vitest';
 
-import { getCommunityNodeTypes } from '../community-node-types-utils';
+import { COMMUNITY_NODE_TYPES_INSTALLED_CACHE_KEY } from '../community-node-types.cache-keys';
+import { getCommunityNodeTypes, getCommunityNodesMetadata } from '../community-node-types-utils';
 import { CommunityNodeTypesService } from '../community-node-types.service';
 
-jest.mock('@n8n/backend-common', () => ({
-	...jest.requireActual('@n8n/backend-common'),
-	inProduction: jest.fn().mockReturnValue(false),
+vi.mock('@n8n/backend-common', async () => ({
+	...(await vi.importActual<typeof import('@n8n/backend-common')>('@n8n/backend-common')),
+	inProduction: vi.fn().mockReturnValue(false),
 }));
 
-jest.mock('../community-node-types-utils', () => ({
-	getCommunityNodeTypes: jest.fn().mockResolvedValue([]),
-	getCommunityNodesMetadata: jest.fn().mockResolvedValue([]),
+vi.mock('../community-node-types-utils', async () => ({
+	getCommunityNodeTypes: vi.fn().mockResolvedValue([]),
+	getCommunityNodesMetadata: vi.fn().mockResolvedValue([]),
 }));
 
-const mockDateNow = jest.spyOn(Date, 'now');
-const mockMathRandom = jest.spyOn(Math, 'random');
+const mockDateNow = vi.spyOn(Date, 'now');
+const mockMathRandom = vi.spyOn(Math, 'random');
 
 describe('CommunityNodeTypesService', () => {
 	let service: CommunityNodeTypesService;
 	let configMock: any;
 	let communityPackagesServiceMock: any;
 	let loggerMock: any;
+	let globalConfigMock: any;
+	let cacheServiceMock: any;
 
 	beforeEach(() => {
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 
 		delete process.env.ENVIRONMENT;
 
-		loggerMock = { error: jest.fn(), debug: jest.fn() };
+		loggerMock = { error: vi.fn(), debug: vi.fn() };
 		configMock = {
 			enabled: true,
 			verifiedEnabled: true,
 			aiNodeSdkVersion: 1,
+			nodesApiVersion: N8N_NODES_API_VERSION,
 		};
-		communityPackagesServiceMock = {
-			getAllInstalledPackages: jest.fn().mockResolvedValue([]),
-		};
-		const cacheServiceMock = {
-			get: jest.fn().mockResolvedValue(undefined),
-			set: jest.fn().mockResolvedValue(undefined),
-			delete: jest.fn().mockResolvedValue(undefined),
+		communityPackagesServiceMock = {};
+		globalConfigMock = { nodes: { exclude: [], include: [] } };
+		cacheServiceMock = {
+			get: vi.fn().mockResolvedValue(undefined),
+			set: vi.fn().mockResolvedValue(undefined),
 		};
 
 		if (mockDateNow.mockRestore) mockDateNow.mockRestore();
@@ -49,41 +53,50 @@ describe('CommunityNodeTypesService', () => {
 			loggerMock,
 			configMock,
 			communityPackagesServiceMock,
-			cacheServiceMock as any,
+			globalConfigMock,
+			cacheServiceMock,
 		);
 	});
 
 	afterEach(() => {
-		jest.restoreAllMocks();
-		jest.clearAllMocks();
+		vi.restoreAllMocks();
+		vi.clearAllMocks();
 	});
 
 	describe('fetchNodeTypes', () => {
-		const { getCommunityNodeTypes } = require('../community-node-types-utils');
-
 		it('should use staging environment when ENVIRONMENT=staging', async () => {
 			process.env.ENVIRONMENT = 'staging';
 			await (service as any).fetchNodeTypes();
-			expect(getCommunityNodeTypes).toHaveBeenCalledWith('staging', {}, 1);
+			expect(getCommunityNodeTypes).toHaveBeenCalledWith('staging', {}, 1, N8N_NODES_API_VERSION);
 		});
 
 		it('should use production environment when inProduction=true', async () => {
-			(inProduction as unknown as jest.Mock).mockReturnValue(true);
+			(inProduction as unknown as Mock).mockReturnValue(true);
 			await (service as any).fetchNodeTypes();
-			expect(getCommunityNodeTypes).toHaveBeenCalledWith('production', {}, 1);
+			expect(getCommunityNodeTypes).toHaveBeenCalledWith(
+				'production',
+				{},
+				1,
+				N8N_NODES_API_VERSION,
+			);
 		});
 
 		it('should use production environment when ENVIRONMENT=production', async () => {
 			process.env.ENVIRONMENT = 'production';
 			await (service as any).fetchNodeTypes();
-			expect(getCommunityNodeTypes).toHaveBeenCalledWith('production', {}, 1);
+			expect(getCommunityNodeTypes).toHaveBeenCalledWith(
+				'production',
+				{},
+				1,
+				N8N_NODES_API_VERSION,
+			);
 		});
 
 		it('should prioritize ENVIRONMENT=staging over inProduction=true', async () => {
 			process.env.ENVIRONMENT = 'staging';
-			(inProduction as unknown as jest.Mock).mockReturnValue(true);
+			(inProduction as unknown as Mock).mockReturnValue(true);
 			await (service as any).fetchNodeTypes();
-			expect(getCommunityNodeTypes).toHaveBeenCalledWith('staging', {}, 1);
+			expect(getCommunityNodeTypes).toHaveBeenCalledWith('staging', {}, 1, N8N_NODES_API_VERSION);
 		});
 
 		it('should call setTimestampForRetry when detectUpdates returns scheduleRetry', async () => {
@@ -94,10 +107,10 @@ describe('CommunityNodeTypesService', () => {
 				npmVersion: '1.0.0',
 			});
 
-			const detectUpdatesSpy = jest
+			const detectUpdatesSpy = vi
 				.spyOn(service as any, 'detectUpdates')
 				.mockResolvedValue({ scheduleRetry: true });
-			const setTimestampForRetrySpy = jest.spyOn(service as any, 'setTimestampForRetry');
+			const setTimestampForRetrySpy = vi.spyOn(service as any, 'setTimestampForRetry');
 
 			await (service as any).fetchNodeTypes();
 
@@ -113,14 +126,14 @@ describe('CommunityNodeTypesService', () => {
 				npmVersion: '1.0.0',
 			});
 
-			getCommunityNodeTypes.mockResolvedValue([
+			(getCommunityNodeTypes as unknown as Mock).mockResolvedValue([
 				{ name: 'node-1', packageName: 'package-1', npmVersion: '1.1.0' },
 			]);
 
-			const detectUpdatesSpy = jest
+			const detectUpdatesSpy = vi
 				.spyOn(service as any, 'detectUpdates')
 				.mockResolvedValue({ typesToUpdate: [1] });
-			const setTimestampForRetrySpy = jest.spyOn(service as any, 'setTimestampForRetry');
+			const setTimestampForRetrySpy = vi.spyOn(service as any, 'setTimestampForRetry');
 
 			await (service as any).fetchNodeTypes();
 
@@ -138,18 +151,21 @@ describe('CommunityNodeTypesService', () => {
 
 			const ids = Array.from({ length: 250 }, (_, i) => i + 1);
 
-			getCommunityNodeTypes.mockResolvedValue([]);
+			(getCommunityNodeTypes as unknown as Mock).mockResolvedValue([]);
 
-			jest.spyOn(service as any, 'detectUpdates').mockResolvedValue({ typesToUpdate: ids });
+			vi.spyOn(service as any, 'detectUpdates').mockResolvedValue({ typesToUpdate: ids });
 
 			await (service as any).fetchNodeTypes();
 
 			// 250 IDs should result in 3 batches
 			expect(getCommunityNodeTypes).toHaveBeenCalledTimes(3);
 
-			const firstCallFilters = getCommunityNodeTypes.mock.calls[0][1].filters.id.$in;
-			const secondCallFilters = getCommunityNodeTypes.mock.calls[1][1].filters.id.$in;
-			const thirdCallFilters = getCommunityNodeTypes.mock.calls[2][1].filters.id.$in;
+			const firstCallFilters = (getCommunityNodeTypes as unknown as Mock).mock.calls[0][1].filters
+				.id.$in;
+			const secondCallFilters = (getCommunityNodeTypes as unknown as Mock).mock.calls[1][1].filters
+				.id.$in;
+			const thirdCallFilters = (getCommunityNodeTypes as unknown as Mock).mock.calls[2][1].filters
+				.id.$in;
 
 			expect(firstCallFilters).toHaveLength(100);
 			expect(secondCallFilters).toHaveLength(100);
@@ -164,17 +180,17 @@ describe('CommunityNodeTypesService', () => {
 
 	describe('updateCommunityNodeTypes', () => {
 		beforeEach(() => {
-			jest.spyOn(Date, 'now').mockImplementation(() => 1000000);
+			vi.spyOn(Date, 'now').mockImplementation(() => 1000000);
 
-			jest.spyOn(Math, 'random').mockImplementation(() => 0.5);
+			vi.spyOn(Math, 'random').mockImplementation(() => 0.5);
 		});
 
 		afterEach(() => {
-			jest.restoreAllMocks();
+			vi.restoreAllMocks();
 		});
 
 		it('should call setTimestampForRetry when nodeTypes is empty array', () => {
-			const setTimestampForRetrySpy = jest.spyOn(service as any, 'setTimestampForRetry');
+			const setTimestampForRetrySpy = vi.spyOn(service as any, 'setTimestampForRetry');
 
 			(service as any).updateCommunityNodeTypes([]);
 
@@ -182,7 +198,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should call setTimestampForRetry when nodeTypes is null', () => {
-			const setTimestampForRetrySpy = jest.spyOn(service as any, 'setTimestampForRetry');
+			const setTimestampForRetrySpy = vi.spyOn(service as any, 'setTimestampForRetry');
 
 			(service as any).updateCommunityNodeTypes(null);
 
@@ -190,7 +206,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should call setTimestampForRetry when nodeTypes is undefined', () => {
-			const setTimestampForRetrySpy = jest.spyOn(service as any, 'setTimestampForRetry');
+			const setTimestampForRetrySpy = vi.spyOn(service as any, 'setTimestampForRetry');
 
 			(service as any).updateCommunityNodeTypes(undefined);
 
@@ -198,7 +214,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should return early when nodeTypes is empty without updating communityNodeTypes', () => {
-			const setCommunityNodeTypesSpy = jest.spyOn(service as any, 'setCommunityNodeTypes');
+			const setCommunityNodeTypesSpy = vi.spyOn(service as any, 'setCommunityNodeTypes');
 			const initialNodeTypes = (service as any).communityNodeTypes;
 
 			(service as any).updateCommunityNodeTypes([]);
@@ -222,7 +238,7 @@ describe('CommunityNodeTypesService', () => {
 					nodeDescription: { name: 'test-node-2', usableAsTool: false },
 				},
 			];
-			const setCommunityNodeTypesSpy = jest.spyOn(service as any, 'setCommunityNodeTypes');
+			const setCommunityNodeTypesSpy = vi.spyOn(service as any, 'setCommunityNodeTypes');
 
 			(service as any).updateCommunityNodeTypes(mockNodeTypes);
 
@@ -239,15 +255,15 @@ describe('CommunityNodeTypesService', () => {
 		const RETRY_INTERVAL = 5 * 60 * 1000;
 
 		beforeEach(() => {
-			jest.spyOn(Date, 'now').mockImplementation(() => 1000000);
+			vi.spyOn(Date, 'now').mockImplementation(() => 1000000);
 		});
 
 		afterEach(() => {
-			jest.restoreAllMocks();
+			vi.restoreAllMocks();
 		});
 
 		it('should set timestamp with jitter for retry', () => {
-			jest.spyOn(Math, 'random').mockImplementation(() => 0.5);
+			vi.spyOn(Math, 'random').mockImplementation(() => 0.5);
 
 			(service as any).setTimestampForRetry();
 
@@ -256,7 +272,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should set timestamp with negative jitter', () => {
-			jest.spyOn(Math, 'random').mockImplementation(() => 0);
+			vi.spyOn(Math, 'random').mockImplementation(() => 0);
 
 			(service as any).setTimestampForRetry();
 
@@ -266,7 +282,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should set timestamp with positive jitter', () => {
-			jest.spyOn(Math, 'random').mockImplementation(() => 1);
+			vi.spyOn(Math, 'random').mockImplementation(() => 1);
 
 			(service as any).setTimestampForRetry();
 
@@ -280,8 +296,8 @@ describe('CommunityNodeTypesService', () => {
 
 			testCases.forEach((randomValue, index) => {
 				const testTimestamp = 2000000 + index * 1000;
-				jest.spyOn(Math, 'random').mockImplementation(() => randomValue);
-				jest.spyOn(Date, 'now').mockImplementation(() => testTimestamp);
+				vi.spyOn(Math, 'random').mockImplementation(() => randomValue);
+				vi.spyOn(Date, 'now').mockImplementation(() => testTimestamp);
 
 				(service as any).setTimestampForRetry();
 
@@ -325,8 +341,8 @@ describe('CommunityNodeTypesService', () => {
 			(service as any).updateCommunityNodeTypes(mockNodeTypes);
 		});
 
-		it('should return the correct package when exact packageName match is found', () => {
-			const result = service.findVetted('n8n-nodes-air');
+		it('should return the correct package when exact packageName match is found', async () => {
+			const result = await service.findVetted('n8n-nodes-air');
 
 			expect(result).toBeDefined();
 			expect(result?.packageName).toBe('n8n-nodes-air');
@@ -334,14 +350,14 @@ describe('CommunityNodeTypesService', () => {
 			expect(result?.npmVersion).toBe('1.0.0');
 		});
 
-		it('should return undefined when package is not found', () => {
-			const result = service.findVetted('n8n-nodes-nonexistent');
+		it('should return undefined when package is not found', async () => {
+			const result = await service.findVetted('n8n-nodes-nonexistent');
 
 			expect(result).toBeUndefined();
 		});
 
-		it('should not match similar package names with substring matching', () => {
-			const result = service.findVetted('n8n-nodes-air');
+		it('should not match similar package names with substring matching', async () => {
+			const result = await service.findVetted('n8n-nodes-air');
 
 			expect(result).toBeDefined();
 			expect(result?.packageName).toBe('n8n-nodes-air');
@@ -349,9 +365,9 @@ describe('CommunityNodeTypesService', () => {
 			expect(result?.packageName).not.toBe('n8n-nodes-airparser');
 		});
 
-		it('should return the correct package from multiple similar names', () => {
-			const airResult = service.findVetted('n8n-nodes-air');
-			const airparserResult = service.findVetted('n8n-nodes-airparser');
+		it('should return the correct package from multiple similar names', async () => {
+			const airResult = await service.findVetted('n8n-nodes-air');
+			const airparserResult = await service.findVetted('n8n-nodes-airparser');
 
 			expect(airResult?.packageName).toBe('n8n-nodes-air');
 			expect(airResult?.checksum).toBe('checksum-air');
@@ -360,15 +376,15 @@ describe('CommunityNodeTypesService', () => {
 			expect(airparserResult?.checksum).toBe('checksum-airparser');
 		});
 
-		it('should return undefined when communityNodeTypes is empty', () => {
+		it('should return undefined when communityNodeTypes is empty', async () => {
 			(service as any).communityNodeTypes.clear();
 
-			const result = service.findVetted('n8n-nodes-air');
+			const result = await service.findVetted('n8n-nodes-air');
 
 			expect(result).toBeUndefined();
 		});
 
-		it('should handle packages with similar prefixes correctly', () => {
+		it('should handle packages with similar prefixes correctly', async () => {
 			const mockNodeTypes = [
 				{
 					name: 'n8n-nodes-test.test',
@@ -392,9 +408,9 @@ describe('CommunityNodeTypesService', () => {
 
 			(service as any).updateCommunityNodeTypes(mockNodeTypes);
 
-			const testResult = service.findVetted('n8n-nodes-test');
-			const testingResult = service.findVetted('n8n-nodes-testing');
-			const testerResult = service.findVetted('n8n-nodes-tester');
+			const testResult = await service.findVetted('n8n-nodes-test');
+			const testingResult = await service.findVetted('n8n-nodes-testing');
+			const testerResult = await service.findVetted('n8n-nodes-tester');
 
 			expect(testResult?.packageName).toBe('n8n-nodes-test');
 			expect(testingResult?.packageName).toBe('n8n-nodes-testing');
@@ -404,7 +420,49 @@ describe('CommunityNodeTypesService', () => {
 
 	describe('getCommunityNodeTypes', () => {
 		beforeEach(() => {
-			communityPackagesServiceMock.getAllInstalledPackages = jest.fn().mockResolvedValue([]);
+			communityPackagesServiceMock.getAllInstalledPackages = vi.fn().mockResolvedValue([]);
+		});
+
+		it('should not create an AI tool version for a node type the loader would skip', async () => {
+			globalConfigMock.nodes = { exclude: ['n8n-nodes-test.test'], include: [] };
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce([
+				{
+					name: 'n8n-nodes-test.test',
+					packageName: 'n8n-nodes-test',
+					nodeDescription: {
+						name: 'test-node-preview',
+						displayName: 'Test Node',
+						inputs: ['main'],
+						outputs: ['main'],
+						usableAsTool: true,
+					},
+				},
+			]);
+
+			const result = await service.getCommunityNodeTypes();
+
+			expect(result).toEqual([]);
+		});
+
+		it('should keep the AI tool version when NODES_INCLUDE lists its base node type', async () => {
+			globalConfigMock.nodes = { exclude: [], include: ['n8n-nodes-test.test'] };
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce([
+				{
+					name: 'n8n-nodes-test.test',
+					packageName: 'n8n-nodes-test',
+					nodeDescription: {
+						name: 'test-node-preview',
+						displayName: 'Test Node',
+						inputs: ['main'],
+						outputs: ['main'],
+						usableAsTool: true,
+					},
+				},
+			]);
+
+			const result = await service.getCommunityNodeTypes();
+
+			expect(result.map((n) => n.name)).toEqual(['n8n-nodes-test.test', 'n8n-nodes-test.testTool']);
 		});
 
 		it('should create AI tool versions for nodes with usableAsTool flag', async () => {
@@ -428,7 +486,7 @@ describe('CommunityNodeTypesService', () => {
 				},
 			];
 
-			(getCommunityNodeTypes as jest.Mock).mockResolvedValueOnce(mockNodeTypes);
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce(mockNodeTypes);
 
 			const result = await service.getCommunityNodeTypes();
 
@@ -466,7 +524,7 @@ describe('CommunityNodeTypesService', () => {
 				},
 			];
 
-			(getCommunityNodeTypes as jest.Mock).mockResolvedValueOnce(mockNodeTypes);
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce(mockNodeTypes);
 
 			const result = await service.getCommunityNodeTypes();
 
@@ -491,7 +549,7 @@ describe('CommunityNodeTypesService', () => {
 				},
 			];
 
-			(getCommunityNodeTypes as jest.Mock).mockResolvedValueOnce(mockNodeTypes);
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce(mockNodeTypes);
 
 			const result = await service.getCommunityNodeTypes();
 
@@ -516,7 +574,7 @@ describe('CommunityNodeTypesService', () => {
 				},
 			];
 
-			(getCommunityNodeTypes as jest.Mock).mockResolvedValueOnce(mockNodeTypes);
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce(mockNodeTypes);
 
 			const result = await service.getCommunityNodeTypes();
 			const toolNode = result.find((n) => n.name === 'n8n-nodes-test.testTool');
@@ -547,7 +605,7 @@ describe('CommunityNodeTypesService', () => {
 				},
 			];
 
-			(getCommunityNodeTypes as jest.Mock).mockResolvedValueOnce(mockNodeTypes);
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce(mockNodeTypes);
 
 			const result = await service.getCommunityNodeTypes();
 			const toolNode = result.find((n) => n.name === 'n8n-nodes-test.testTool');
@@ -579,7 +637,7 @@ describe('CommunityNodeTypesService', () => {
 				},
 			];
 
-			(getCommunityNodeTypes as jest.Mock).mockResolvedValueOnce(mockNodeTypes);
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce(mockNodeTypes);
 
 			const result = await service.getCommunityNodeTypes();
 			const toolNode = result.find((n) => n.name === 'n8n-nodes-test.testTool');
@@ -626,7 +684,7 @@ describe('CommunityNodeTypesService', () => {
 				},
 			];
 
-			(getCommunityNodeTypes as jest.Mock).mockResolvedValueOnce(mockNodeTypes);
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce(mockNodeTypes);
 
 			const result = await service.getCommunityNodeTypes();
 
@@ -635,6 +693,57 @@ describe('CommunityNodeTypesService', () => {
 			expect(result.find((n) => n.name === 'n8n-nodes-test1.test1Tool')).toBeDefined();
 			expect(result.find((n) => n.name === 'n8n-nodes-test2.test2Tool')).toBeDefined();
 			expect(result.find((n) => n.name === 'n8n-nodes-test3.test3Tool')).toBeUndefined();
+		});
+
+		it('should not create AI tool version for nodes with trigger group', async () => {
+			const mockNodeTypes = [
+				{
+					name: 'n8n-nodes-wcrm.wCRMTrigger',
+					packageName: 'n8n-nodes-wcrm',
+					nodeDescription: {
+						name: 'n8n-nodes-wcrm.wCRMTrigger',
+						displayName: 'wCRM Trigger',
+						group: ['trigger'],
+						inputs: [],
+						outputs: ['main'],
+						usableAsTool: true,
+					},
+				},
+			];
+
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce(mockNodeTypes);
+
+			const result = await service.getCommunityNodeTypes();
+
+			expect(result.length).toBe(1); // only original, no tool version
+			expect(result.find((n) => n.name === 'n8n-nodes-wcrm.wCRMTriggerTool')).toBeUndefined();
+		});
+
+		it('should create AI tool version for nodes with "trigger" in the name but not in the group', async () => {
+			// e.g. a node for the trigger.dev service — name contains "trigger" but it's not a trigger node
+			const mockNodeTypes = [
+				{
+					name: 'n8n-nodes-triggerdev.triggerDevAction',
+					packageName: 'n8n-nodes-triggerdev',
+					nodeDescription: {
+						name: 'n8n-nodes-triggerdev.triggerDevAction',
+						displayName: 'Trigger.dev Action',
+						group: [],
+						inputs: ['main'],
+						outputs: ['main'],
+						usableAsTool: true,
+					},
+				},
+			];
+
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce(mockNodeTypes);
+
+			const result = await service.getCommunityNodeTypes();
+
+			expect(result.length).toBe(2); // original + tool version
+			expect(
+				result.find((n) => n.name === 'n8n-nodes-triggerdev.triggerDevActionTool'),
+			).toBeDefined();
 		});
 
 		it('should not mutate original node type when creating tool version', async () => {
@@ -652,7 +761,7 @@ describe('CommunityNodeTypesService', () => {
 				},
 			];
 
-			(getCommunityNodeTypes as jest.Mock).mockResolvedValueOnce(mockNodeTypes);
+			(getCommunityNodeTypes as Mock).mockResolvedValueOnce(mockNodeTypes);
 
 			const result = await service.getCommunityNodeTypes();
 
@@ -674,8 +783,6 @@ describe('CommunityNodeTypesService', () => {
 	});
 
 	describe('detectUpdates', () => {
-		const { getCommunityNodesMetadata } = require('../community-node-types-utils');
-
 		beforeEach(() => {
 			const mockNodeTypes = [
 				{
@@ -695,7 +802,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should detect new nodes', async () => {
-			getCommunityNodesMetadata.mockResolvedValue([
+			(getCommunityNodesMetadata as unknown as Mock).mockResolvedValue([
 				{ id: 1, name: 'node-1', npmVersion: '1.0.0', updatedAt: '2024-01-01' },
 				{ id: 3, name: 'node-3', npmVersion: '3.0.0', updatedAt: '2024-01-03' },
 			]);
@@ -709,7 +816,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should detect npm version changes', async () => {
-			getCommunityNodesMetadata.mockResolvedValue([
+			(getCommunityNodesMetadata as unknown as Mock).mockResolvedValue([
 				{ id: 1, name: 'node-1', npmVersion: '1.1.0', updatedAt: '2024-01-01' },
 			]);
 
@@ -720,7 +827,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should detect timestamp changes', async () => {
-			getCommunityNodesMetadata.mockResolvedValue([
+			(getCommunityNodesMetadata as unknown as Mock).mockResolvedValue([
 				{ id: 2, name: 'node-2', npmVersion: '2.0.0', updatedAt: '2024-01-05' },
 			]);
 
@@ -733,7 +840,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should return empty typesToUpdate when all nodes are current', async () => {
-			getCommunityNodesMetadata.mockResolvedValue([
+			(getCommunityNodesMetadata as unknown as Mock).mockResolvedValue([
 				{ id: 1, name: 'node-1', npmVersion: '1.0.0', updatedAt: '2024-01-01' },
 				{ id: 2, name: 'node-2', npmVersion: '2.0.0', updatedAt: '2024-01-02' },
 			]);
@@ -745,7 +852,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should detect and remove deleted node types from cache', async () => {
-			getCommunityNodesMetadata.mockResolvedValue([
+			(getCommunityNodesMetadata as unknown as Mock).mockResolvedValue([
 				{ id: 1, name: 'node-1', npmVersion: '1.0.0', updatedAt: '2024-01-01' },
 				// node-2 is missing from metadata, should be removed
 			]);
@@ -761,7 +868,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should return scheduleRetry when getCommunityNodesMetadata throws error', async () => {
-			getCommunityNodesMetadata.mockRejectedValue(new Error('API error'));
+			(getCommunityNodesMetadata as unknown as Mock).mockRejectedValue(new Error('API error'));
 
 			const result = await (service as any).detectUpdates('production');
 
@@ -773,7 +880,7 @@ describe('CommunityNodeTypesService', () => {
 		});
 
 		it('should handle both updates and deletions in same call', async () => {
-			getCommunityNodesMetadata.mockResolvedValue([
+			(getCommunityNodesMetadata as unknown as Mock).mockResolvedValue([
 				{ id: 1, name: 'node-1', npmVersion: '1.1.0', updatedAt: '2024-01-01' }, // updated
 				// node-2 is missing, should be removed
 			]);
@@ -796,7 +903,7 @@ describe('CommunityNodeTypesService', () => {
 		const UPDATE_INTERVAL = 8 * 60 * 60 * 1000;
 
 		beforeEach(() => {
-			jest.restoreAllMocks();
+			vi.restoreAllMocks();
 			(service as any).lastUpdateTimestamp = 0;
 		});
 
@@ -808,7 +915,7 @@ describe('CommunityNodeTypesService', () => {
 
 		it('should return true when update interval has passed', () => {
 			const now = 100000000;
-			const mockNow = jest.spyOn(Date, 'now').mockReturnValue(now);
+			const mockNow = vi.spyOn(Date, 'now').mockReturnValue(now);
 			(service as any).lastUpdateTimestamp = now - UPDATE_INTERVAL - 1000;
 
 			const result = (service as any).updateRequired();
@@ -819,7 +926,7 @@ describe('CommunityNodeTypesService', () => {
 
 		it('should return false when update interval has not passed', () => {
 			const now = 10000000;
-			const mockNow = jest.spyOn(Date, 'now').mockReturnValue(now);
+			const mockNow = vi.spyOn(Date, 'now').mockReturnValue(now);
 			(service as any).lastUpdateTimestamp = now - UPDATE_INTERVAL + 1000;
 
 			const result = (service as any).updateRequired();
@@ -831,7 +938,7 @@ describe('CommunityNodeTypesService', () => {
 
 	describe('getCommunityNodeTypes', () => {
 		beforeEach(() => {
-			communityPackagesServiceMock.getAllInstalledPackages = jest
+			communityPackagesServiceMock.getAllInstalledPackages = vi
 				.fn()
 				.mockResolvedValue([{ packageName: 'package-1' }]);
 
@@ -852,9 +959,20 @@ describe('CommunityNodeTypesService', () => {
 			expect(result[1].isInstalled).toBe(false);
 		});
 
+		it.each([
+			[{ exclude: ['package-2.node2'], include: [] }],
+			[{ exclude: [], include: ['package-1.node1'] }],
+		])('should leave out node types the loader would skip with %j', async (nodes) => {
+			globalConfigMock.nodes = nodes;
+
+			const result = await service.getCommunityNodeTypes();
+
+			expect(result.map((n) => n.name)).toEqual(['package-1.node1']);
+		});
+
 		it('should fetch updates when interval has passed', async () => {
 			(service as any).lastUpdateTimestamp = 0;
-			const fetchSpy = jest.spyOn(service as any, 'fetchNodeTypes').mockResolvedValue(undefined);
+			const fetchSpy = vi.spyOn(service as any, 'fetchNodeTypes').mockResolvedValue(undefined);
 
 			await service.getCommunityNodeTypes();
 
@@ -864,7 +982,7 @@ describe('CommunityNodeTypesService', () => {
 		it('should skip fetch when interval has not passed', async () => {
 			const now = Date.now();
 			(service as any).lastUpdateTimestamp = now;
-			const fetchSpy = jest.spyOn(service as any, 'fetchNodeTypes').mockResolvedValue(undefined);
+			const fetchSpy = vi.spyOn(service as any, 'fetchNodeTypes').mockResolvedValue(undefined);
 
 			await service.getCommunityNodeTypes();
 
@@ -874,7 +992,7 @@ describe('CommunityNodeTypesService', () => {
 
 	describe('getCommunityNodeType', () => {
 		beforeEach(() => {
-			communityPackagesServiceMock.getAllInstalledPackages = jest
+			communityPackagesServiceMock.getAllInstalledPackages = vi
 				.fn()
 				.mockResolvedValue([{ packageName: 'package-1' }]);
 
@@ -898,6 +1016,14 @@ describe('CommunityNodeTypesService', () => {
 			expect(result).toBeNull();
 		});
 
+		it('should return null for a node type the loader would skip', async () => {
+			globalConfigMock.nodes = { exclude: ['package-1.node1'], include: [] };
+
+			const result = await service.getCommunityNodeType('package-1.node1');
+
+			expect(result).toBeNull();
+		});
+
 		it('should determine installation status from package name', async () => {
 			const mockNodeTypes = [
 				{ name: 'package-1.node1', packageName: 'package-1', npmVersion: '1.0.0' },
@@ -915,31 +1041,69 @@ describe('CommunityNodeTypesService', () => {
 
 	describe('createIsInstalled', () => {
 		it('should create checker function for installed packages', async () => {
-			communityPackagesServiceMock.getAllInstalledPackages = jest
+			communityPackagesServiceMock.getAllInstalledPackages = vi
 				.fn()
 				.mockResolvedValue([{ packageName: 'package-1' }, { packageName: 'package-2' }]);
 
 			const isInstalled = await (service as any).createIsInstalled();
 
-			expect(isInstalled('package-1.node')).toBe(true);
-			expect(isInstalled('package-2.node')).toBe(true);
-			expect(isInstalled('package-3.node')).toBe(false);
+			expect(isInstalled({ packageName: 'package-1' })).toBe(true);
+			expect(isInstalled({ packageName: 'package-2' })).toBe(true);
+			expect(isInstalled({ packageName: 'package-3' })).toBe(false);
+		});
+
+		it('should match a package name containing a dot', async () => {
+			// Splitting the node type on its first dot would look up
+			// 'n8n-nodes-chatwoot' and report the installed package as missing.
+			communityPackagesServiceMock.getAllInstalledPackages = vi
+				.fn()
+				.mockResolvedValue([{ packageName: 'n8n-nodes-chatwoot.io' }]);
+
+			const isInstalled = await (service as any).createIsInstalled();
+
+			expect(isInstalled({ packageName: 'n8n-nodes-chatwoot.io' })).toBe(true);
 		});
 
 		it('should handle empty package list', async () => {
-			communityPackagesServiceMock.getAllInstalledPackages = jest.fn().mockResolvedValue([]);
+			communityPackagesServiceMock.getAllInstalledPackages = vi.fn().mockResolvedValue([]);
 
 			const isInstalled = await (service as any).createIsInstalled();
 
-			expect(isInstalled('package-1.node')).toBe(false);
+			expect(isInstalled({ packageName: 'package-1' })).toBe(false);
 		});
 
 		it('should handle null package list', async () => {
-			communityPackagesServiceMock.getAllInstalledPackages = jest.fn().mockResolvedValue(null);
+			communityPackagesServiceMock.getAllInstalledPackages = vi.fn().mockResolvedValue(null);
 
 			const isInstalled = await (service as any).createIsInstalled();
 
-			expect(isInstalled('package-1.node')).toBe(false);
+			expect(isInstalled({ packageName: 'package-1' })).toBe(false);
+		});
+
+		it('should use the cached package names without a database read', async () => {
+			cacheServiceMock.get.mockResolvedValue(['package-1']);
+			communityPackagesServiceMock.getAllInstalledPackages = vi.fn();
+
+			const isInstalled = await (service as any).createIsInstalled();
+
+			expect(isInstalled({ packageName: 'package-1' })).toBe(true);
+			expect(isInstalled({ packageName: 'package-2' })).toBe(false);
+			expect(communityPackagesServiceMock.getAllInstalledPackages).not.toHaveBeenCalled();
+			expect(cacheServiceMock.set).not.toHaveBeenCalled();
+		});
+
+		it('should cache the package names after a cache miss', async () => {
+			communityPackagesServiceMock.getAllInstalledPackages = vi
+				.fn()
+				.mockResolvedValue([{ packageName: 'package-1' }]);
+
+			await (service as any).createIsInstalled();
+
+			expect(cacheServiceMock.set).toHaveBeenCalledWith(
+				COMMUNITY_NODE_TYPES_INSTALLED_CACHE_KEY,
+				['package-1'],
+				expect.any(Number),
+			);
 		});
 	});
 });

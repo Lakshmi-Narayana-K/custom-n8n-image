@@ -1,4 +1,5 @@
-import { inTest, inDevelopment, Logger } from '@n8n/backend-common';
+import { inDevelopment, inTest, Logger, ModuleRegistry } from '@n8n/backend-common';
+import type { AppsHostingService } from '@n8n/backend-module-apps/hosting';
 import { GlobalConfig } from '@n8n/config';
 import { DbConnection } from '@n8n/db';
 import { OnShutdown } from '@n8n/decorators';
@@ -6,36 +7,52 @@ import { Container, Service } from '@n8n/di';
 import compression from 'compression';
 import express from 'express';
 import { readFile } from 'fs/promises';
-import type { Server } from 'http';
+import { IncomingMessage, type Server } from 'http';
 import isbot from 'isbot';
+import { Duplex } from 'stream';
+import { SLACK_HITL_WEBHOOK_SUFFIX, TELEGRAM_HITL_WEBHOOK_SUFFIX } from 'n8n-core';
 
 import config from '@/config';
 import { N8N_VERSION, TEMPLATES_DIR } from '@/constants';
-import { ServiceUnavailableError } from '@/errors/response-errors/service-unavailable.error';
+import { ServiceUnavailableError } from '@n8n/errors';
 import { ExternalHooks } from '@/external-hooks';
-import { rawBodyReader, bodyParser, corsMiddleware } from '@/middlewares';
-import { send, sendErrorResponse } from '@/response-helper';
+import { bodyParser, corsMiddleware, rawBodyReader } from '@/middlewares';
+import { sendErrorResponse } from '@/response-helper';
+import { DatabaseIndependentRoutes } from '@/services/database-independent-routes.service';
 import { createHandlebarsEngine } from '@/utils/handlebars.util';
-import { resolveBackendHealthEndpointPath } from '@/utils/health-endpoint.util';
 import { LiveWebhooks } from '@/webhooks/live-webhooks';
+import { SlackInteractionWebhooks } from '@/webhooks/slack-interaction-webhooks';
+import { TelegramInteractionWebhooks } from '@/webhooks/telegram-interaction-webhooks';
 import { TestWebhooks } from '@/webhooks/test-webhooks';
 import { WaitingForms } from '@/webhooks/waiting-forms';
 import { WaitingWebhooks } from '@/webhooks/waiting-webhooks';
 import { createWebhookHandlerFor } from '@/webhooks/webhook-request-handler';
 
+import { resolveBackendHealthEndpointPath } from './utils/health-endpoint.util';
+
 @Service()
 export abstract class AbstractServer {
+	/**
+	 * Path patterns that allow bot user agents through the bot filter.
+	 * Populated by ControllerRegistry when routes with { allowBots: true } are registered.
+	 */
+	static readonly botAllowedPaths: string[] = [];
+
 	protected logger: Logger;
 
 	protected server: Server;
 
 	readonly app: express.Application;
 
+	protected appsHosting: AppsHostingService | undefined;
+
 	protected externalHooks: ExternalHooks;
 
 	protected globalConfig = Container.get(GlobalConfig);
 
 	protected dbConnection = Container.get(DbConnection);
+
+	private databaseIndependentRoutes = Container.get(DatabaseIndependentRoutes);
 
 	protected sslKey: string;
 
@@ -66,8 +83,6 @@ export abstract class AbstractServer {
 	protected testWebhooksEnabled = false;
 
 	private fullyReady = false;
-
-	readonly uniqueInstanceId: string;
 
 	constructor() {
 		this.app = express();
@@ -109,8 +124,8 @@ export abstract class AbstractServer {
 	private async setupErrorHandlers() {
 		const { app } = this;
 
-		// Augment errors sent to Sentry
 		const { setupExpressErrorHandler } = await import('@sentry/node');
+		// oxlint-disable-next-line typescript/no-deprecated
 		setupExpressErrorHandler(app);
 	}
 
@@ -128,7 +143,7 @@ export abstract class AbstractServer {
 
 	protected setupPushServer() {}
 
-	/** Call once after all initialization is complete. Unblocks the /healthz/readiness endpoint. */
+	/** Call after initialization to unblock app requests and the /healthz/readiness endpoint. */
 	markAsReady() {
 		this.fullyReady = true;
 	}
@@ -137,14 +152,16 @@ export abstract class AbstractServer {
 		const healthPath = this.endpointHealth;
 		const readinessPath = `${healthPath}/readiness`;
 
+		const healthMiddlewares = inDevelopment ? [corsMiddleware] : [];
+
 		// main health check should not care about DB connections
-		this.app.get(healthPath, (_req, res) => {
+		this.app.get(healthPath, ...healthMiddlewares, (_req, res) => {
 			res.send({ status: 'ok' });
 		});
 
 		const { connectionState } = this.dbConnection;
 
-		this.app.get(readinessPath, (_req, res) => {
+		this.app.get(readinessPath, ...healthMiddlewares, (_req, res) => {
 			const { connected, migrated } = connectionState;
 			if (connected && migrated && this.fullyReady) {
 				res.status(200).send({ status: 'ok' });
@@ -153,12 +170,24 @@ export abstract class AbstractServer {
 			}
 		});
 
-		this.app.use((_req, res, next) => {
+		this.app.use((req, res, next) => {
+			if (this.isServedWithoutDatabase(req)) {
+				next();
+				return;
+			}
 			if (connectionState.connected) {
 				if (connectionState.migrated) next();
 				else res.send('n8n is starting up. Please wait');
 			} else sendErrorResponse(res, new ServiceUnavailableError('Database is not ready!'));
 		});
+	}
+
+	private isServedWithoutDatabase(req: express.Request) {
+		return (
+			this.dbConnection.connectionState.migrated &&
+			(req.method === 'GET' || req.method === 'HEAD') &&
+			this.databaseIndependentRoutes.has(req.path)
+		);
 	}
 
 	async init(): Promise<void> {
@@ -177,6 +206,18 @@ export abstract class AbstractServer {
 		} else {
 			const http = await import('http');
 			this.server = http.createServer(app);
+		}
+
+		if (Container.get(ModuleRegistry).eligibleModules.includes('apps')) {
+			const { AppsHostingService: Hosting } = await import('@n8n/backend-module-apps/hosting');
+			this.appsHosting = Container.get(Hosting);
+			this.appsHosting.router.use((_req, res, next) => {
+				if (this.fullyReady) next();
+				else res.sendStatus(503);
+			});
+			// Dispatch before health checks, webhooks, controllers, and editor middleware.
+			app.use(this.appsHosting.dispatch);
+			this.rejectUpgrades(this.server, this.appsHosting);
 		}
 
 		const { port, listen_address: address } = Container.get(GlobalConfig);
@@ -220,7 +261,25 @@ export abstract class AbstractServer {
 		this.logger.info(`n8n ready on ${address}, port ${port}`);
 	}
 
+	private rejectUpgrades(server: Server, hosting: AppsHostingService) {
+		const emit = server.emit.bind(server);
+		server.emit = (event: string, ...args: unknown[]) => {
+			const [req, socket] = args;
+			if (event === 'upgrade' && req instanceof IncomingMessage && !hosting.allowsUpgrade(req)) {
+				if (socket instanceof Duplex) socket.destroy();
+				return true;
+			}
+			return emit(event, ...args);
+		};
+	}
+
 	async start(): Promise<void> {
+		if (this.appsHosting && Container.get(ModuleRegistry).isActive('apps')) {
+			const { ControllerRegistry } = await import('./controller.registry.js');
+			Container.get(ControllerRegistry).activate(this.appsHosting.router, {
+				surface: 'apps',
+			});
+		}
 		if (!inTest) {
 			await this.setupErrorHandlers();
 			this.setupPushServer();
@@ -230,45 +289,80 @@ export abstract class AbstractServer {
 
 		// Setup webhook handlers before bodyParser, to let the Webhook node handle binary data in requests
 		if (this.webhooksEnabled) {
-			const liveWebhooksRequestHandler = createWebhookHandlerFor(Container.get(LiveWebhooks));
+			const liveWebhooks = Container.get(LiveWebhooks);
+
 			// Register a handler for live forms
-			this.app.all(`/${this.endpointForm}/*path`, liveWebhooksRequestHandler);
+			this.app.all(`/${this.endpointForm}/*path`, createWebhookHandlerFor(liveWebhooks, 'form'));
 
 			// Register a handler for live webhooks
-			this.app.all(`/${this.endpointWebhook}/*path`, liveWebhooksRequestHandler);
-
-			// Register a handler for waiting forms
 			this.app.all(
-				`/${this.endpointFormWaiting}/:path{/:suffix}`,
-				createWebhookHandlerFor(Container.get(WaitingForms)),
+				`/${this.endpointWebhook}/*path`,
+				createWebhookHandlerFor(liveWebhooks, 'webhook'),
 			);
 
-			// Register a handler for waiting webhooks
+			// Register a handler for waiting forms (excluded from metrics to avoid double-counting)
+			this.app.all(
+				`/${this.endpointFormWaiting}/:path{/:suffix}`,
+				createWebhookHandlerFor(Container.get(WaitingForms), undefined, 'form'),
+			);
+
+			// Register a handler for waiting webhooks (excluded from metrics to avoid double-counting)
 			this.app.all(
 				`/${this.endpointWebhookWaiting}/:path{/:suffix}`,
 				createWebhookHandlerFor(Container.get(WaitingWebhooks)),
 			);
 
+			// Slack posts all button clicks to one fixed URL, so the ids travel in the button
+			// value instead of the path.
+			this.app.all(
+				`/${this.endpointWebhookWaiting}${SLACK_HITL_WEBHOOK_SUFFIX}`,
+				createWebhookHandlerFor(Container.get(SlackInteractionWebhooks)),
+			);
+
+			// Register a handler for Telegram HITL callback-button taps. Fixed path (no
+			// per-execution suffix): the reference travels inside the Telegram update body
+			// instead of the URL, since Telegram delivers every registered bot's updates to
+			// one fixed webhook URL.
+			this.app.all(
+				`/${this.endpointWebhookWaiting}${TELEGRAM_HITL_WEBHOOK_SUFFIX}`,
+				createWebhookHandlerFor(Container.get(TelegramInteractionWebhooks)),
+			);
+
 			// Register a handler for live MCP servers
-			this.app.all(`/${this.endpointMcp}/*path`, liveWebhooksRequestHandler);
+			this.app.all(`/${this.endpointMcp}/*path`, createWebhookHandlerFor(liveWebhooks, 'mcp'));
 		}
 
 		if (this.testWebhooksEnabled) {
-			const testWebhooksRequestHandler = createWebhookHandlerFor(Container.get(TestWebhooks));
+			const testWebhooks = Container.get(TestWebhooks);
 
-			// Register a handler
-			this.app.all(`/${this.endpointFormTest}/*path`, testWebhooksRequestHandler);
-			this.app.all(`/${this.endpointWebhookTest}/*path`, testWebhooksRequestHandler);
+			this.app.all(
+				`/${this.endpointFormTest}/*path`,
+				createWebhookHandlerFor(testWebhooks, 'form'),
+			);
+			this.app.all(
+				`/${this.endpointWebhookTest}/*path`,
+				createWebhookHandlerFor(testWebhooks, 'webhook'),
+			);
 
 			// Register a handler for test MCP servers
-			this.app.all(`/${this.endpointMcpTest}/*path`, testWebhooksRequestHandler);
+			this.app.all(`/${this.endpointMcpTest}/*path`, createWebhookHandlerFor(testWebhooks, 'mcp'));
 		}
 
-		// Block bots from scanning the application
+		// Block bots from scanning the application.
+		// Routes with { allowBots: true } are registered in botAllowedPaths
+		// by the ControllerRegistry and exempted from this filter.
 		const checkIfBot = isbot.spawn(['bot']);
 		this.app.use((req, res, next) => {
 			const userAgent = req.headers['user-agent'];
 			if (userAgent && checkIfBot(userAgent)) {
+				// Check if this path matches a route with { allowBots: true }
+				const allowed = AbstractServer.botAllowedPaths.some((pattern) =>
+					new RegExp(`^${pattern}$`).test(req.path),
+				);
+				if (allowed) {
+					next();
+					return;
+				}
 				this.logger.info(`Blocked ${req.method} ${req.url} for "${userAgent}"`);
 				res.status(204).end();
 			} else next();
@@ -276,16 +370,6 @@ export abstract class AbstractServer {
 
 		if (inDevelopment) {
 			this.setupDevMiddlewares();
-		}
-
-		if (this.testWebhooksEnabled) {
-			const testWebhooks = Container.get(TestWebhooks);
-			// Removes a test webhook
-			// TODO UM: check if this needs validation with user management.
-			this.app.delete(
-				`/${this.restEndpoint}/test-webhook/:id`,
-				send(async (req) => await testWebhooks.cancelWebhook(req.params.id)),
-			);
 		}
 
 		// Setup body parsing middleware after the webhook handlers are setup

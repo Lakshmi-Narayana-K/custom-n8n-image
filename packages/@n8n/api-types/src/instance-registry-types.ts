@@ -8,11 +8,17 @@ const InstanceRegistrationSchemaV1 = z
 			.string()
 			.regex(/^[a-zA-Z0-9\-_]+$/, 'instanceKey must be alphanumeric with hyphens/underscores'),
 		hostId: z.string(),
-		instanceType: z.enum(['main', 'worker', 'webhook']),
+		instanceType: z.enum(['main', 'worker', 'webhook', 'engine']),
 		instanceRole: z.enum(['leader', 'follower', 'unset']),
 		version: z.string(),
 		registeredAt: z.number(),
 		lastSeen: z.number(),
+		/** Worker pool label. Present (possibly empty) on worker registrations; absent on main/webhook. */
+		poolName: z.string().optional(),
+		/** Memory limit in bytes. `null` means no limit. Absent on registrations from older versions. */
+		memoryLimit: z.number().nullable().optional(),
+		/** CPU limit in CPUs. `null` means no limit. Absent on registrations from older versions. */
+		cpuLimit: z.number().nullable().optional(),
 	})
 	.passthrough();
 
@@ -31,7 +37,7 @@ const ClusterVersionMismatchSchema = z.object({
 				z.object({
 					instanceKey: z.string(),
 					hostId: z.string(),
-					instanceType: z.enum(['main', 'worker', 'webhook']),
+					instanceType: z.enum(['main', 'worker', 'webhook', 'engine']),
 					instanceRole: z.enum(['leader', 'follower', 'unset']),
 				}),
 			),
@@ -42,9 +48,32 @@ const ClusterVersionMismatchSchema = z.object({
 // Version mismatch type (for REST API response)
 export type ClusterVersionMismatch = z.infer<typeof ClusterVersionMismatchSchema>;
 
+const ClusterCheckWarningSchema = z.object({
+	check: z.string(),
+	code: z.string(),
+	message: z.string(),
+	severity: z.enum(['info', 'warning', 'error']).optional(),
+	context: z.record(z.string(), z.unknown()).optional(),
+});
+
+const ClusterCheckResultSchema = z.object({
+	check: z.string(),
+	executedAt: z.number(),
+	warnings: z.array(ClusterCheckWarningSchema),
+	status: z.enum(['succeeded', 'failed']),
+});
+
+export type ClusterCheckResult = z.infer<typeof ClusterCheckResultSchema>;
+
+// Single warning raised by a cluster check (for REST API response)
+export type ClusterCheckWarning = z.infer<typeof ClusterCheckWarningSchema>;
+
+const ClusterCheckSummarySchema = z.record(z.string(), ClusterCheckResultSchema);
+export type ClusterCheckSummary = z.infer<typeof ClusterCheckSummarySchema>;
+
 const ClusterInfoResponseSchema = z.object({
 	instances: z.array(instanceRegistrationSchema),
-	versionMismatch: ClusterVersionMismatchSchema.nullable(),
+	checks: ClusterCheckSummarySchema,
 });
 
 // REST API response type

@@ -5,8 +5,6 @@ import { createDeepLazyProxy, isLazyProxy, getProxyPath } from '../lazy-proxy';
 // Helpers
 // ---------------------------------------------------------------------------
 
-const ivmCallOpts = { arguments: { copy: true }, result: { copy: true } };
-
 function mockApplySync(returnValue: unknown = undefined) {
 	return vi.fn().mockReturnValue(returnValue);
 }
@@ -15,21 +13,18 @@ function mockApplySync(returnValue: unknown = undefined) {
 function createMockCallbacks(
 	overrides: {
 		getValueAtPath?: ReturnType<typeof vi.fn>;
-		callFunctionAtPath?: ReturnType<typeof vi.fn>;
 		getArrayElement?: ReturnType<typeof vi.fn>;
 	} = {},
 ) {
 	const getValueAtPath = overrides.getValueAtPath ?? mockApplySync();
-	const callFunctionAtPath = overrides.callFunctionAtPath ?? mockApplySync();
 	const getArrayElement = overrides.getArrayElement ?? mockApplySync();
 
 	const callbacks = {
-		getValueAtPath: { applySync: getValueAtPath },
-		callFunctionAtPath: { applySync: callFunctionAtPath },
-		getArrayElement: { applySync: getArrayElement },
+		getValueAtPath,
+		getArrayElement,
 	};
 
-	return { getValueAtPath, callFunctionAtPath, getArrayElement, callbacks };
+	return { getValueAtPath, getArrayElement, callbacks };
 }
 
 // ---------------------------------------------------------------------------
@@ -43,9 +38,16 @@ describe('createDeepLazyProxy', () => {
 		mocks = createMockCallbacks();
 	});
 
-	// Helper to create proxy with current mocks
-	function proxy(basePath?: string[], knownKeys?: string[]) {
-		return createDeepLazyProxy(basePath, knownKeys, mocks.callbacks);
+	// Helper to create proxy with current mocks. Returns `any` so test
+	// assertions can freely index into the proxy's nested shape without
+	// `as unknown as ...` ceremony — the underlying proxy is dynamic data.
+	function proxy(basePath?: string[], knownKeys?: string[]): any {
+		const meta = knownKeys ? { kind: 'object' as const, keys: knownKeys } : undefined;
+		return createDeepLazyProxy(basePath, meta, mocks.callbacks);
+	}
+
+	function arrayProxy(basePath: string[], length: number): any {
+		return createDeepLazyProxy(basePath, { kind: 'array' as const, length }, mocks.callbacks);
 	}
 
 	// -----------------------------------------------------------------------
@@ -66,13 +68,13 @@ describe('createDeepLazyProxy', () => {
 		});
 
 		it('toString() returns "[object Object]"', () => {
-			const p = proxy();
+			const p = proxy(undefined, []);
 			expect(p.toString()).toBe('[object Object]');
 			expect(mocks.getValueAtPath).not.toHaveBeenCalled();
 		});
 
 		it('valueOf() returns the proxy target', () => {
-			const p = proxy();
+			const p = proxy(undefined, []);
 			const val = p.valueOf();
 			expect(typeof val).toBe('object');
 			expect(val).not.toBeNull();
@@ -154,36 +156,7 @@ describe('createDeepLazyProxy', () => {
 	});
 
 	// -----------------------------------------------------------------------
-	// 4. Function metadata
-	// -----------------------------------------------------------------------
-
-	describe('function metadata', () => {
-		it('creates a callable wrapper for function metadata', () => {
-			mocks.getValueAtPath.mockReturnValue({ __isFunction: true, __name: 'myFn' });
-			const p = proxy();
-			expect(typeof p.myFn).toBe('function');
-		});
-
-		it('invokes __callFunctionAtPath with correct args when called', () => {
-			mocks.getValueAtPath.mockReturnValue({ __isFunction: true, __name: 'myFn' });
-			mocks.callFunctionAtPath.mockReturnValue('result');
-			const p = proxy();
-			p.myFn('a', 1);
-			expect(mocks.callFunctionAtPath).toHaveBeenCalledWith(null, [['myFn'], 'a', 1], ivmCallOpts);
-		});
-
-		it('caches the function wrapper', () => {
-			mocks.getValueAtPath.mockReturnValue({ __isFunction: true, __name: 'myFn' });
-			const p = proxy();
-			const first = p.myFn;
-			const second = p.myFn;
-			expect(first).toBe(second);
-			expect(mocks.getValueAtPath).toHaveBeenCalledTimes(1);
-		});
-	});
-
-	// -----------------------------------------------------------------------
-	// 5. Array metadata (always lazy-loaded via array proxy)
+	// 4. Array metadata (always lazy-loaded via array proxy)
 	// -----------------------------------------------------------------------
 
 	describe('array metadata', () => {
@@ -212,6 +185,14 @@ describe('createDeepLazyProxy', () => {
 			mocks.getValueAtPath.mockReturnValue({ __isArray: true, __length: length });
 			return proxy();
 		}
+
+		it('reads a named key of an array from the host', () => {
+			const p = arrayProxy(['$json'], 1);
+			mocks.getValueAtPath.mockReturnValue('session-1');
+
+			expect(p.sessionId).toBe('session-1');
+			expect(mocks.getValueAtPath).toHaveBeenCalledWith(['$json', 'sessionId']);
+		});
 
 		it('creates a nested proxy for object elements', () => {
 			const p = proxyWithLargeArray();
@@ -256,18 +237,19 @@ describe('createDeepLazyProxy', () => {
 			const p = proxy(['data']);
 			mocks.getArrayElement.mockReturnValue('val');
 			p.list[3];
-			expect(mocks.getArrayElement).toHaveBeenCalledWith(null, [['data', 'list'], 3], ivmCallOpts);
+			expect(mocks.getArrayElement).toHaveBeenCalledWith(['data', 'list'], 3);
 		});
 
 		it('returns undefined for non-numeric non-length properties', () => {
 			const p = proxyWithLargeArray();
-			expect(p.items.foo).toBeUndefined();
+			const items = p.items;
+			mocks.getValueAtPath.mockReturnValue(undefined);
+			expect(items.foo).toBeUndefined();
 			expect(mocks.getArrayElement).not.toHaveBeenCalled();
 		});
 
 		it('does not intercept negative indices', () => {
 			const p = proxyWithLargeArray();
-			// -1 is NaN? No, Number('-1') === -1 which is not NaN, but -1 >= 0 is false
 			p.items[-1];
 			expect(mocks.getArrayElement).not.toHaveBeenCalled();
 		});
@@ -297,15 +279,15 @@ describe('createDeepLazyProxy', () => {
 			// Each level triggers __getValueAtPath and creates a nested proxy
 			// a -> returns object metadata
 			const a = p.a;
-			expect(mocks.getValueAtPath).toHaveBeenLastCalledWith(null, [['a']], ivmCallOpts);
+			expect(mocks.getValueAtPath).toHaveBeenLastCalledWith(['a']);
 
 			// a.b -> returns object metadata
 			const b = a.b;
-			expect(mocks.getValueAtPath).toHaveBeenLastCalledWith(null, [['a', 'b']], ivmCallOpts);
+			expect(mocks.getValueAtPath).toHaveBeenLastCalledWith(['a', 'b']);
 
 			// a.b.c -> returns object metadata
 			const c = b.c;
-			expect(mocks.getValueAtPath).toHaveBeenLastCalledWith(null, [['a', 'b', 'c']], ivmCallOpts);
+			expect(mocks.getValueAtPath).toHaveBeenLastCalledWith(['a', 'b', 'c']);
 			expect(getProxyPath(c)).toEqual(['a', 'b', 'c']);
 		});
 
@@ -328,7 +310,7 @@ describe('createDeepLazyProxy', () => {
 			mocks.getValueAtPath.mockReturnValue('val');
 			const p = proxy(['$json']);
 			p.user;
-			expect(mocks.getValueAtPath).toHaveBeenCalledWith(null, [['$json', 'user']], ivmCallOpts);
+			expect(mocks.getValueAtPath).toHaveBeenCalledWith(['$json', 'user']);
 		});
 
 		it('nested proxies inherit full path', () => {
@@ -340,11 +322,7 @@ describe('createDeepLazyProxy', () => {
 			// Accessing a property on the nested proxy should build the full path
 			mocks.getValueAtPath.mockReturnValue('Alice');
 			user.name;
-			expect(mocks.getValueAtPath).toHaveBeenLastCalledWith(
-				null,
-				[['$json', 'user', 'name']],
-				ivmCallOpts,
-			);
+			expect(mocks.getValueAtPath).toHaveBeenLastCalledWith(['$json', 'user', 'name']);
 		});
 	});
 
@@ -394,7 +372,7 @@ describe('createDeepLazyProxy', () => {
 			mocks.getValueAtPath.mockReturnValue('val');
 			const p = proxy(['$json']);
 			'foo' in p;
-			expect(mocks.getValueAtPath).toHaveBeenCalledWith(null, [['$json', 'foo']], ivmCallOpts);
+			expect(mocks.getValueAtPath).toHaveBeenCalledWith(['$json', 'foo']);
 		});
 	});
 
@@ -421,16 +399,6 @@ describe('createDeepLazyProxy', () => {
 	// -----------------------------------------------------------------------
 
 	describe('edge cases', () => {
-		it('plain object with __isFunction=false is treated as primitive', () => {
-			mocks.getValueAtPath.mockReturnValue({ __isFunction: false, other: 1 });
-			const p = proxy();
-			const val = p.prop;
-			// Not a function — falls through to "primitive" caching
-			expect(typeof val).toBe('object');
-			expect(val.__isFunction).toBe(false);
-			expect(val.other).toBe(1);
-		});
-
 		it('plain object with __isArray=false is treated as primitive', () => {
 			mocks.getValueAtPath.mockReturnValue({ __isArray: false, data: 'x' });
 			const p = proxy();
@@ -445,13 +413,251 @@ describe('createDeepLazyProxy', () => {
 			p.arr[-1];
 			expect(mocks.getArrayElement).not.toHaveBeenCalled();
 		});
+	});
 
-		it('function wrapper on a basePath proxy passes full path', () => {
-			mocks.getValueAtPath.mockReturnValue({ __isFunction: true, __name: '$items' });
-			mocks.callFunctionAtPath.mockReturnValue([]);
-			const p = proxy(['$root']);
-			p.fn();
-			expect(mocks.callFunctionAtPath).toHaveBeenCalledWith(null, [['$root', 'fn']], ivmCallOpts);
+	// -----------------------------------------------------------------------
+	// 11. Array-shaped proxy (meta.kind = 'array')
+	// -----------------------------------------------------------------------
+
+	describe('array-shaped proxy', () => {
+		it('Array.isArray() returns true', () => {
+			const p = arrayProxy(['arr'], 3);
+			expect(Array.isArray(p)).toBe(true);
+		});
+
+		it('length is the meta length without a bridge call', () => {
+			const p = arrayProxy(['arr'], 5);
+			expect(p.length).toBe(5);
+			expect(mocks.getValueAtPath).not.toHaveBeenCalled();
+			expect(mocks.getArrayElement).not.toHaveBeenCalled();
+		});
+
+		it('Object.keys() returns numeric index strings only', () => {
+			const p = arrayProxy(['arr'], 3);
+			expect(Object.keys(p)).toEqual(['0', '1', '2']);
+		});
+
+		it('length descriptor is non-enumerable, non-configurable, writable', () => {
+			const p = arrayProxy(['arr'], 2);
+			const desc = Object.getOwnPropertyDescriptor(p, 'length');
+			expect(desc).toEqual({
+				configurable: false,
+				enumerable: false,
+				writable: true,
+				value: 2,
+			});
+		});
+
+		it('index descriptor includes the actual value (matches native array)', () => {
+			const p = arrayProxy(['arr'], 3);
+			mocks.getArrayElement.mockReturnValue('first');
+			const desc = Object.getOwnPropertyDescriptor(p, '0');
+			expect(desc).toEqual({
+				configurable: true,
+				enumerable: true,
+				writable: false,
+				value: 'first',
+			});
+		});
+
+		it('indexed access fetches via getArrayElement', () => {
+			const p = arrayProxy(['arr'], 3);
+			mocks.getArrayElement.mockReturnValue('first');
+			expect(p[0]).toBe('first');
+			expect(mocks.getArrayElement).toHaveBeenCalledWith(['arr'], 0);
+		});
+
+		it('nested array element returns an array-shaped child proxy', () => {
+			const p = arrayProxy(['arr'], 2);
+			mocks.getArrayElement.mockReturnValue({ __isArray: true, __length: 4 });
+			const child = p[0];
+			expect(Array.isArray(child)).toBe(true);
+			expect(child.length).toBe(4);
+			expect(getProxyPath(child)).toEqual(['arr', '0']);
+		});
+
+		it('object element returns an object-shaped child proxy', () => {
+			const p = arrayProxy(['arr'], 2);
+			mocks.getArrayElement.mockReturnValue({ __isObject: true, __keys: ['a', 'b'] });
+			const child = p[0];
+			expect(Array.isArray(child)).toBe(false);
+			expect(isLazyProxy(child)).toBe(true);
+			expect(Object.keys(child)).toEqual(['a', 'b']);
+		});
+
+		it('empty array proxy has zero indices', () => {
+			const p = arrayProxy(['arr'], 0);
+			expect(p.length).toBe(0);
+			expect(Object.keys(p)).toEqual([]);
+			expect(Array.isArray(p)).toBe(true);
+		});
+
+		it('out-of-bounds index returns undefined without a bridge call', () => {
+			const p = arrayProxy(['arr'], 2);
+			expect(p[2]).toBeUndefined();
+			expect(p[100]).toBeUndefined();
+			expect(mocks.getArrayElement).not.toHaveBeenCalled();
+			expect(mocks.getValueAtPath).not.toHaveBeenCalled();
+		});
+
+		it('non-canonical index strings are rejected', () => {
+			const p = arrayProxy(['arr'], 5);
+			// '00' is not a canonical index; native arrays don't treat it as arr[0]
+			expect(p['00' as any]).toBeUndefined();
+			expect(mocks.getArrayElement).not.toHaveBeenCalled();
+		});
+
+		it('caches elements after first access', () => {
+			const p = arrayProxy(['arr'], 1);
+			mocks.getArrayElement.mockReturnValue('val');
+			p[0];
+			p[0];
+			expect(mocks.getArrayElement).toHaveBeenCalledTimes(1);
+		});
+
+		it("'in' operator works for valid indices and length", () => {
+			const p = arrayProxy(['arr'], 3);
+			expect(0 in p).toBe(true);
+			expect(2 in p).toBe(true);
+			expect(3 in p).toBe(false);
+			expect('length' in p).toBe(true);
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// 12. Materialize-on-first-write (evaluation-scoped copy-on-write)
+	// -----------------------------------------------------------------------
+
+	describe('materialize-on-first-write', () => {
+		/** Array proxy over host data ['a', 'b', 'c'] (or a custom array). */
+		function writableArrayProxy(data: unknown[] = ['a', 'b', 'c']): any {
+			mocks.getArrayElement.mockImplementation((_path: string[], idx: number) => data[idx]);
+			return arrayProxy(['arr'], data.length);
+		}
+
+		/** Object proxy over host data {name: 'Alice', email: 'a@x'}. */
+		function writableObjectProxy(data: Record<string, unknown> = { name: 'Alice', email: 'a@x' }) {
+			mocks.getValueAtPath.mockImplementation((path: string[]) => data[path[path.length - 1]]);
+			return proxy(['user'], Object.keys(data));
+		}
+
+		describe('array proxies', () => {
+			it('reads never materialize; first write fetches each element exactly once', () => {
+				const p = writableArrayProxy();
+				expect(p[0]).toBe('a');
+				expect(mocks.getArrayElement).toHaveBeenCalledTimes(1);
+
+				p[0] = 'X';
+				expect(p[0]).toBe('X');
+				// materialization fetches the remaining uncached elements (1, 2)
+				expect(mocks.getArrayElement).toHaveBeenCalledTimes(3);
+
+				// subsequent reads and writes cause no further bridge calls
+				expect(p[1]).toBe('b');
+				p[2] = 'Y';
+				expect(p[2]).toBe('Y');
+				expect(mocks.getArrayElement).toHaveBeenCalledTimes(3);
+			});
+
+			it('push() appends and updates length', () => {
+				const p = writableArrayProxy();
+				expect(p.push('d')).toBe(4);
+				expect(p.length).toBe(4);
+				expect(p[3]).toBe('d');
+			});
+
+			it('pop() returns the last element and shrinks length', () => {
+				const p = writableArrayProxy();
+				expect(p.pop()).toBe('c');
+				expect(p.length).toBe(2);
+				expect(2 in p).toBe(false);
+				expect([...p]).toEqual(['a', 'b']);
+			});
+
+			it('delete removes the element without resurrecting it on the next read', () => {
+				const p = writableArrayProxy();
+				delete p[1];
+				expect(1 in p).toBe(false);
+				expect(p[1]).toBeUndefined();
+				expect(Object.keys(p)).toEqual(['0', '2']);
+			});
+
+			it('index descriptor reports writable after materialization', () => {
+				const p = writableArrayProxy();
+				p[0] = 'X';
+				const desc = Object.getOwnPropertyDescriptor(p, '0');
+				expect(desc).toMatchObject({ writable: true, value: 'X' });
+			});
+
+			it('a write through a derived object lands on the derived object, not the proxy cache', () => {
+				const p = writableArrayProxy();
+				const derived = Object.create(p);
+				derived.foo = 'X';
+				expect(Object.prototype.hasOwnProperty.call(derived, 'foo')).toBe(true);
+				expect(p.foo).toBeUndefined();
+			});
+
+			it('error sentinel during materialization propagates', () => {
+				const sentinel = { __isError: true, name: 'Error', message: 'fetch failed' };
+				mocks.getArrayElement.mockImplementation((_path: string[], idx: number) =>
+					idx === 2 ? sentinel : 'val',
+				);
+				const p = arrayProxy(['arr'], 3);
+				expect(() => {
+					p[0] = 'X';
+				}).toThrow();
+			});
+		});
+
+		describe('object proxies', () => {
+			it('new-key write is visible and enumerable', () => {
+				const p = writableObjectProxy();
+				p.extra = 42;
+				expect(p.extra).toBe(42);
+				expect(Object.keys(p)).toEqual(['name', 'email', 'extra']);
+			});
+
+			it('delete removes the key without resurrecting it on the next read', () => {
+				const p = writableObjectProxy();
+				delete p.email;
+				expect('email' in p).toBe(false);
+				expect(p.email).toBeUndefined();
+				expect(Object.keys(p)).toEqual(['name']);
+			});
+
+			it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf'])(
+				'preserves the own field %s before and after a write',
+				(field) => {
+					const fieldValue = { label: 'Field value' };
+					mocks.getValueAtPath.mockImplementation((path: string[]) => {
+						const key = path[path.length - 1];
+						if (key === 'name') return 'Alice';
+						if (key === field) return fieldValue;
+						return undefined;
+					});
+					const p = proxy(['user'], ['name', field]);
+					expect(Object.fromEntries(Object.entries(p))).toEqual({
+						name: 'Alice',
+						[field]: fieldValue,
+					});
+					p.name = 'Zed'; // triggers materialization over all keys
+					expect(Object.keys(p)).toEqual(['name', field]);
+					expect(p.label).toBeUndefined();
+					expect(p[field]).toBe(fieldValue);
+				},
+			);
+
+			it('write fetches each uncached key exactly once; later access stays local', () => {
+				const p = writableObjectProxy();
+				expect(p.name).toBe('Alice');
+				p.name = 'Zed';
+				// The pre-read cached 'name'; materialization fetched only 'email'.
+				expect(mocks.getValueAtPath).toHaveBeenCalledTimes(2);
+				expect(p.name).toBe('Zed');
+				expect(p.email).toBe('a@x');
+				p.email = 'b@x';
+				expect(mocks.getValueAtPath).toHaveBeenCalledTimes(2);
+			});
 		});
 	});
 });

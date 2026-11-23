@@ -8,7 +8,7 @@ import {
 	type SupplyData,
 } from 'n8n-workflow';
 
-import { getSessionId } from '@utils/helpers';
+import { coerceSessionIdToString, getSessionId } from '@utils/helpers';
 import { logWrapper, getConnectionHintNoticeField } from '@n8n/ai-utilities';
 
 import {
@@ -16,6 +16,7 @@ import {
 	sessionKeyProperty,
 	contextWindowLengthProperty,
 	expressionSessionKeyProperty,
+	scopedSessionHint,
 } from '../descriptions';
 
 class MemoryChatBufferSingleton {
@@ -78,7 +79,7 @@ export class MemoryBufferWindow implements INodeType {
 		icon: 'node:simple-memory',
 		iconColor: 'black',
 		group: ['transform'],
-		version: [1, 1.1, 1.2, 1.3],
+		version: [1, 1.1, 1.2, 1.3, 1.4],
 		description: 'Stores in n8n memory, so no credentials required',
 		defaults: {
 			name: 'Simple Memory',
@@ -98,7 +99,7 @@ export class MemoryBufferWindow implements INodeType {
 			},
 		},
 		builderHint: {
-			message:
+			searchHint:
 				'Reuse with multiple agents in the same workflow by connecting to multiple agent nodes so agents have a shared context.',
 		},
 
@@ -148,6 +149,7 @@ export class MemoryBufferWindow implements INodeType {
 				},
 			},
 			expressionSessionKeyProperty(1.3),
+			scopedSessionHint(1.4),
 			sessionKeyProperty,
 			contextWindowLengthProperty,
 		],
@@ -165,7 +167,11 @@ export class MemoryBufferWindow implements INodeType {
 		if (nodeVersion >= 1.2) {
 			sessionId = getSessionId(this, itemIndex);
 		} else {
-			sessionId = this.getNodeParameter('sessionKey', itemIndex) as string;
+			sessionId = coerceSessionIdToString(
+				this,
+				this.getNodeParameter('sessionKey', itemIndex),
+				itemIndex,
+			);
 		}
 
 		const memory = await memoryInstance.getMemory(`${workflowId}__${sessionId}`, {

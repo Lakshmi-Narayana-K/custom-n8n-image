@@ -9,7 +9,7 @@ import type {
 	SupplyData,
 } from 'n8n-workflow';
 
-import { getSessionId } from '@utils/helpers';
+import { coerceSessionIdToString, getSessionId } from '@utils/helpers';
 import { logWrapper, getConnectionHintNoticeField } from '@n8n/ai-utilities';
 
 import {
@@ -17,6 +17,7 @@ import {
 	sessionKeyProperty,
 	contextWindowLengthProperty,
 	expressionSessionKeyProperty,
+	scopedSessionHint,
 } from '../descriptions';
 
 export class MemoryXata implements INodeType {
@@ -25,7 +26,7 @@ export class MemoryXata implements INodeType {
 		name: 'memoryXata',
 		icon: 'file:xata.svg',
 		group: ['transform'],
-		version: [1, 1.1, 1.2, 1.3, 1.4],
+		version: [1, 1.1, 1.2, 1.3, 1.4, 1.5],
 		description: 'Use Xata Memory',
 		defaults: {
 			name: 'Xata',
@@ -93,6 +94,7 @@ export class MemoryXata implements INodeType {
 			},
 			sessionKeyProperty,
 			expressionSessionKeyProperty(1.4),
+			scopedSessionHint(1.5),
 			{
 				...contextWindowLengthProperty,
 				displayOptions: { hide: { '@version': [{ _cnd: { lt: 1.3 } }] } },
@@ -109,7 +111,11 @@ export class MemoryXata implements INodeType {
 		if (nodeVersion >= 1.2) {
 			sessionId = getSessionId(this, itemIndex);
 		} else {
-			sessionId = this.getNodeParameter('sessionId', itemIndex) as string;
+			sessionId = coerceSessionIdToString(
+				this,
+				this.getNodeParameter('sessionId', itemIndex),
+				itemIndex,
+			);
 		}
 
 		const xataClient = new BaseClient({

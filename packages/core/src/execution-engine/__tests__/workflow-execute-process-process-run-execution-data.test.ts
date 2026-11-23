@@ -1,4 +1,3 @@
-import { mock } from 'jest-mock-extended';
 import type {
 	IDataObject,
 	IWorkflowExecuteAdditionalData,
@@ -8,20 +7,27 @@ import type {
 	IPairedItemData,
 	INodeExecutionData,
 	INodeType,
+	IRunExecutionData,
 } from 'n8n-workflow';
-import { ApplicationError, NodeConnectionTypes, createRunExecutionData } from 'n8n-workflow';
+import { NodeConnectionTypes, UnexpectedError, createRunExecutionData } from 'n8n-workflow';
+import { mock } from 'vitest-mock-extended';
 
 import { NodeTypes } from '@test/helpers';
 
-jest.mock('node:fs', () => ({
-	...jest.requireActual('node:fs'),
-	existsSync: jest.fn().mockReturnValue(false),
-	renameSync: jest.fn(),
+vi.mock('node:fs', async (importActual) => ({
+	...(await importActual()),
+	existsSync: vi.fn().mockReturnValue(false),
+	renameSync: vi.fn(),
+	writeFileSync: vi.fn(),
 }));
 
+vi.mock('../execution-context', async (importActual) => {
+	const actual = await importActual<typeof import('../execution-context')>();
+	return { ...actual, establishExecutionContext: vi.fn(actual.establishExecutionContext) };
+});
+
+import { establishExecutionContext } from '../execution-context';
 import { DirectedGraph } from '../partial-execution-utils';
-import { createNodeData, toITaskData } from '../partial-execution-utils/__tests__/helpers';
-import { WorkflowExecute } from '../workflow-execute';
 import {
 	types,
 	nodeTypes,
@@ -29,21 +35,28 @@ import {
 	nodeTypeArguments,
 	modifyNode,
 } from './mock-node-types';
+import { createNodeData, toITaskData } from '../partial-execution-utils/__tests__/helpers';
+import { WorkflowExecute } from '../workflow-execute';
+
+type RunOptions = { mode?: WorkflowExecuteMode; restartExecutionId?: string };
 
 describe('processRunExecutionData', () => {
-	const runHook = jest.fn().mockResolvedValue(undefined);
+	const runHook = vi.fn().mockResolvedValue(undefined);
 	const additionalData = mock<IWorkflowExecuteAdditionalData>({
 		hooks: { runHook },
 		restartExecutionId: undefined,
+		encryptedRunnerIdentity: undefined,
 		webhookWaitingBaseUrl: 'http://localhost:5678/webhook-waiting',
 		formWaitingBaseUrl: 'http://localhost:5678/form-waiting',
 	});
 	const executionMode: WorkflowExecuteMode = 'trigger';
 
 	beforeEach(() => {
-		jest.resetAllMocks();
+		vi.resetAllMocks();
 		runHook.mockResolvedValue(undefined);
 	});
+
+	const hookNames = () => (runHook.mock.calls as Array<[string]>).map(([name]) => name);
 
 	test('throws if execution-data is missing', () => {
 		// ARRANGE
@@ -62,9 +75,10 @@ describe('processRunExecutionData', () => {
 		// ACT & ASSERT
 		// The function returns a Promise, but throws synchronously, so we can't await it.
 		// eslint-disable-next-line @typescript-eslint/promise-function-async
-		expect(() => workflowExecute.processRunExecutionData(workflow)).toThrowError(
-			new ApplicationError('Failed to run workflow due to missing execution data'),
-		);
+		const execution = () => workflowExecute.processRunExecutionData(workflow);
+
+		expect(execution).toThrow(UnexpectedError);
+		expect(execution).toThrow('Failed to run workflow due to missing execution data');
 	});
 
 	test('returns input data verbatim', async () => {
@@ -87,6 +101,31 @@ describe('processRunExecutionData', () => {
 
 		// ASSERT
 		expect(result.data.resultData.runData).toMatchObject({ node: [{ data: taskDataConnection }] });
+		expect(result.data.resultData.failedBeforeStart).toBeUndefined();
+	});
+
+	test('clears the failed-before-start flag carried over from the retried execution', async () => {
+		const node = createNodeData({ name: 'node', type: types.passThrough });
+		const workflow = new DirectedGraph()
+			.addNodes(node)
+			.toWorkflow({ name: '', active: false, nodeTypes, settings: { executionOrder: 'v1' } });
+
+		const executionData = createRunExecutionData({
+			startData: { startNodes: [{ name: node.name, sourceData: null }] },
+			resultData: { failedBeforeStart: true },
+			executionData: {
+				nodeExecutionStack: [{ data: { main: [[{ json: { foo: 1 } }]] }, node, source: null }],
+			},
+		});
+
+		const result = await new WorkflowExecute(
+			additionalData,
+			'retry',
+			executionData,
+		).processRunExecutionData(workflow);
+
+		expect(result.status).toBe('success');
+		expect(result.data.resultData.failedBeforeStart).toBeUndefined();
 	});
 
 	test('calls the right hooks in the right order', async () => {
@@ -119,6 +158,141 @@ describe('processRunExecutionData', () => {
 		expect(runHook).toHaveBeenNthCalledWith(4, 'nodeExecuteBefore', expect.any(Array));
 		expect(runHook).toHaveBeenNthCalledWith(5, 'nodeExecuteAfter', expect.any(Array));
 		expect(runHook).toHaveBeenNthCalledWith(6, 'workflowExecuteAfter', expect.any(Array));
+	});
+
+	describe('a handler that throws at workflowExecuteBefore', () => {
+		const blocked = new UnexpectedError('blocked before the first node ran');
+		const node = createNodeData({ name: 'node', type: types.passThrough });
+		const workflow = new DirectedGraph()
+			.addNodes(node)
+			.toWorkflow({ name: '', active: false, nodeTypes, settings: { executionOrder: 'v1' } });
+
+		const runBlocked = async (
+			executionData: IRunExecutionData,
+			workflowToRun = workflow,
+			{ mode = executionMode, restartExecutionId }: RunOptions = {},
+		) => {
+			runHook.mockImplementation(async (hookName: string) => {
+				if (hookName === 'workflowExecuteBefore' || hookName === 'workflowExecuteResume') {
+					throw blocked;
+				}
+			});
+
+			const result = await new WorkflowExecute(
+				{ ...additionalData, hooks: additionalData.hooks, restartExecutionId },
+				mode,
+				executionData,
+			).processRunExecutionData(workflowToRun);
+
+			return { result, hooks: hookNames() };
+		};
+
+		test('aborts the execution and keeps the error it was given', async () => {
+			const { result, hooks } = await runBlocked(
+				createRunExecutionData({
+					startData: { startNodes: [{ name: node.name, sourceData: null }] },
+					executionData: {
+						nodeExecutionStack: [{ data: { main: [[{ json: { foo: 1 } }]] }, node, source: null }],
+					},
+				}),
+			);
+
+			expect(result.data.resultData.error?.message).toBe(blocked.message);
+			expect(result.data.resultData.failedBeforeStart).toBe(true);
+			expect(hooks).toEqual(['workflowExecuteBefore', 'workflowExecuteAfter']);
+		});
+
+		const withEarlierRunData = () =>
+			createRunExecutionData({
+				startData: { startNodes: [{ name: node.name, sourceData: null }] },
+				resultData: { runData: { earlier: [toITaskData([{ data: { foo: 1 } }])] } },
+				executionData: {
+					nodeExecutionStack: [{ data: { main: [[{ json: { foo: 1 } }]] }, node, source: null }],
+				},
+			});
+
+		test('flags a retry that carries the run data of the original execution', async () => {
+			const { result } = await runBlocked(withEarlierRunData(), workflow, { mode: 'retry' });
+
+			expect(result.data.resultData.failedBeforeStart).toBe(true);
+		});
+
+		test('does not flag a resumed run whose nodes ran before it waited', async () => {
+			const { result, hooks } = await runBlocked(withEarlierRunData(), workflow, {
+				restartExecutionId: 'resumed-execution',
+			});
+
+			expect(hooks[0]).toBe('workflowExecuteResume');
+			expect(result.data.resultData.error?.message).toBe(blocked.message);
+			expect(result.data.resultData.failedBeforeStart).toBeUndefined();
+		});
+
+		test('flags a resumed run when no node ran before it', async () => {
+			const { result } = await runBlocked(
+				createRunExecutionData({
+					startData: { startNodes: [{ name: node.name, sourceData: null }] },
+					executionData: {
+						nodeExecutionStack: [{ data: { main: [[{ json: { foo: 1 } }]] }, node, source: null }],
+					},
+				}),
+				workflow,
+				{ restartExecutionId: 'claimed-execution' },
+			);
+
+			expect(result.data.resultData.failedBeforeStart).toBe(true);
+		});
+
+		test('flags the run when establishing the execution context fails', async () => {
+			vi.mocked(establishExecutionContext).mockRejectedValueOnce(new Error('No identity'));
+
+			const result = await new WorkflowExecute(
+				additionalData,
+				executionMode,
+				createRunExecutionData({
+					startData: { startNodes: [{ name: node.name, sourceData: null }] },
+					executionData: {
+						nodeExecutionStack: [{ data: { main: [[{ json: { foo: 1 } }]] }, node, source: null }],
+					},
+				}),
+			).processRunExecutionData(workflow);
+
+			expect(result.data.resultData.error?.message).toBe('No identity');
+			expect(result.data.resultData.failedBeforeStart).toBe(true);
+			expect(hookNames()).toEqual(['workflowExecuteAfter']);
+		});
+
+		// Empty for e.g. a Chat Trigger-only workflow, which used to mask the error with a TypeError.
+		test('keeps the error when there is no node on the execution stack', async () => {
+			const { result, hooks } = await runBlocked(
+				createRunExecutionData({ executionData: { nodeExecutionStack: [] } }),
+			);
+
+			expect(result.data.resultData.error?.message).toBe(blocked.message);
+			expect(result.data.resultData.failedBeforeStart).toBe(true);
+			expect(hooks).toEqual(['workflowExecuteBefore', 'workflowExecuteAfter']);
+		});
+
+		test('is reported ahead of the workflow issues', async () => {
+			const nodeWithIssues = createNodeData({
+				name: 'node',
+				type: types.testNodeWithRequiredProperty,
+			});
+			const { result } = await runBlocked(
+				createRunExecutionData({
+					startData: { startNodes: [{ name: nodeWithIssues.name, sourceData: null }] },
+					executionData: {
+						nodeExecutionStack: [
+							{ data: { main: [[{ json: { foo: 1 } }]] }, node: nodeWithIssues, source: null },
+						],
+					},
+				}),
+				new DirectedGraph()
+					.addNodes(nodeWithIssues)
+					.toWorkflow({ name: '', active: false, nodeTypes, settings: { executionOrder: 'v1' } }),
+			);
+
+			expect(result.data.resultData.error?.message).toBe(blocked.message);
+		});
 	});
 
 	test('agent node emits nodeExecuteBefore only once when resuming after tool execution', async () => {
@@ -173,7 +347,7 @@ describe('processRunExecutionData', () => {
 
 		// ASSERT
 		expect(
-			runHook.mock.calls.map((hook: [string, unknown[]]) => ({
+			(runHook.mock.calls as Array<[string, unknown[]]>).map((hook) => ({
 				name: hook[0],
 				node: typeof hook[1][0] === 'string' ? hook[1][0] : undefined,
 			})),
@@ -223,37 +397,195 @@ describe('processRunExecutionData', () => {
 			// the status was `waiting` before
 			expect(result.data.resultData.runData.waitingNode[0].executionStatus).toEqual('success');
 		});
-	});
 
-	describe('workflow issues', () => {
-		test('throws if workflow contains nodes with missing required properties', () => {
+		test('restores dynamic-credential usage stashed on the resumed stack entry', async () => {
 			// ARRANGE
-			const node = createNodeData({ name: 'node', type: types.testNodeWithRequiredProperty });
+			// The waiting task carrying the flags is popped on resume and the node re-runs
+			// disabled, so the usage a sub-execution reported while this execution waited
+			// rides on the stack entry metadata and must reach the freshly stamped task.
+			const node = createNodeData({ name: 'waitingNode', type: types.passThrough });
 			const workflow = new DirectedGraph()
 				.addNodes(node)
 				.toWorkflow({ name: '', active: false, nodeTypes, settings: { executionOrder: 'v1' } });
 
-			const taskDataConnection = { main: [[{ json: { foo: 1 } }]] };
+			const data: IDataObject = { foo: 1 };
 			const executionData = createRunExecutionData({
 				startData: { startNodes: [{ name: node.name, sourceData: null }] },
-				executionData: {
-					nodeExecutionStack: [{ data: taskDataConnection, node, source: null }],
+				resultData: {
+					runData: {
+						waitingNode: [
+							toITaskData([{ data }], {
+								executionStatus: 'waiting',
+								usedDynamicCredentials: true,
+							}),
+						],
+					},
+					lastNodeExecuted: 'waitingNode',
 				},
+				executionData: {
+					nodeExecutionStack: [
+						{
+							data: { main: [[{ json: data }]] },
+							node,
+							source: null,
+							metadata: {
+								dynamicCredentialsUsage: {
+									usedDynamicCredentials: true,
+									attemptedDynamicCredentials: true,
+									dynamicCredentialsResolvedUserId: 'resolved-user',
+								},
+							},
+						},
+					],
+					runtimeData: { version: 1, establishedAt: 0, source: 'trigger' },
+				},
+				waitTill: new Date('2024-01-01'),
 			});
 
 			const workflowExecute = new WorkflowExecute(additionalData, executionMode, executionData);
 
-			// ACT & ASSERT
-			// The function returns a Promise, but throws synchronously, so we can't await it.
-			// eslint-disable-next-line @typescript-eslint/promise-function-async
-			expect(() => workflowExecute.processRunExecutionData(workflow)).toThrowError(
-				new ApplicationError(
-					'The workflow has issues and cannot be executed for that reason. Please fix them first.',
-				),
-			);
+			// ACT
+			const result = await workflowExecute.processRunExecutionData(workflow);
+
+			// ASSERT
+			const [taskData] = result.data.resultData.runData.waitingNode;
+			expect(result.data.resultData.runData.waitingNode).toHaveLength(1);
+			expect(taskData.executionStatus).toEqual('success');
+			expect(taskData.usedDynamicCredentials).toBe(true);
+			expect(taskData.attemptedDynamicCredentials).toBe(true);
+			expect(result.data.executionData?.runtimeData?.executedByUserId).toBe('resolved-user');
+			// The stash is transport-only and must not persist into the task metadata.
+			expect(taskData.metadata?.dynamicCredentialsUsage).toBeUndefined();
 		});
 
-		test('does not complain about nodes with issue past the destination node', () => {
+		test('stamps the credential ids a sub-execution reported on the task, for that node only', async () => {
+			// ARRANGE
+			// Credential usability redaction reads these ids from the calling node's task,
+			// since the sub-workflow's credentials are not on this workflow's nodes.
+			const waitingNode = createNodeData({ name: 'waitingNode', type: types.passThrough });
+			const nextNode = createNodeData({ name: 'nextNode', type: types.passThrough });
+			const workflow = new DirectedGraph()
+				.addNodes(waitingNode, nextNode)
+				.addConnections({ from: waitingNode, to: nextNode })
+				.toWorkflow({ name: '', active: false, nodeTypes, settings: { executionOrder: 'v1' } });
+
+			const data: IDataObject = { foo: 1 };
+			const executionData = createRunExecutionData({
+				startData: { startNodes: [{ name: waitingNode.name, sourceData: null }] },
+				resultData: {
+					runData: {
+						waitingNode: [toITaskData([{ data }], { executionStatus: 'waiting' })],
+					},
+					lastNodeExecuted: 'waitingNode',
+				},
+				executionData: {
+					nodeExecutionStack: [
+						{
+							data: { main: [[{ json: data }]] },
+							node: waitingNode,
+							source: null,
+							metadata: {
+								dynamicCredentialsUsage: { usedCredentialIds: ['child-cred'] },
+							},
+						},
+					],
+					runtimeData: { version: 1, establishedAt: 0, source: 'trigger' },
+				},
+				waitTill: new Date('2024-01-01'),
+			});
+
+			const workflowExecute = new WorkflowExecute(additionalData, executionMode, executionData);
+
+			// ACT
+			const result = await workflowExecute.processRunExecutionData(workflow);
+
+			// ASSERT
+			const [waitingTask] = result.data.resultData.runData.waitingNode;
+			expect(waitingTask.usedCredentialIds).toEqual(['child-cred']);
+			// Reset before each node, so the next node does not inherit them.
+			const [nextTask] = result.data.resultData.runData.nextNode;
+			expect(nextTask.usedCredentialIds).toBeUndefined();
+		});
+
+		test('restores an attempted-only stash without recording a resolved user', async () => {
+			// ARRANGE
+			const node = createNodeData({ name: 'waitingNode', type: types.passThrough });
+			const workflow = new DirectedGraph()
+				.addNodes(node)
+				.toWorkflow({ name: '', active: false, nodeTypes, settings: { executionOrder: 'v1' } });
+
+			const data: IDataObject = { foo: 1 };
+			const executionData = createRunExecutionData({
+				startData: { startNodes: [{ name: node.name, sourceData: null }] },
+				resultData: {
+					runData: { waitingNode: [toITaskData([{ data }], { executionStatus: 'waiting' })] },
+					lastNodeExecuted: 'waitingNode',
+				},
+				executionData: {
+					nodeExecutionStack: [
+						{
+							data: { main: [[{ json: data }]] },
+							node,
+							source: null,
+							metadata: {
+								dynamicCredentialsUsage: {
+									attemptedDynamicCredentials: true,
+									// Must be ignored: a resolved user requires a used flag.
+									dynamicCredentialsResolvedUserId: 'resolved-user',
+								},
+							},
+						},
+					],
+					runtimeData: { version: 1, establishedAt: 0, source: 'trigger' },
+				},
+				waitTill: new Date('2024-01-01'),
+			});
+
+			const workflowExecute = new WorkflowExecute(additionalData, executionMode, executionData);
+
+			// ACT
+			const result = await workflowExecute.processRunExecutionData(workflow);
+
+			// ASSERT
+			const [taskData] = result.data.resultData.runData.waitingNode;
+			expect(taskData.attemptedDynamicCredentials).toBe(true);
+			expect(taskData.usedDynamicCredentials).toBeUndefined();
+			expect(result.data.executionData?.runtimeData?.executedByUserId).toBeUndefined();
+		});
+	});
+
+	describe('workflow issues', () => {
+		const node = createNodeData({ name: 'node', type: types.testNodeWithRequiredProperty });
+		const workflow = new DirectedGraph()
+			.addNodes(node)
+			.toWorkflow({ name: '', active: false, nodeTypes, settings: { executionOrder: 'v1' } });
+
+		test('fails the run if workflow contains nodes with missing required properties', async () => {
+			// ARRANGE
+			const executionData = createRunExecutionData({
+				startData: { startNodes: [{ name: node.name, sourceData: null }] },
+				executionData: {
+					nodeExecutionStack: [{ data: { main: [[{ json: { foo: 1 } }]] }, node, source: null }],
+				},
+			});
+
+			// ACT
+			const result = await new WorkflowExecute(
+				additionalData,
+				executionMode,
+				executionData,
+			).processRunExecutionData(workflow);
+
+			// ASSERT
+			expect(result.data.resultData.error?.name).toBe('WorkflowHasIssuesError');
+			expect(result.data.resultData.error?.message).toMatch(
+				/^The 'node' node has issues:\n- Parameter "Required Text" is required\.$/,
+			);
+			expect(result.data.resultData.failedBeforeStart).toBe(true);
+			expect(hookNames()).toEqual(['workflowExecuteBefore', 'workflowExecuteAfter']);
+		});
+
+		test('does not complain about nodes with issue past the destination node', async () => {
 			// ARRANGE
 			const node1 = createNodeData({ name: 'node1', type: types.passThrough });
 			const node2 = createNodeData({ name: 'node2', type: types.testNodeWithRequiredProperty });
@@ -273,12 +605,15 @@ describe('processRunExecutionData', () => {
 				},
 			});
 
-			const workflowExecute = new WorkflowExecute(additionalData, executionMode, executionData);
+			// ACT
+			const result = await new WorkflowExecute(
+				additionalData,
+				executionMode,
+				executionData,
+			).processRunExecutionData(workflow);
 
-			// ACT & ASSERT
-			// The function returns a Promise, but throws synchronously, so we can't await it.
-			// eslint-disable-next-line @typescript-eslint/promise-function-async
-			expect(() => workflowExecute.processRunExecutionData(workflow)).not.toThrowError();
+			// ASSERT
+			expect(result.data.resultData.error).toBeUndefined();
 		});
 	});
 
@@ -535,6 +870,95 @@ describe('processRunExecutionData', () => {
 				responseMetadata: { requestId: 'test_request_step1' },
 				actionCount: 2,
 			});
+		});
+
+		test('executes requested tools in the order the actions were requested', async () => {
+			// ARRANGE
+			const executionOrder: string[] = [];
+			let response: EngineResponse | undefined;
+
+			const recordingTool = (name: string): INodeType => ({
+				...passThroughNode,
+				async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
+					executionOrder.push(name);
+					return [this.getInputData()];
+				},
+			});
+
+			const toolNames = ['tool1', 'tool2', 'tool3'];
+			const toolNodes = toolNames.map((name) => createNodeData({ name, type: `${name}Type` }));
+
+			const nodeTypeWithRequests = modifyNode(passThroughNode)
+				.return({
+					actions: toolNames.map((nodeName, index) => ({
+						actionType: 'ExecutionNodeAction',
+						nodeName,
+						input: { query: nodeName },
+						type: 'ai_tool',
+						id: `action_${index}`,
+						metadata: { itemIndex: 0 },
+					})),
+					metadata: {},
+				})
+				.return((r) => {
+					response = r;
+					return [[{ json: { done: true } }]];
+				})
+				.done();
+
+			const nodeWithRequests = createNodeData({
+				name: 'nodeWithRequests',
+				type: 'nodeWithRequests',
+			});
+
+			const nodeTypes = NodeTypes({
+				...nodeTypeArguments,
+				nodeWithRequests: { type: nodeTypeWithRequests, sourcePath: '' },
+				...Object.fromEntries(
+					toolNames.map((name) => [`${name}Type`, { type: recordingTool(name), sourcePath: '' }]),
+				),
+			});
+
+			const graph = new DirectedGraph().addNodes(nodeWithRequests, ...toolNodes);
+			for (const toolNode of toolNodes) {
+				graph.addConnections({ from: toolNode, to: nodeWithRequests, type: 'ai_tool' });
+			}
+			const workflow = graph.toWorkflow({
+				name: '',
+				active: false,
+				nodeTypes,
+				settings: { executionOrder: 'v1' },
+			});
+
+			const executionData = createRunExecutionData({
+				startData: { startNodes: [{ name: nodeWithRequests.name, sourceData: null }] },
+				executionData: {
+					nodeExecutionStack: [
+						{
+							data: { main: [[{ json: { prompt: 'test prompt' } }]] },
+							node: nodeWithRequests,
+							source: { main: [{ previousNode: 'Start' }] },
+						},
+					],
+				},
+			});
+
+			const workflowExecute = new WorkflowExecute(additionalData, executionMode, executionData);
+
+			// ACT
+			const result = await workflowExecute.processRunExecutionData(workflow);
+
+			// ASSERT
+			// Tools run in request order, not reversed by the LIFO execution stack
+			expect(executionOrder).toEqual(toolNames);
+
+			// The responses handed back to the requesting node stay aligned with that order
+			expect((response?.actionResponses ?? []).map((r) => r.action.nodeName)).toEqual(toolNames);
+
+			// ...and so does what the logs panel sorts on
+			const runData = result.data.resultData.runData;
+			const executionIndexes = toolNames.map((name) => runData[name][0].executionIndex);
+			expect(executionIndexes).toEqual([...executionIndexes].sort((a, b) => a - b));
 		});
 
 		test('skips waiting tools processing when parent node cannot be found', async () => {

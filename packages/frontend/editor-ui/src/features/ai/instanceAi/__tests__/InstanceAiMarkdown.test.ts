@@ -1,20 +1,27 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { createComponentRenderer } from '@/__tests__/render';
+import { createThreadComponentRenderer } from './createThreadComponentRenderer';
 import { createTestingPinia } from '@pinia/testing';
-import { mockedStore } from '@/__tests__/utils';
 import InstanceAiMarkdown from '../components/InstanceAiMarkdown.vue';
-import { useInstanceAiStore } from '../instanceAi.store';
+import type { ThreadRuntime } from '../instanceAi.store';
 import type { ResourceEntry } from '../useResourceRegistry';
+import { computed } from 'vue';
+import { INSTANCE_AI_EMBED_SUBJECT_KEY } from '../embed/instanceAiEmbed.types';
 
-// Stub ChatMarkdownChunk to expose the processed content as plain text
+// Stub ChatMarkdownChunk to expose the processed content. v-html mirrors the
+// real component (VueMarkdown renders via innerHTML): plain text stays plain
+// text for the decoration assertions, HTML content produces real anchors for
+// the link-enhancement tests, and unchanged content leaves the DOM untouched
+// across re-renders — exactly like production.
 vi.mock('@/features/ai/chatHub/components/ChatMarkdownChunk.vue', () => ({
 	default: {
-		template: '<div data-test-id="markdown-output">{{ source.content }}</div>',
+		template:
+			'<div data-test-id="markdown-output" :data-source-type="source.type" v-html="source.type === \'text\' ? source.content : source.command?.title"></div>',
 		props: ['source'],
 	},
 }));
 
-const renderComponent = createComponentRenderer(InstanceAiMarkdown);
+let thread: ThreadRuntime;
+const renderComponent = createThreadComponentRenderer(InstanceAiMarkdown, {}, () => thread);
 
 function makeRegistry(
 	entries: Array<{ type: string; id: string; name: string; projectId?: string }>,
@@ -27,20 +34,46 @@ function makeRegistry(
 }
 
 describe('InstanceAiMarkdown', () => {
-	let store: ReturnType<typeof mockedStore<typeof useInstanceAiStore>>;
-
 	beforeEach(() => {
 		createTestingPinia();
-		store = mockedStore(useInstanceAiStore);
+		thread = {
+			id: 'thread-1',
+			resourceNameIndex: new Map<string, ResourceEntry>(),
+			linkableResourceNameIndex: new Map<string, ResourceEntry>(),
+		} as unknown as ThreadRuntime;
 	});
 
 	function getProcessedContent(content: string, registry?: Map<string, ResourceEntry>): string {
 		if (registry) {
-			store.resourceRegistry = registry;
+			thread.resourceNameIndex = registry;
+			thread.linkableResourceNameIndex = registry;
 		}
 		const { getByTestId } = renderComponent({ props: { content } });
 		return getByTestId('markdown-output').textContent ?? '';
 	}
+
+	it.each([true, false])(
+		'uses the Test link label only in the Agents UI (embedded: %s)',
+		(embedded) => {
+			const { getByTestId } = renderComponent({
+				props: { content: '<a href="/projects/project-1/agents/agent-1/preview">Preview</a>' },
+				global: {
+					provide: embedded
+						? {
+								[INSTANCE_AI_EMBED_SUBJECT_KEY as symbol]: computed(() => ({
+									type: 'agent',
+									id: 'agent-1',
+									projectId: 'project-1',
+								})),
+							}
+						: {},
+				},
+			});
+			expect(getByTestId('markdown-output').querySelector('a')?.textContent).toBe(
+				embedded ? 'Test' : 'Preview',
+			);
+		},
+	);
 
 	it('should return content unchanged when registry is empty', () => {
 		const result = getProcessedContent('Hello world');
@@ -51,6 +84,15 @@ describe('InstanceAiMarkdown', () => {
 		const registry = makeRegistry([{ type: 'workflow', id: 'wf-1', name: 'My Workflow' }]);
 		const result = getProcessedContent('Check out My Workflow please', registry);
 		expect(result).toContain('[My Workflow](n8n-resource://workflow/wf-1)');
+	});
+
+	it('should not replace resource names that are only in the metadata index', () => {
+		thread.resourceNameIndex = makeRegistry([{ type: 'data-table', id: 'dt-1', name: 'table' }]);
+		thread.linkableResourceNameIndex = new Map<string, ResourceEntry>();
+
+		const result = getProcessedContent('Now let me set up the data table for evals');
+
+		expect(result).toBe('Now let me set up the data table for evals');
 	});
 
 	it('should NOT replace names shorter than 3 characters', () => {
@@ -88,6 +130,26 @@ describe('InstanceAiMarkdown', () => {
 		expect(result).toContain('[Test (v2.0)](n8n-resource://workflow/wf-1)');
 	});
 
+	it('should escape markdown link text and encode resource ids', () => {
+		const registry = makeRegistry([{ type: 'workflow', id: 'wf/1', name: 'Name [prod]' }]);
+		const result = getProcessedContent('Open Name [prod] now', registry);
+		expect(result).toContain('[Name \\[prod\\]](n8n-resource://workflow/wf%2F1)');
+	});
+
+	it('should not replace overlapping names inside generated links with escaped link text', () => {
+		const registry = makeRegistry([
+			{ type: 'workflow', id: 'wf-full', name: 'Name [prod]' },
+			{ type: 'workflow', id: 'wf-name', name: 'Name' },
+			{ type: 'workflow', id: 'wf-prod', name: 'prod' },
+		]);
+
+		const result = getProcessedContent('Open Name [prod] now', registry);
+
+		expect(result).toBe('Open [Name \\[prod\\]](n8n-resource://workflow/wf-full) now');
+		expect(result).not.toContain('wf-name');
+		expect(result).not.toContain('wf-prod');
+	});
+
 	it('should replace resource name appearing multiple times', () => {
 		const registry = makeRegistry([{ type: 'workflow', id: 'wf-1', name: 'My Workflow' }]);
 		const result = getProcessedContent('Open My Workflow and then close My Workflow', registry);
@@ -111,7 +173,364 @@ describe('InstanceAiMarkdown', () => {
 			'See [My Workflow](https://example.com) for details',
 			registry,
 		);
-		// The name inside [...] is preceded by [ — lookbehind should block replacement
 		expect(result).not.toContain('n8n-resource://');
+	});
+
+	it('should NOT replace names inside longer existing markdown link text', () => {
+		const registry = makeRegistry([{ type: 'workflow', id: 'wf-1', name: 'My Workflow' }]);
+		const result = getProcessedContent(
+			'See [the My Workflow docs](https://example.com) for details',
+			registry,
+		);
+		expect(result).toContain('[the My Workflow docs](https://example.com)');
+		expect(result).not.toContain('n8n-resource://');
+	});
+
+	describe('streaming deferral', () => {
+		const registry = () => makeRegistry([{ type: 'workflow', id: 'wf-1', name: 'My Workflow' }]);
+		const content = 'Check out My Workflow please';
+
+		it('should render raw content without decoration while streaming', () => {
+			thread.linkableResourceNameIndex = registry();
+			const { getByTestId } = renderComponent({ props: { content, streaming: true } });
+
+			expect(getByTestId('markdown-output').textContent).toBe(content);
+		});
+
+		it('should apply decoration when the block settles (streaming flips false)', async () => {
+			thread.linkableResourceNameIndex = registry();
+			const { getByTestId, rerender } = renderComponent({ props: { content, streaming: true } });
+
+			expect(getByTestId('markdown-output').textContent).not.toContain('n8n-resource://');
+
+			await rerender({ content, streaming: false });
+
+			expect(getByTestId('markdown-output').textContent).toContain(
+				'[My Workflow](n8n-resource://workflow/wf-1)',
+			);
+		});
+
+		it('should decorate immediately when streaming is not set (history-loaded messages)', () => {
+			thread.linkableResourceNameIndex = registry();
+			const { getByTestId } = renderComponent({ props: { content } });
+
+			expect(getByTestId('markdown-output').textContent).toContain(
+				'[My Workflow](n8n-resource://workflow/wf-1)',
+			);
+		});
+	});
+
+	describe('resource chip clicks', () => {
+		// Pre-rendered anchor (as markdown-it would emit for a decorated link);
+		// the empty registry keeps decorateResourceNames a no-op so the rendered
+		// HTML is stable across re-renders.
+		const content = '<a href="n8n-resource://workflow/wf-1">Invoice Processing Pipeline</a>';
+		const agentContent = '<a href="n8n-resource://agent/agent-1">Artifact Agent Test</a>';
+		const agentPreviewLinks = [
+			{
+				label: 'legacy',
+				content: '<a href="/projects/project-1/agents/agent-1/preview" target="_blank">Preview</a>',
+			},
+			{
+				label: 'current',
+				content: '<a href="/projects/project-1/agents/agent-1?openPreview=true">Preview</a>',
+			},
+		];
+
+		function renderWithPreview(openWorkflowPreview: (id: string) => boolean) {
+			const utils = renderComponent({
+				props: { content },
+				global: { provide: { openWorkflowPreview } },
+			});
+			const link = utils.getByTestId('markdown-output').querySelector('a');
+			if (!link) throw new Error('expected enhanced anchor');
+			return { ...utils, link };
+		}
+
+		function renderAgentWithPreview(openAgentPreview: (id: string, projectId: string) => boolean) {
+			thread.resourceNameIndex = makeRegistry([
+				{ type: 'agent', id: 'agent-1', name: 'Artifact Agent Test', projectId: 'project-1' },
+			]);
+			const utils = renderComponent({
+				props: { content: agentContent },
+				global: { provide: { openAgentPreview } },
+			});
+			const link = utils.getByTestId('markdown-output').querySelector('a');
+			if (!link) throw new Error('expected enhanced anchor');
+			return { ...utils, link };
+		}
+
+		function clickEvent(init: MouseEventInit = {}): MouseEvent {
+			return new MouseEvent('click', { bubbles: true, cancelable: true, ...init });
+		}
+
+		it('should enhance the anchor into a resource chip', () => {
+			const { link } = renderWithPreview(vi.fn(() => true));
+
+			expect(link.dataset.resourceChip).toBe('workflow');
+			expect(link.dataset.resourceId).toBe('wf-1');
+			expect(link.getAttribute('href')).toBe('/workflow/wf-1');
+			expect(link.target).toBe('_blank');
+		});
+
+		it('should open the canvas preview on left-click and suppress navigation', () => {
+			const openWorkflowPreview = vi.fn(() => true);
+			const { link } = renderWithPreview(openWorkflowPreview);
+
+			const event = clickEvent();
+			link.dispatchEvent(event);
+
+			expect(openWorkflowPreview).toHaveBeenCalledExactlyOnceWith('wf-1');
+			expect(event.defaultPrevented).toBe(true);
+		});
+
+		it('should still open the preview after a re-render that leaves the DOM untouched', async () => {
+			// Regression: per-link listeners were stripped on same-content
+			// re-renders (cleanup removed them, the "already enhanced" skip never
+			// re-attached), silently downgrading chips to plain new-tab links.
+			const openWorkflowPreview = vi.fn(() => true);
+			const { link, rerender } = renderWithPreview(openWorkflowPreview);
+
+			// streaming flip re-renders the component with identical content
+			// (empty registry → decoration is a no-op), so the anchor survives.
+			await rerender({ content, streaming: true });
+
+			const event = clickEvent();
+			link.dispatchEvent(event);
+
+			expect(openWorkflowPreview).toHaveBeenCalledExactlyOnceWith('wf-1');
+			expect(event.defaultPrevented).toBe(true);
+		});
+
+		it('should let the browser handle Cmd/Ctrl+click', () => {
+			const openWorkflowPreview = vi.fn(() => true);
+			const { link } = renderWithPreview(openWorkflowPreview);
+
+			// Absorb the unprevented click after it bubbles past the component so
+			// jsdom does not attempt a real navigation.
+			document.addEventListener('click', (e) => e.preventDefault(), { once: true });
+			link.dispatchEvent(clickEvent({ metaKey: true }));
+
+			expect(openWorkflowPreview).not.toHaveBeenCalled();
+		});
+
+		it('should enhance agent links into project-scoped resource chips', () => {
+			const { link } = renderAgentWithPreview(vi.fn(() => true));
+
+			expect(link.dataset.resourceChip).toBe('agent');
+			expect(link.dataset.resourceId).toBe('agent-1');
+			expect(link.getAttribute('href')).toBe('/projects/project-1/agents/agent-1');
+			expect(link.target).toBe('_blank');
+		});
+
+		it('should open the agent preview on left-click and suppress navigation', () => {
+			const openAgentPreview = vi.fn(() => true);
+			const { link } = renderAgentWithPreview(openAgentPreview);
+
+			const event = clickEvent();
+			link.dispatchEvent(event);
+
+			expect(openAgentPreview).toHaveBeenCalledExactlyOnceWith('agent-1', 'project-1');
+			expect(event.defaultPrevented).toBe(true);
+		});
+
+		it('should enhance app links and open the app preview on left-click', () => {
+			thread.resourceNameIndex = makeRegistry([
+				{ type: 'app', id: 'app-1', name: 'Order Tracker', projectId: 'project-1' },
+			]);
+			const openAppPreview = vi.fn(() => true);
+			const { getByTestId } = renderComponent({
+				props: { content: '<a href="n8n-resource://app/app-1">Order Tracker</a>' },
+				global: { provide: { openAppPreview } },
+			});
+			const link = getByTestId('markdown-output').querySelector('a');
+			if (!link) throw new Error('expected enhanced anchor');
+
+			expect(link.dataset.resourceChip).toBe('app');
+			expect(link.getAttribute('href')).toBe('/projects/project-1/apps/app-1');
+
+			const event = clickEvent();
+			link.dispatchEvent(event);
+
+			expect(openAppPreview).toHaveBeenCalledExactlyOnceWith('app-1');
+			expect(event.defaultPrevented).toBe(true);
+		});
+
+		it.each(agentPreviewLinks)(
+			'should open $label agent Preview links in the embedded chat panel',
+			({ content: agentPreviewContent }) => {
+				const openAgentChatPreview = vi.fn(() => true);
+				const { getByTestId } = renderComponent({
+					props: { content: agentPreviewContent },
+					global: { provide: { openAgentChatPreview } },
+				});
+				const link = getByTestId('markdown-output').querySelector('a');
+				if (!link) throw new Error('expected Preview anchor');
+
+				expect(link.target).toBe('');
+				expect(link.getAttribute('href')).toBe(
+					'/projects/project-1/agents/agent-1?openPreview=true',
+				);
+
+				const event = clickEvent();
+				link.dispatchEvent(event);
+
+				expect(openAgentChatPreview).toHaveBeenCalledExactlyOnceWith('agent-1', 'project-1');
+				expect(event.defaultPrevented).toBe(true);
+			},
+		);
+
+		it.each(agentPreviewLinks)(
+			'preserves Cmd/Ctrl-click on $label Preview links with an embedded provider',
+			({ content: agentPreviewContent }) => {
+				const openAgentChatPreview = vi.fn(() => true);
+				const { getByTestId } = renderComponent({
+					props: { content: agentPreviewContent },
+					global: {
+						provide: {
+							openAgentChatPreview,
+							[INSTANCE_AI_EMBED_SUBJECT_KEY as symbol]: computed(() => ({
+								type: 'agent',
+								id: 'agent-1',
+								projectId: 'project-1',
+							})),
+						},
+					},
+				});
+				const link = getByTestId('markdown-output').querySelector('a');
+				if (!link) throw new Error('expected Preview anchor');
+				for (const modifier of [{ metaKey: true }, { ctrlKey: true }]) {
+					const event = clickEvent(modifier);
+					let prevented: boolean | undefined;
+					link.parentElement?.parentElement?.addEventListener(
+						'click',
+						(event) => {
+							prevented = event.defaultPrevented;
+							event.preventDefault();
+						},
+						{ once: true },
+					);
+					link.dispatchEvent(event);
+					expect(prevented).toBe(false);
+				}
+				expect(openAgentChatPreview).not.toHaveBeenCalled();
+				expect(link.getAttribute('href')).toBe(
+					'/projects/project-1/agents/agent-1?openPreview=true',
+				);
+			},
+		);
+
+		it('uses the builder artifact target for its Preview link', () => {
+			const openAgentChatPreview = vi.fn(() => true);
+			const { getByTestId } = renderComponent({
+				props: {
+					content:
+						'<a href="/projects/project-1/agents/agent-1/preview?continueSessionId=session-1&source=assistant">Preview</a>',
+					agentPreviewTarget: { agentId: 'agent-2', projectId: 'project-2' },
+				},
+				global: { provide: { openAgentChatPreview } },
+			});
+			const link = getByTestId('markdown-output').querySelector('a');
+			if (!link) throw new Error('expected Preview anchor');
+
+			expect(link.getAttribute('href')).toBe(
+				'/projects/project-2/agents/agent-2?continueSessionId=session-1&source=assistant&openPreview=true',
+			);
+
+			const event = clickEvent();
+			link.dispatchEvent(event);
+
+			expect(openAgentChatPreview).toHaveBeenCalledExactlyOnceWith('agent-2', 'project-2');
+			expect(event.defaultPrevented).toBe(true);
+		});
+
+		it('opens a Preview link after the markdown child replaces its enhanced content', () => {
+			const openAgentChatPreview = vi.fn(() => true);
+			const { getByTestId } = renderComponent({
+				props: { content: agentPreviewLinks[0].content },
+				global: { provide: { openAgentChatPreview } },
+			});
+			const markdownOutput = getByTestId('markdown-output');
+			markdownOutput.innerHTML = agentPreviewLinks[0].content;
+			const link = markdownOutput.querySelector('a');
+			if (!link) throw new Error('expected replaced Preview anchor');
+
+			expect(link.dataset.agentPreviewId).toBeUndefined();
+			const event = clickEvent();
+			link.dispatchEvent(event);
+
+			expect(openAgentChatPreview).toHaveBeenCalledExactlyOnceWith('agent-1', 'project-1');
+			expect(event.defaultPrevented).toBe(true);
+		});
+
+		it('does not treat a document-relative link as an agent Preview link', () => {
+			const openAgentChatPreview = vi.fn(() => true);
+			const content = '<a href="projects/project-1/agents/agent-1/preview">Relative Preview</a>';
+			const { getByTestId } = renderComponent({
+				props: { content },
+				global: { provide: { openAgentChatPreview } },
+			});
+			const link = getByTestId('markdown-output').querySelector('a');
+			if (!link) throw new Error('expected document-relative anchor');
+
+			expect(link.dataset.agentPreviewId).toBeUndefined();
+			expect(link.getAttribute('href')).toBe('projects/project-1/agents/agent-1/preview');
+			document.addEventListener('click', (event) => event.preventDefault(), { once: true });
+			link.dispatchEvent(clickEvent());
+
+			expect(openAgentChatPreview).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('embedded subject', () => {
+		const subject = computed(() => ({
+			type: 'agent' as const,
+			id: 'agent-1',
+			projectId: 'project-1',
+		}));
+
+		function renderInEmbed(content: string) {
+			const { getByTestId } = renderComponent({
+				props: { content },
+				global: { provide: { [INSTANCE_AI_EMBED_SUBJECT_KEY]: subject } },
+			});
+			return getByTestId('markdown-output');
+		}
+
+		it('should render the subject agent name as plain text', () => {
+			const registry = makeRegistry([
+				{ type: 'agent', id: 'agent-1', name: 'Simple Triggered Assistant' },
+				{ type: 'workflow', id: 'wf-1', name: 'Trigger Workflow' },
+			]);
+			thread.resourceNameIndex = registry;
+			thread.linkableResourceNameIndex = registry;
+
+			const output = renderInEmbed('I saved Simple Triggered Assistant and built Trigger Workflow');
+
+			expect(output.textContent).not.toContain('n8n-resource://agent/agent-1');
+			expect(output.textContent).toContain('[Trigger Workflow](n8n-resource://workflow/wf-1)');
+		});
+
+		it.each([
+			'<a href="n8n-resource://agent/agent-1">Simple Triggered Assistant</a>',
+			'<a href="/projects/project-1/agents/agent-1">Simple Triggered Assistant</a>',
+		])('should unwrap links to the subject agent: %s', (content) => {
+			const output = renderInEmbed(content);
+
+			expect(output.querySelector('a')).toBeNull();
+			expect(output.textContent).toBe('Simple Triggered Assistant');
+		});
+
+		it('should keep links to other agents and the Preview link', () => {
+			const output = renderInEmbed(
+				'<a href="n8n-resource://agent/agent-2">Other Agent</a> ' +
+					'<a href="/projects/project-1/agents/agent-1?openPreview=true">Preview</a>',
+			);
+
+			const links = output.querySelectorAll('a');
+			expect(links).toHaveLength(2);
+			expect(links[0].dataset.resourceId).toBe('agent-2');
+			expect(links[1].dataset.agentPreviewId).toBe('agent-1');
+		});
 	});
 });

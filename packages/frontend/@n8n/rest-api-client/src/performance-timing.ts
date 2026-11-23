@@ -230,7 +230,7 @@ export function startPerformanceScenario(name: string): void {
 }
 
 export function pausePerformanceScenario(): void {
-	if (!activeScenario || activeScenario.pauseStartedAt !== null) {
+	if (activeScenario?.pauseStartedAt !== null) {
 		return;
 	}
 
@@ -238,7 +238,7 @@ export function pausePerformanceScenario(): void {
 }
 
 export function resumePerformanceScenario(): void {
-	if (!activeScenario || activeScenario.pauseStartedAt === null) {
+	if (activeScenario?.pauseStartedAt === null || !activeScenario) {
 		return;
 	}
 

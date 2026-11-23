@@ -1,6 +1,5 @@
-import { Logger } from '@n8n/backend-common';
-import type { ModuleInterface } from '@n8n/decorators';
-import { BackendModule } from '@n8n/decorators';
+import type { ModuleInterface, SystemTaskClass } from '@n8n/decorators';
+import { BackendModule, OnShutdown } from '@n8n/decorators';
 import { Container } from '@n8n/di';
 
 /**
@@ -14,7 +13,43 @@ import { Container } from '@n8n/di';
 @BackendModule({ name: 'instance-registry' })
 export class InstanceRegistryModule implements ModuleInterface {
 	async init() {
-		const logger = Container.get(Logger);
-		logger.debug('Initializing instance-registry module.');
+		await import('./instance-registry.controller.js');
+
+		const { InstanceRegistryService } = await import('./instance-registry.service.js');
+		const instanceRegistryService = Container.get(InstanceRegistryService);
+		await instanceRegistryService.init();
+
+		const { InstanceRegistryProxyService } = await import('@n8n/backend-services');
+		Container.get(InstanceRegistryProxyService).registerProvider(instanceRegistryService);
+
+		await import('./checks/index.js');
+		const { CheckService } = await import('./checks/check.service.js');
+		Container.get(CheckService).init();
+	}
+
+	async systemTasks(): Promise<SystemTaskClass[]> {
+		const { InstanceRegistryReconciliationTask } = await import(
+			'./checks/instance-registry-reconciliation.task.js'
+		);
+
+		// The in-memory storage never holds a stale member and never expires an entry.
+		const { InstanceRegistryService } = await import('./instance-registry.service.js');
+		if (Container.get(InstanceRegistryService).storageBackend !== 'redis') {
+			return [InstanceRegistryReconciliationTask];
+		}
+
+		const { InstanceRegistryHeartbeatTask } = await import('./instance-registry-heartbeat.task.js');
+		const { StaleMemberCleanupTask } = await import('./stale-member-cleanup.task.js');
+		return [
+			InstanceRegistryHeartbeatTask,
+			StaleMemberCleanupTask,
+			InstanceRegistryReconciliationTask,
+		];
+	}
+
+	@OnShutdown()
+	async shutdown() {
+		const { InstanceRegistryService } = await import('./instance-registry.service.js');
+		await Container.get(InstanceRegistryService).shutdown();
 	}
 }

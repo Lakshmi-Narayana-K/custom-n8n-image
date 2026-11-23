@@ -48,10 +48,10 @@ const isWorkflowPublishDisabled = computed(() =>
 	checkEnvFeatureFlag.value('DISABLE_WORKFLOW_PUBLISH'),
 );
 const isPublishLimitReached = computed(
-	() => workflowsStore.workflow?.nxtwavePublish?.isLimitReached ?? false,
+	() => workflowsStore.nxtwavePublish?.isLimitReached ?? false,
 );
-const maxPublishCount = computed(() => workflowsStore.workflow?.nxtwavePublish?.maxPublishCount);
-const publishCount = computed(() => workflowsStore.workflow?.nxtwavePublish?.publishCount ?? 0);
+const maxPublishCount = computed(() => workflowsStore.nxtwavePublish?.maxPublishCount);
+const publishCount = computed(() => workflowsStore.nxtwavePublish?.publishCount ?? 0);
 const limitReachedTooltip = computed(() =>
 	i18n.baseText('workflows.publish.limitReachedTooltip', {
 		interpolate: {
@@ -146,7 +146,7 @@ const handleSubmit = () => {
 				/>
 				<div :class="$style.actions">
 					<N8nButton
-						variant="subtle"
+						variant="outline"
 						:disabled="submitting"
 						:label="i18n.baseText('generic.cancel')"
 						:data-test-id="`${modalName}-cancel-button`"

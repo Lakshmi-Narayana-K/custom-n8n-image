@@ -29,7 +29,6 @@ export class PerplexityApi implements ICredentialType {
 		properties: {
 			headers: {
 				Authorization: '=Bearer {{$credentials.apiKey}}',
-				'User-Agent': 'n8n',
 				'X-Source': 'n8n',
 			},
 		},
@@ -38,12 +37,8 @@ export class PerplexityApi implements ICredentialType {
 	test: ICredentialTestRequest = {
 		request: {
 			baseURL: 'https://api.perplexity.ai',
-			url: '/chat/completions',
-			method: 'POST',
-			body: {
-				model: 'sonar',
-				messages: [{ role: 'user', content: 'test' }],
-			},
+			url: '/v1/models',
+			method: 'GET',
 			headers: {
 				Authorization: '=Bearer {{$credentials.apiKey}}',
 				'Content-Type': 'application/json',

@@ -1,46 +1,51 @@
 // Mock the utility functions before imports
-jest.mock('@utils/agent-execution', () => ({
-	processHitlResponses: jest.fn(),
-	buildResponseMetadata: jest.fn(),
+vi.mock('@utils/agent-execution', () => ({
+	processHitlResponses: vi.fn(),
+	buildResponseMetadata: vi.fn(),
 }));
 
-jest.mock('@utils/agent-execution/createEngineRequests', () => ({
-	hasGatedToolNodeName: jest.fn(),
-	extractHitlMetadata: jest.fn(),
+vi.mock('@utils/agent-execution/createEngineRequests', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@utils/agent-execution/createEngineRequests')>()),
+	hasGatedToolNodeName: vi.fn(),
+	extractHitlMetadata: vi.fn(),
 }));
 
 import { DynamicTool, DynamicStructuredTool } from '@langchain/core/tools';
-import type { RequestResponseMetadata } from '@utils/agent-execution/types';
-import { mock } from 'jest-mock-extended';
 import type { EngineResponse, IExecuteFunctions, INode } from 'n8n-workflow';
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import type { Mocked } from 'vitest';
+import { mock } from 'vitest-mock-extended';
 import { z } from 'zod';
+
+import type { RequestResponseMetadata } from '@utils/agent-execution/types';
 
 import { ToolExecutor } from '../ToolExecutor.node';
 
-const { processHitlResponses, buildResponseMetadata } = jest.requireMock('@utils/agent-execution');
-const { hasGatedToolNodeName, extractHitlMetadata } = jest.requireMock(
-	'@utils/agent-execution/createEngineRequests',
-);
-
-const mockProcessHitlResponses = jest.mocked(processHitlResponses);
-const mockBuildResponseMetadata = jest.mocked(buildResponseMetadata);
-const mockHasGatedToolNodeName = jest.mocked(hasGatedToolNodeName);
-const mockExtractHitlMetadata = jest.mocked(extractHitlMetadata);
-
-describe('ToolExecutor Node', () => {
+describe('ToolExecutor Node', async () => {
 	let node: ToolExecutor;
-	let mockExecuteFunction: jest.Mocked<IExecuteFunctions>;
+	let mockExecuteFunction: Mocked<IExecuteFunctions>;
+
+	const { processHitlResponses, buildResponseMetadata } = vi.mocked(
+		await import('@utils/agent-execution/index.js'),
+	);
+	const { hasGatedToolNodeName, extractHitlMetadata } = vi.mocked(
+		await import('@utils/agent-execution/createEngineRequests.js'),
+	);
+
+	const mockProcessHitlResponses = vi.mocked(processHitlResponses);
+	const mockBuildResponseMetadata = vi.mocked(buildResponseMetadata);
+	const mockHasGatedToolNodeName = vi.mocked(hasGatedToolNodeName);
+	const mockExtractHitlMetadata = vi.mocked(extractHitlMetadata);
 
 	beforeEach(() => {
 		node = new ToolExecutor();
 		mockExecuteFunction = mock<IExecuteFunctions>();
 
 		mockExecuteFunction.logger = {
-			debug: jest.fn(),
-			info: jest.fn(),
-			warn: jest.fn(),
-			error: jest.fn(),
+			debug: vi.fn(),
+			info: vi.fn(),
+			warn: vi.fn(),
+			error: vi.fn(),
 		};
 
 		mockExecuteFunction.getNode.mockReturnValue({
@@ -49,12 +54,13 @@ describe('ToolExecutor Node', () => {
 			parameters: {},
 		} as INode);
 
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 
 		// Mock default return for processHitlResponses - no pending HITL tools
 		// This must come after clearAllMocks to take effect
 		mockProcessHitlResponses.mockReturnValue({
 			hasApprovedHitlTools: false,
+			// @ts-expect-error - Mocking
 			pendingGatedToolRequest: null,
 		});
 	});
@@ -78,18 +84,18 @@ describe('ToolExecutor Node', () => {
 		it('should throw error if no tool inputs found', async () => {
 			mockExecuteFunction.getInputConnectionData.mockResolvedValue(null);
 
-			await expect(node.execute.call(mockExecuteFunction)).rejects.toThrow(
-				new NodeOperationError(mockExecuteFunction.getNode(), 'No tool inputs found'),
-			);
+			const execution = node.execute.call(mockExecuteFunction);
+			await expect(execution).rejects.toThrow(NodeOperationError);
+			await expect(execution).rejects.toThrow('No tool inputs found');
 		});
 
 		it('executes a basic tool with string input', async () => {
-			const mockInvoke = jest.fn().mockResolvedValue('test result');
+			const mockInvoke = vi.fn().mockResolvedValue('test result');
 
 			const mockTool = new DynamicTool({
 				name: 'test_tool',
 				description: 'A test tool',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
 
 			mockTool.invoke = mockInvoke;
@@ -114,10 +120,10 @@ describe('ToolExecutor Node', () => {
 					number: z.number(),
 					boolean: z.boolean(),
 				}),
-				func: jest.fn(),
+				func: vi.fn(),
 			});
 
-			const mockInvoke = jest.fn().mockResolvedValue('test result');
+			const mockInvoke = vi.fn().mockResolvedValue('test result');
 			mockTool.invoke = mockInvoke;
 
 			mockExecuteFunction.getInputConnectionData.mockResolvedValue([mockTool]);
@@ -136,16 +142,16 @@ describe('ToolExecutor Node', () => {
 			const mockTool = new DynamicTool({
 				name: 'specific_tool',
 				description: 'A specific tool',
-				func: jest.fn().mockResolvedValue('specific result'),
+				func: vi.fn().mockResolvedValue('specific result'),
 			});
 
 			const irrelevantTool = new DynamicTool({
 				name: 'other_tool',
 				description: 'A specific irrelevant tool',
-				func: jest.fn().mockResolvedValue('specific result'),
+				func: vi.fn().mockResolvedValue('specific result'),
 			});
 
-			mockTool.invoke = jest.fn().mockResolvedValue('specific result');
+			mockTool.invoke = vi.fn().mockResolvedValue('specific result');
 
 			const toolkit = {
 				getTools: () => [mockTool, irrelevantTool],
@@ -168,9 +174,9 @@ describe('ToolExecutor Node', () => {
 			const mockTool = new DynamicTool({
 				name: 'json_tool',
 				description: 'A tool that handles JSON',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
-			mockTool.invoke = jest.fn().mockResolvedValue('json result');
+			mockTool.invoke = vi.fn().mockResolvedValue('json result');
 
 			mockExecuteFunction.getInputConnectionData.mockResolvedValue([mockTool]);
 			mockExecuteFunction.getNodeParameter.mockImplementation((param) => {
@@ -208,6 +214,7 @@ describe('ToolExecutor Node', () => {
 
 			mockProcessHitlResponses.mockReturnValue({
 				hasApprovedHitlTools: true,
+				// @ts-expect-error - Mocking
 				pendingGatedToolRequest: mockPendingRequest,
 			});
 
@@ -224,15 +231,16 @@ describe('ToolExecutor Node', () => {
 		it('should continue execution when no approved HITL tools', async () => {
 			mockProcessHitlResponses.mockReturnValue({
 				hasApprovedHitlTools: false,
+				// @ts-expect-error - Mocking
 				pendingGatedToolRequest: null,
 			});
 
 			const mockTool = new DynamicTool({
 				name: 'test_tool',
 				description: 'A test tool',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
-			mockTool.invoke = jest.fn().mockResolvedValue('test result');
+			mockTool.invoke = vi.fn().mockResolvedValue('test result');
 
 			mockExecuteFunction.getInputConnectionData.mockResolvedValue([mockTool]);
 			mockExecuteFunction.getNodeParameter.mockImplementation((param) => {
@@ -251,6 +259,7 @@ describe('ToolExecutor Node', () => {
 		});
 
 		it('should continue execution when processHitlResponses returns undefined pendingGatedToolRequest', async () => {
+			// @ts-expect-error - Mocking
 			mockProcessHitlResponses.mockReturnValue({
 				hasApprovedHitlTools: true,
 				pendingGatedToolRequest: undefined,
@@ -259,9 +268,9 @@ describe('ToolExecutor Node', () => {
 			const mockTool = new DynamicTool({
 				name: 'test_tool',
 				description: 'A test tool',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
-			mockTool.invoke = jest.fn().mockResolvedValue('test result');
+			mockTool.invoke = vi.fn().mockResolvedValue('test result');
 
 			mockExecuteFunction.getInputConnectionData.mockResolvedValue([mockTool]);
 			mockExecuteFunction.getNodeParameter.mockImplementation((param) => {
@@ -276,6 +285,19 @@ describe('ToolExecutor Node', () => {
 	});
 
 	describe('Gated tools handling', () => {
+		// Same schema shape as the gated tools built by createHitlToolkit
+		const createGatedTool = () =>
+			new DynamicStructuredTool({
+				name: 'gated_tool',
+				description: 'A gated tool',
+				schema: z.object({
+					toolParameters: z.object({ param: z.string() }),
+					hitlParameters: z.object({ approval: z.string(), query: z.unknown() }),
+				}),
+				func: vi.fn(),
+				metadata: { gatedToolNodeName: 'hitl_node' },
+			});
+
 		beforeEach(() => {
 			mockProcessHitlResponses.mockReset();
 			mockHasGatedToolNodeName.mockReset();
@@ -284,6 +306,7 @@ describe('ToolExecutor Node', () => {
 
 			mockProcessHitlResponses.mockReturnValue({
 				hasApprovedHitlTools: false,
+				// @ts-expect-error - Mocking
 				pendingGatedToolRequest: null,
 			});
 		});
@@ -295,16 +318,12 @@ describe('ToolExecutor Node', () => {
 			};
 
 			mockHasGatedToolNodeName.mockReturnValue(true);
+			// @ts-expect-error - Mocking
 			mockExtractHitlMetadata.mockReturnValue(mockHitlMetadata);
+			// @ts-expect-error - Mocking
 			mockBuildResponseMetadata.mockReturnValue({ test: 'metadata' });
 
-			const mockTool = new DynamicTool({
-				name: 'gated_tool',
-				description: 'A gated tool',
-				func: jest.fn(),
-			});
-
-			mockTool.metadata = { gatedToolNodeName: 'hitl_node' };
+			const mockTool = createGatedTool();
 
 			const toolkit = {
 				getTools: () => [mockTool],
@@ -350,15 +369,100 @@ describe('ToolExecutor Node', () => {
 			});
 		});
 
+		it('should set tool and toolParameters of the HITL input from the gated tool call', async () => {
+			mockHasGatedToolNodeName.mockReturnValue(true);
+			mockBuildResponseMetadata.mockReturnValue({});
+
+			const toolkit = { getTools: () => [createGatedTool()] };
+			mockExecuteFunction.getInputConnectionData.mockResolvedValue([toolkit]);
+			mockExecuteFunction.getNodeParameter.mockImplementation((param) => {
+				if (param === 'query')
+					return {
+						gated_tool: { param: 'value' },
+						hitl_node: {
+							approval: 'pending',
+							tool: 'other_tool',
+							toolParameters: { param: 'other' },
+							query: { tool: 'other_tool', toolParameters: { param: 'other' } },
+							extra: 'value',
+						},
+					};
+				if (param === 'toolName') return 'gated_tool';
+				if (param === 'node') return 'hitl_node';
+				return '';
+			});
+
+			const result = await node.execute.call(mockExecuteFunction);
+
+			if (!result || Array.isArray(result) || !('actions' in result)) {
+				throw new Error('Expected result to be an object with actions');
+			}
+			expect(result.actions[0].input).toEqual({
+				approval: 'pending',
+				tool: 'gated_tool',
+				toolParameters: { param: 'value' },
+			});
+		});
+
+		it.each([
+			[
+				'wrapped schema',
+				z.object({
+					toolParameters: new DynamicTool({ name: 'c', description: 'c', func: vi.fn() }).schema,
+					hitlParameters: z.object({ message: z.string() }),
+				}),
+			],
+			['schema without HITL parameters', { type: 'object', properties: {} }],
+		])(
+			'should pass the HITL parameters of a string input tool to the HITL node (%s)',
+			async (_, schema) => {
+				mockHasGatedToolNodeName.mockReturnValue(true);
+				mockBuildResponseMetadata.mockReturnValue({});
+
+				const codeTool = new DynamicTool({
+					name: 'code_tool',
+					description: 'A code tool',
+					func: vi.fn(),
+					metadata: { gatedToolNodeName: 'hitl_node' },
+				});
+				Object.defineProperty(codeTool, 'schema', { value: schema });
+
+				mockExecuteFunction.getInputConnectionData.mockResolvedValue([
+					{ getTools: () => [codeTool] },
+				]);
+				mockExecuteFunction.getNodeParameter.mockImplementation((param) => {
+					if (param === 'query')
+						return {
+							code_tool: { input: 'print(1)' },
+							hitl_node: { message: 'Approve?', query: { tool: 'other' }, tool: 'other' },
+						};
+					if (param === 'toolName') return 'code_tool';
+					if (param === 'node') return 'hitl_node';
+					return '';
+				});
+
+				const result = await node.execute.call(mockExecuteFunction);
+
+				if (!result || Array.isArray(result) || !('actions' in result)) {
+					throw new Error('Expected result to be an object with actions');
+				}
+				expect(result.actions[0].input).toEqual({
+					message: 'Approve?',
+					tool: 'code_tool',
+					toolParameters: { input: 'print(1)' },
+				});
+			},
+		);
+
 		it('should not treat tool as gated when hasGatedToolNodeName returns false', async () => {
 			mockHasGatedToolNodeName.mockReturnValue(false);
 
 			const mockTool = new DynamicTool({
 				name: 'normal_tool',
 				description: 'A normal tool',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
-			mockTool.invoke = jest.fn().mockResolvedValue('normal result');
+			mockTool.invoke = vi.fn().mockResolvedValue('normal result');
 			mockTool.metadata = {};
 
 			const toolkit = {
@@ -386,9 +490,9 @@ describe('ToolExecutor Node', () => {
 			const mockTool = new DynamicTool({
 				name: 'tool_with_metadata',
 				description: 'A tool with gated metadata',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
-			mockTool.invoke = jest.fn().mockResolvedValue('tool result');
+			mockTool.invoke = vi.fn().mockResolvedValue('tool result');
 			mockTool.metadata = { gatedToolNodeName: 'hitl_node' };
 
 			const toolkit = {
@@ -416,6 +520,7 @@ describe('ToolExecutor Node', () => {
 			mockProcessHitlResponses.mockReset();
 			mockProcessHitlResponses.mockReturnValue({
 				hasApprovedHitlTools: false,
+				// @ts-expect-error - Mocking
 				pendingGatedToolRequest: null,
 			});
 		});
@@ -424,9 +529,9 @@ describe('ToolExecutor Node', () => {
 			const mockTool = new DynamicTool({
 				name: 'tool with spaces',
 				description: 'A tool with spaces in name',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
-			mockTool.invoke = jest.fn().mockResolvedValue('result');
+			mockTool.invoke = vi.fn().mockResolvedValue('result');
 
 			mockExecuteFunction.getInputConnectionData.mockResolvedValue([mockTool]);
 			mockExecuteFunction.getNodeParameter.mockImplementation((param) => {
@@ -444,9 +549,9 @@ describe('ToolExecutor Node', () => {
 			const mockTool = new DynamicTool({
 				name: 'my tool name',
 				description: 'A tool with multiple spaces',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
-			mockTool.invoke = jest.fn().mockResolvedValue('result');
+			mockTool.invoke = vi.fn().mockResolvedValue('result');
 
 			mockExecuteFunction.getInputConnectionData.mockResolvedValue([mockTool]);
 			mockExecuteFunction.getNodeParameter.mockImplementation((param) => {
@@ -464,9 +569,9 @@ describe('ToolExecutor Node', () => {
 			const mockTool = new DynamicTool({
 				name: 'test tool',
 				description: 'A test tool',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
-			mockTool.invoke = jest.fn().mockResolvedValue('result');
+			mockTool.invoke = vi.fn().mockResolvedValue('result');
 
 			mockExecuteFunction.getInputConnectionData.mockResolvedValue([mockTool]);
 			mockExecuteFunction.getNodeParameter.mockImplementation((param) => {
@@ -489,9 +594,9 @@ describe('ToolExecutor Node', () => {
 			const mockTool = new DynamicTool({
 				name: 'toolkit tool',
 				description: 'A toolkit tool',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
-			mockTool.invoke = jest.fn().mockResolvedValue('toolkit result');
+			mockTool.invoke = vi.fn().mockResolvedValue('toolkit result');
 
 			const toolkit = {
 				getTools: () => [mockTool],
@@ -514,9 +619,9 @@ describe('ToolExecutor Node', () => {
 			const mockTool = new DynamicTool({
 				name: 'missing_tool',
 				description: 'A tool not in query',
-				func: jest.fn(),
+				func: vi.fn(),
 			});
-			mockTool.invoke = jest.fn().mockResolvedValue('result');
+			mockTool.invoke = vi.fn().mockResolvedValue('result');
 
 			mockExecuteFunction.getInputConnectionData.mockResolvedValue([mockTool]);
 			mockExecuteFunction.getNodeParameter.mockImplementation((param) => {

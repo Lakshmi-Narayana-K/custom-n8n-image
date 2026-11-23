@@ -2,17 +2,17 @@ import type {
 	AuthenticatedRequest,
 	Settings,
 	CredentialsEntity,
+	CloudHooksPeople,
 	User,
 	WorkflowEntity,
 } from '@n8n/db';
 import {
 	CredentialsRepository,
+	PersonRepository,
 	WorkflowRepository,
 	SettingsRepository,
-	UserRepository,
 } from '@n8n/db';
 import { Service } from '@n8n/di';
-// eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
 import type { FindManyOptions, FindOneOptions, FindOptionsWhere } from '@n8n/typeorm';
 import type { QueryDeepPartialEntity } from '@n8n/typeorm/query-builder/QueryPartialEntity';
 import RudderStack, { type constructorOptions } from '@rudderstack/rudder-sdk-node';
@@ -28,6 +28,8 @@ import { UserService } from '@/services/user.service';
  */
 @Service()
 export class HooksService {
+	private readonly personCollection: CloudHooksPeople;
+
 	private innerAuthMiddleware: (
 		req: AuthenticatedRequest,
 		res: Response,
@@ -37,11 +39,12 @@ export class HooksService {
 	constructor(
 		private readonly userService: UserService,
 		private readonly authService: AuthService,
-		private readonly userRepository: UserRepository,
+		personRepository: PersonRepository,
 		private readonly settingsRepository: SettingsRepository,
 		private readonly workflowRepository: WorkflowRepository,
 		private readonly credentialsRepository: CredentialsRepository,
 	) {
+		this.personCollection = personRepository.forCloudHooks();
 		this.innerAuthMiddleware = authService.createAuthMiddleware({ allowSkipMFA: false });
 	}
 
@@ -69,14 +72,14 @@ export class HooksService {
 	 * 2. To know when to update the user's profile also in cloud
 	 */
 	async findOneUser(filter: FindOneOptions<User>) {
-		return await this.userRepository.findOne(filter);
+		return await this.personCollection.findOne(filter);
 	}
 
 	/**
 	 * Save instance owner with the cloud signup data
 	 */
 	async saveUser(user: User) {
-		return await this.userRepository.save(user);
+		return await this.personCollection.save(user);
 	}
 
 	/**
@@ -129,7 +132,7 @@ export class HooksService {
 	 */
 	dbCollections() {
 		return {
-			User: this.userRepository,
+			User: this.personCollection,
 			Settings: this.settingsRepository,
 			Credentials: this.credentialsRepository,
 			Workflow: this.workflowRepository,

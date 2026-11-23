@@ -1,4 +1,6 @@
-import { AuthenticatedRequest, UserRepository } from '@n8n/db';
+import { EventService } from '@n8n/backend-services';
+import { InstanceSettingsLoaderConfig } from '@n8n/config';
+import { AuthenticatedRequest, PersonRepository } from '@n8n/db';
 import {
 	createUserKeyedRateLimiter,
 	Get,
@@ -9,8 +11,7 @@ import {
 import { Response } from 'express';
 
 import { AuthService } from '@/auth/auth.service';
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { EventService } from '@/events/event.service';
+import { BadRequestError, ForbiddenError, NotFoundError } from '@n8n/errors';
 import { ExternalHooks } from '@/external-hooks';
 import { MfaService } from '@/mfa/mfa.service';
 import { MFA } from '@/requests';
@@ -21,13 +22,20 @@ export class MFAController {
 		private mfaService: MfaService,
 		private externalHooks: ExternalHooks,
 		private authService: AuthService,
-		private userRepository: UserRepository,
+		private personRepository: PersonRepository,
 		private eventService: EventService,
+		private instanceSettingsLoaderConfig: InstanceSettingsLoaderConfig,
 	) {}
 
 	@Post('/enforce-mfa')
 	@GlobalScope('user:enforceMfa')
 	async enforceMFA(req: MFA.Enforce) {
+		if (this.instanceSettingsLoaderConfig.securityPolicyManagedByEnv) {
+			throw new ForbiddenError(
+				'MFA enforcement is managed via environment variables and cannot be modified through the API',
+			);
+		}
+
 		if (req.body.enforce && !(req.authInfo?.usedMfa ?? false)) {
 			// The current user tries to enforce MFA, but does not have
 			// MFA set up for them self. We are forbidding this, to
@@ -129,7 +137,7 @@ export class MFAController {
 		if (!verified)
 			throw new BadRequestError('MFA code expired. Close the modal and enable MFA again', 997);
 
-		const updatedUser = await this.mfaService.enableMfa(id);
+		const updatedPerson = await this.mfaService.enableMfa(id);
 
 		this.eventService.emit('user-mfa-enabled', {
 			user: {
@@ -141,7 +149,7 @@ export class MFAController {
 			},
 		});
 
-		this.authService.issueCookie(res, updatedUser, verified, req.browserId);
+		this.authService.issueCookie(res, updatedPerson, verified, req.browserId);
 	}
 
 	@Post('/disable', {
@@ -180,12 +188,10 @@ export class MFAController {
 			disableMethod: mfaCodeDefined ? 'mfaCode' : 'recoveryCode',
 		});
 
-		const updatedUser = await this.userRepository.findOneOrFail({
-			where: { id: userId },
-			relations: ['role'],
-		});
+		const updatedPerson = await this.personRepository.findByIdWithRole(userId);
+		if (!updatedPerson) throw new NotFoundError('User not found');
 
-		this.authService.issueCookie(res, updatedUser, false, req.browserId);
+		this.authService.issueCookie(res, updatedPerson, false, req.browserId);
 	}
 
 	@Post('/verify', {

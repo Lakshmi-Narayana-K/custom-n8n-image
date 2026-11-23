@@ -20,7 +20,7 @@ import type {
 	ChatConversation,
 } from './chat.types';
 import { CHAT_VIEW } from './constants';
-import type { IconName } from '@n8n/design-system/components/N8nIcon/icons';
+import type { IconName } from '@n8n/design-system';
 
 export function getRelativeDate(now: Date, dateString: string): string {
 	const date = new Date(dateString);
@@ -434,17 +434,10 @@ export function createFakeAgent(
 	};
 }
 
-/**
- * Enriches a MIME type accept string with the `.md` file extension.
- * macOS file picker does not recognise `text/*` or `text/markdown` for
- * Markdown files, so we add the explicit extension.
- */
-export function enrichMimeTypesWithExtensions(mimeTypes: string): string {
-	if (mimeTypes && (mimeTypes.includes('text/*') || mimeTypes.includes('text/markdown'))) {
-		return `${mimeTypes},.md`;
-	}
-	return mimeTypes;
-}
+export {
+	enrichMimeTypesWithExtensions,
+	isFileAcceptedByAccept,
+} from '@/features/ai/shared/utils/fileAccept';
 
 export const isEditable = (message: ChatMessage): boolean => {
 	return message.status === 'success' && message.type !== 'ai';

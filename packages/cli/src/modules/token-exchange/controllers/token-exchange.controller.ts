@@ -1,3 +1,4 @@
+import { EventService } from '@n8n/backend-services';
 import { Time } from '@n8n/constants';
 import { Post, RestController } from '@n8n/decorators';
 import { Container } from '@n8n/di';
@@ -5,14 +6,14 @@ import type { Response } from 'express';
 import { ErrorReporter } from 'n8n-core';
 import { z, ZodError } from 'zod';
 
-import { AuthError } from '@/errors/response-errors/auth.error';
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { EventService } from '@/events/event.service';
+import { AuthError, BadRequestError } from '@n8n/errors';
 import { AuthlessRequest } from '@/requests';
 
 import { TokenExchangeService } from '../services/token-exchange.service';
 import { TokenExchangeConfig } from '../token-exchange.config';
+import { TokenExchangeAuthError, TokenExchangeRequestError } from '../token-exchange.errors';
 import { TOKEN_EXCHANGE_GRANT_TYPE, TokenExchangeRequestSchema } from '../token-exchange.schemas';
+import { TokenExchangeFailureReason } from '../token-exchange.types';
 
 const configService = Container.get(TokenExchangeConfig);
 
@@ -97,7 +98,10 @@ export class TokenExchangeController {
 			if (error instanceof AuthError) {
 				this.eventService.emit('token-exchange-failed', {
 					subject: '',
-					failureReason: error.message,
+					failureReason:
+						error instanceof TokenExchangeAuthError
+							? error.reason
+							: TokenExchangeFailureReason.Other,
 					grantType: parsed.data.grant_type,
 					clientIp,
 				});
@@ -111,7 +115,10 @@ export class TokenExchangeController {
 			if (error instanceof BadRequestError) {
 				this.eventService.emit('token-exchange-failed', {
 					subject: '',
-					failureReason: error.message,
+					failureReason:
+						error instanceof TokenExchangeRequestError
+							? error.reason
+							: TokenExchangeFailureReason.InvalidFormat,
 					grantType: parsed.data.grant_type,
 					clientIp,
 				});
@@ -125,7 +132,7 @@ export class TokenExchangeController {
 			if (error instanceof ZodError) {
 				this.eventService.emit('token-exchange-failed', {
 					subject: '',
-					failureReason: 'invalid_claims',
+					failureReason: TokenExchangeFailureReason.InvalidClaims,
 					grantType: parsed.data.grant_type,
 					clientIp,
 				});
@@ -139,7 +146,7 @@ export class TokenExchangeController {
 			this.errorReporter.error(error instanceof Error ? error : new Error(String(error)));
 			this.eventService.emit('token-exchange-failed', {
 				subject: '',
-				failureReason: 'internal_error',
+				failureReason: TokenExchangeFailureReason.InternalError,
 				grantType: parsed.data.grant_type,
 				clientIp,
 			});

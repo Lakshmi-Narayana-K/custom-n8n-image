@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { VIEWS } from '@/app/constants';
-import { useUsersStore } from '@/features/settings/users/users.store';
+import { useUsersStore } from '@n8n/stores/users.store';
 import {
 	type IMenuItem,
 	N8nAvatar,
@@ -28,7 +28,7 @@ const userMenuItems = ref<IMenuItem[]>([
 	},
 	{
 		id: 'logout',
-		icon: 'door-open',
+		icon: 'log-out',
 		label: i18n.baseText('auth.signout'),
 	},
 ]);
@@ -63,7 +63,7 @@ const onUserActionToggle = (action: string) => {
 
 <template>
 	<div ref="user" :class="$style.userArea">
-		<N8nPopoverReka v-if="!isMember" side="right" align="end" :side-offset="16">
+		<N8nPopover v-if="!isMember" side="right" align="end" :side-offset="16">
 			<template #content>
 				<div :class="$style.popover">
 					<N8nMenuItem
@@ -112,7 +112,7 @@ const onUserActionToggle = (action: string) => {
 					</div>
 				</div>
 			</template>
-		</N8nPopoverReka>
+		</N8nPopover>
 		<div v-else :class="$style.userAreaInner">
 			<div class="ml-3xs" data-test-id="main-sidebar-user-menu">
 				<div>

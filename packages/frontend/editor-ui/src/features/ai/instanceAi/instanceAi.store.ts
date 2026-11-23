@@ -1,212 +1,126 @@
 import { defineStore } from 'pinia';
-import { ref, computed, triggerRef } from 'vue';
-import { v4 as uuidv4 } from 'uuid';
-import { useRootStore } from '@n8n/stores/useRootStore';
-import { useToast } from '@/app/composables/useToast';
-import { useTelemetry } from '@/app/composables/useTelemetry';
-import { ResponseError } from '@n8n/rest-api-client';
 import {
-	instanceAiEventSchema,
-	isSafeObjectKey,
+	ref,
+	computed,
+	effectScope,
+	inject,
+	provide,
+	shallowReactive,
+	type EffectScope,
+	type InjectionKey,
+} from 'vue';
+import { useRootStore } from '@n8n/stores/useRootStore';
+import { useToast } from '@n8n/composables/useToast';
+import { i18n } from '@n8n/i18n';
+import { useTelemetry } from '@n8n/composables/useTelemetry';
+import { TELEMETRY_EVENT } from '@n8n/telemetry';
+import {
 	UNLIMITED_CREDITS,
-	type InstanceAiConfirmation,
-	type InstanceAiConfirmResponse,
+	type InstanceAiThreadHistoryResponse,
+	type InstanceAiThreadInfo,
+	type InstanceAiThreadSummary,
+	type InstanceAiAttachment,
+	type InstanceAiNodesAttachment,
+	type PushMessage,
 } from '@n8n/api-types';
 import {
 	ensureThread,
-	postMessage,
-	postCancel,
-	postCancelTask,
-	postConfirmation,
 	getInstanceAiCredits,
+	type InstanceAiThreadLaunchInput,
 } from './instanceAi.api';
-import { usePushConnectionStore } from '@/app/stores/pushConnection.store';
-import { useWorkflowsListStore } from '@/app/stores/workflowsList.store';
-import { useInstanceAiSettingsStore } from './instanceAiSettings.store';
 import {
 	fetchThreads as fetchThreadsApi,
-	fetchThreadMessages as fetchThreadMessagesApi,
-	fetchThreadStatus as fetchThreadStatusApi,
+	fetchThreadHistory,
+	fetchThread,
 	deleteThread as deleteThreadApi,
 	renameThread as renameThreadApi,
 	updateThreadMetadata as updateThreadMetadataApi,
 } from './instanceAi.memory.api';
-import { handleEvent as reduceEvent, rebuildRunStateFromTree } from './instanceAi.reducer';
-import { useResourceRegistry } from './useResourceRegistry';
-import { useResponseFeedback } from './useResponseFeedback';
 import { NEW_CONVERSATION_TITLE } from './constants';
-import type {
-	InstanceAiAttachment,
-	InstanceAiEvent,
-	InstanceAiMessage,
-	InstanceAiAgentNode,
-	InstanceAiToolCallState,
-	InstanceAiThreadSummary,
-	InstanceAiSSEConnectionState,
-	TaskList,
-} from '@n8n/api-types';
+import {
+	createThreadRuntime,
+	type OnboardingExitOutcome,
+	type ThreadRuntime,
+} from './instanceAi.threadRuntime';
+import { mergeNodeSets } from './utils/buildNodesAttachment';
 
-export interface PendingConfirmationItem {
-	toolCall: InstanceAiToolCallState & { confirmation: InstanceAiConfirmation };
-	agentNode: InstanceAiAgentNode;
-	messageId: string;
-}
+export type { PendingConfirmationItem, ThreadRuntime } from './instanceAi.threadRuntime';
 
-type HistoricalHydrationStatus = 'applied' | 'stale' | 'skipped';
+type InstanceAiCreditsPushData = Extract<PushMessage, { type: 'updateInstanceAiCredits' }>['data'];
 
-/** Walk an agent tree, collecting tool calls that have an active (pending) confirmation. */
-function collectPendingConfirmations(
-	node: InstanceAiAgentNode,
-	messageId: string,
-	resolved: Map<string, 'approved' | 'denied' | 'deferred'>,
-	out: PendingConfirmationItem[],
-): void {
-	for (const tc of node.toolCalls) {
-		if (
-			tc.confirmation &&
-			tc.isLoading &&
-			tc.confirmationStatus !== 'approved' &&
-			tc.confirmationStatus !== 'denied' &&
-			!resolved.has(tc.confirmation.requestId) &&
-			// Plan review renders inline in the timeline, not in the confirmation panel
-			tc.confirmation.inputType !== 'plan-review'
-		) {
-			out.push({
-				toolCall: tc as InstanceAiToolCallState & { confirmation: InstanceAiConfirmation },
-				agentNode: node,
-				messageId,
-			});
-		}
-	}
-	for (const child of node.children) {
-		collectPendingConfirmations(child, messageId, resolved, out);
-	}
-}
+const THREAD_HISTORY_PAGE_SIZE = 30;
 
-/** Find a tool call in an agent tree by its confirmation requestId. */
-function findToolCallInTree(
-	node: InstanceAiAgentNode,
-	requestId: string,
-): InstanceAiToolCallState | undefined {
-	for (const tc of node.toolCalls) {
-		if (tc.confirmation?.requestId === requestId) return tc;
-	}
-	for (const child of node.children) {
-		const found = findToolCallInTree(child, requestId);
-		if (found) return found;
-	}
-	return undefined;
-}
-
-function findLatestTasksFromMessages(messages: InstanceAiMessage[]): TaskList | null {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const tasks = messages[i].agentTree?.tasks;
-		if (tasks) return tasks;
-	}
-
-	return null;
-}
-
-// Module-level EventSource reference — not in reactive state (not serializable,
-// not needed for rendering, wrapping in a reactive proxy causes issues).
-let eventSource: EventSource | null = null;
-
-// Module-level reducer state storage — kept outside Vue reactivity.
-import type { AgentRunState } from '@n8n/api-types';
-let runStateByGroupId: Record<string, AgentRunState> = {};
-let groupIdByRunId: Record<string, string> = {};
-
-// SSE connection generation — incremented on every connectSSE() call.
-// Stale EventSource instances from previous threads discard events.
-let sseGeneration = 0;
+const emptyThreadHistory = (search = '') => ({
+	search,
+	threads: [] as InstanceAiThreadSummary[],
+	hasMore: true,
+	loading: false,
+	error: false,
+});
 
 export const useInstanceAiStore = defineStore('instanceAi', () => {
 	const rootStore = useRootStore();
-	const instanceAiSettingsStore = useInstanceAiSettingsStore();
 	const toast = useToast();
 	const telemetry = useTelemetry();
 	const persistedThreadIds = new Set<string>();
 
-	// --- State ---
-	const currentThreadId = ref<string>(uuidv4());
+	// --- Instance-level state ---
 	const threads = ref<InstanceAiThreadSummary[]>([]);
-	const sseState = ref<InstanceAiSSEConnectionState>('disconnected');
-	const lastEventIdByThread = ref<Record<string, number>>({});
-	const activeRunId = ref<string | null>(null);
-	const messages = ref<InstanceAiMessage[]>([]);
-	const latestTasks = ref<TaskList | null>(null);
-	const hydratingThreadId = ref<string | null>(null);
-	const pendingMessageCount = ref(0);
-	const debugEvents = ref<Array<{ timestamp: string; event: InstanceAiEvent }>>([]);
+	// The chat history page: cursor-paginated and searchable, kept apart from the sidebar list.
+	const threadHistory = ref(emptyThreadHistory());
 	const debugMode = ref(false);
-	const researchMode = ref(localStorage.getItem('instanceAi.researchMode') === 'true');
-	const amendContext = ref<{ agentId: string; role: string } | null>(null);
 	// Credits are instance-level state (not per-thread). Re-fetched on mount via fetchCredits(),
 	// and updated in real-time via the 'updateInstanceAiCredits' push event.
 	// No reset needed on thread switch — login/logout reloads the page.
 	const creditsQuota = ref<number | undefined>(undefined);
 	const creditsClaimed = ref<number | undefined>(undefined);
-	const resolvedConfirmationIds = ref<Map<string, 'approved' | 'denied' | 'deferred'>>(new Map());
-	const MAX_DEBUG_EVENTS = 1000;
-	let hydrationRequestSequence = 0;
-	let activeHydrationRequestToken: number | null = null;
 
-	// --- Computed ---
-	const isStreaming = computed(() => activeRunId.value !== null);
-	const isSendingMessage = computed(() => pendingMessageCount.value > 0);
-	const hasMessages = computed(() => messages.value.length > 0);
-	const isHydratingThread = computed(() => hydratingThreadId.value === currentThreadId.value);
-	const isGatewayConnected = computed(() => instanceAiSettingsStore.isGatewayConnected);
-	const gatewayDirectory = computed(() => instanceAiSettingsStore.gatewayDirectory);
-	const activeDirectory = computed(() => gatewayDirectory.value);
+	// --- Thread runtimes ---
+	const runtimes = shallowReactive(new Map<string, ThreadRuntime>());
+	// Detached scopes owning each runtime's watchers. The runtime must outlive the
+	// component that created it: a Suspense duplicate of the thread view can create
+	// it in setup and be discarded, and a component scope would take the watchers
+	// (e.g. the resource registry) down with it.
+	const runtimeScopes = new Map<string, EffectScope>();
+	const runtimeHooks = {
+		onTitleUpdated: (threadId, title) => {
+			for (const thread of localThreadEntries(threadId)) thread.title = title;
+		},
+		// Refresh thread list to pick up auto-generated titles
+		onRunFinish: () => {
+			void loadThreads();
+		},
+		getThreadMetadata: (threadId) => threads.value.find((t) => t.id === threadId)?.metadata,
+		onOnboardingLeft: leaveOnboarding,
+	} satisfies Parameters<typeof createThreadRuntime>[1];
 
-	// Resource registry — maps known resource names to their types & IDs
-	const workflowsListStore = useWorkflowsListStore();
-	const { registry: resourceRegistry } = useResourceRegistry(
-		() => messages.value,
-		(id) => workflowsListStore.getWorkflowById(id)?.name,
-	);
+	function getOrCreateRuntime(threadId: string, projectId?: string): ThreadRuntime {
+		const existingRuntime = runtimes.get(threadId);
+		if (existingRuntime) return existingRuntime;
 
-	// Response feedback — rateability selector + submission
-	const { feedbackByResponseId, rateableResponseId, submitFeedback, resetFeedback } =
-		useResponseFeedback({ messages, currentThreadId, telemetry });
+		const scope = effectScope(true);
+		const runtime = scope.run(() => createThreadRuntime(threadId, runtimeHooks, projectId));
+		if (!runtime) throw new Error('Failed to create thread runtime');
+		runtimes.set(threadId, runtime);
+		runtimeScopes.set(threadId, scope);
+		return runtime;
+	}
 
-	/** The latest task list, preferring explicit tasks-update events over tree snapshots. */
-	const currentTasks = computed(
-		() => latestTasks.value ?? findLatestTasksFromMessages(messages.value),
-	);
+	function getRuntime(threadId: string): ThreadRuntime | undefined {
+		return runtimes.get(threadId);
+	}
 
-	/**
-	 * Derive a single contextual follow-up suggestion from the last completed
-	 * assistant message. Shown as the input placeholder + Tab to autocomplete.
-	 */
-	const contextualSuggestion = computed((): string | null => {
-		if (isStreaming.value) return null;
+	function disposeRuntime(threadId: string): void {
+		const runtime = runtimes.get(threadId);
+		if (!runtime) return;
 
-		// Find last assistant message
-		const lastAssistant = [...messages.value].reverse().find((m) => m.role === 'assistant');
-		if (!lastAssistant || lastAssistant.isStreaming) return null;
+		runtime.dispose();
+		runtimeScopes.get(threadId)?.stop();
+		runtimeScopes.delete(threadId);
+		runtimes.delete(threadId);
+	}
 
-		const tree = lastAssistant.agentTree;
-		if (!tree) return null;
-
-		// Workflow builder completed
-		const builderChild = tree.children.find((c) => c.role === 'workflow-builder');
-		if (builderChild) {
-			return builderChild.status === 'error' || builderChild.status === 'cancelled'
-				? 'Try building the workflow again with different settings'
-				: 'Add error handling to the workflow';
-		}
-
-		// Data table manager completed
-		const dataChild = tree.children.find((c) => c.role === 'data-table-manager');
-		if (dataChild) {
-			return 'Query the data table to show recent entries';
-		}
-
-		return null;
-	});
-
+	// --- Computed credits ---
 	const creditsRemaining = computed(() => {
 		if (
 			creditsQuota.value === undefined ||
@@ -234,24 +148,26 @@ export const useInstanceAiStore = defineStore('instanceAi', () => {
 		return creditsPercentageRemaining.value !== undefined && creditsPercentageRemaining.value <= 10;
 	});
 
-	// --- Credits push listener ---
+	/** Send is blocked. A positive low balance stays a dismissible warning. */
+	const isOutOfCredits = computed(() => creditsRemaining.value === 0);
 
-	let removeCreditsPushListener: (() => void) | null = null;
+	// --- Credits push handling ---
 
-	function startCreditsPushListener(): void {
-		if (removeCreditsPushListener) return;
-		const pushStore = usePushConnectionStore();
-		removeCreditsPushListener = pushStore.addEventListener((message) => {
-			if (message.type !== 'updateInstanceAiCredits') return;
-			creditsQuota.value = message.data.creditsQuota;
-			creditsClaimed.value = message.data.creditsClaimed;
-		});
-	}
-
-	function stopCreditsPushListener(): void {
-		if (removeCreditsPushListener) {
-			removeCreditsPushListener();
-			removeCreditsPushListener = null;
+	// Applies an `updateInstanceAiCredits` push. The instance-ai module descriptor
+	// registers this through its `pushHandlers`, so the shell owns the subscription
+	// lifecycle and credits stay current instance-wide; the store just applies the
+	// payload.
+	function handleCreditsPush(data: InstanceAiCreditsPushData): void {
+		creditsQuota.value = data.creditsQuota;
+		creditsClaimed.value = data.creditsClaimed;
+		// Per-message claims also carry the thread's running total — write it onto the
+		// matching thread so the credits dropdown updates live for the acting user.
+		const { creditsPerThread } = data;
+		if (creditsPerThread !== undefined) {
+			const thread = threads.value.find((t) => t.id === creditsPerThread.threadId);
+			if (thread) {
+				thread.metadata = { ...thread.metadata, creditsUsed: creditsPerThread.totalCreditsUsed };
+			}
 		}
 	}
 
@@ -265,338 +181,24 @@ export const useInstanceAiStore = defineStore('instanceAi', () => {
 		}
 	}
 
-	/** All pending confirmations across all messages, for the top-level panel. */
-	const pendingConfirmations = computed((): PendingConfirmationItem[] => {
-		const items: PendingConfirmationItem[] = [];
-		for (const msg of messages.value) {
-			if (msg.role !== 'assistant' || !msg.agentTree) continue;
-			collectPendingConfirmations(msg.agentTree, msg.id, resolvedConfirmationIds.value, items);
-		}
-		return items;
-	});
+	// --- Thread list & lifecycle ---
 
-	function resolveConfirmation(
-		requestId: string,
-		action: 'approved' | 'denied' | 'deferred',
-	): void {
-		const next = new Map(resolvedConfirmationIds.value);
-		next.set(requestId, action);
-		resolvedConfirmationIds.value = next;
-	}
-
-	/** Find a tool call by its confirmation requestId across all messages. */
-	function findToolCallByRequestId(requestId: string): InstanceAiToolCallState | undefined {
-		for (const msg of messages.value) {
-			if (!msg.agentTree) continue;
-			const found = findToolCallInTree(msg.agentTree, requestId);
-			if (found) return found;
-		}
-		return undefined;
-	}
-
-	// --- Event reducer (delegated to pure module) ---
-
-	// --- SSE lifecycle ---
-
-	function onSSEMessage(sseEvent: MessageEvent): void {
-		// Track last event ID per thread (for reconnection)
-		if (sseEvent.lastEventId) {
-			lastEventIdByThread.value[currentThreadId.value] = Number(sseEvent.lastEventId);
-		}
-		try {
-			const parsed = instanceAiEventSchema.safeParse(JSON.parse(String(sseEvent.data)));
-			if (!parsed.success) {
-				console.warn('[InstanceAI] Invalid SSE event, skipping:', parsed.error.message);
-				return;
-			}
-			// Push to debug event buffer (capped)
-			debugEvents.value.push({
-				timestamp: new Date().toISOString(),
-				event: parsed.data,
-			});
-			if (debugEvents.value.length > MAX_DEBUG_EVENTS) {
-				debugEvents.value.splice(0, debugEvents.value.length - MAX_DEBUG_EVENTS);
-			}
-			const previousRunId = activeRunId.value;
-			activeRunId.value = reduceEvent(
-				{
-					messages: messages.value,
-					activeRunId: activeRunId.value,
-					runStateByGroupId,
-					groupIdByRunId,
-				},
-				parsed.data,
-			);
-			if (parsed.data.type === 'tasks-update') {
-				latestTasks.value = parsed.data.payload.tasks;
-			}
-			if (parsed.data.type === 'thread-title-updated') {
-				const thread = threads.value.find((t) => t.id === currentThreadId.value);
-				if (thread) {
-					thread.title = parsed.data.payload.title;
-				}
-			}
-			// Force Vue reactivity when streaming state changes (run-start can
-			// re-activate a completed message for auto-follow-up runs, run-finish
-			// marks it done). In-place mutation of message properties may not
-			// reliably trigger deep watchers in all scenarios (e.g. background tabs).
-			if (parsed.data.type === 'run-start' || parsed.data.type === 'run-finish') {
-				triggerRef(messages);
-			}
-			// When a run finishes, refresh thread list to pick up Mastra-generated titles
-			if (previousRunId && activeRunId.value === null) {
-				void loadThreads();
-			}
-		} catch {
-			// Malformed JSON — skip
-		}
-	}
-
-	/**
-	 * Handle run-sync control frames — full state snapshot from the backend.
-	 * Replaces the agent tree AND rebuilds the group-level run state so
-	 * subsequent live events have state to reduce into. Also restores the
-	 * runId → groupId mapping so late events from any run in the group route
-	 * to the correct message.
-	 */
-	function onRunSync(sseEvent: MessageEvent): void {
-		try {
-			const data = JSON.parse(String(sseEvent.data)) as {
-				runId: string;
-				messageGroupId?: string;
-				runIds?: string[];
-				agentTree: InstanceAiAgentNode;
-				status: string;
-			};
-
-			const groupId = data.messageGroupId ?? data.runId;
-			if (!isSafeObjectKey(data.runId) || !isSafeObjectKey(groupId)) return;
-			const rebuiltRunState = rebuildRunStateFromTree(data.agentTree);
-			if (!rebuiltRunState) return;
-
-			// Find the message to update — by messageGroupId first, then runId
-			let msg: InstanceAiMessage | undefined;
-			if (data.messageGroupId) {
-				msg = messages.value.find(
-					(m) => m.messageGroupId === data.messageGroupId && m.role === 'assistant',
-				);
-			}
-			if (!msg) {
-				msg = messages.value.find((m) => m.runId === data.runId);
-			}
-
-			if (!msg) {
-				messages.value.push({
-					id: groupId,
-					runId: data.runId,
-					messageGroupId: groupId,
-					runIds: data.runIds,
-					role: 'assistant',
-					createdAt: new Date().toISOString(),
-					content: data.agentTree.textContent,
-					reasoning: data.agentTree.reasoning,
-					isStreaming: false,
-					agentTree: data.agentTree,
-				});
-				msg = messages.value[messages.value.length - 1];
-			}
-
-			msg.agentTree = data.agentTree;
-			msg.runId = data.runId;
-			msg.messageGroupId = groupId;
-			msg.runIds = data.runIds;
-			msg.content = data.agentTree.textContent;
-			msg.reasoning = data.agentTree.reasoning;
-			latestTasks.value = findLatestTasksFromMessages(messages.value);
-			const isOrchestratorLive = data.status === 'active' || data.status === 'suspended';
-			// For background-only groups, the orchestrator already finished.
-			// Set isStreaming = false so InstanceAiMessage.vue's hasActiveBackgroundTasks
-			// computed correctly detects active children and shows the indicator.
-			msg.isStreaming = isOrchestratorLive;
-			// Only the active/suspended orchestrator run should claim activeRunId.
-			// Background-only groups update their message but don't override the
-			// global active run, which controls input state and cancel buttons.
-			if (isOrchestratorLive) {
-				activeRunId.value = data.runId;
-			}
-
-			// Rebuild normalized run state keyed by groupId
-			runStateByGroupId[groupId] = rebuiltRunState;
-
-			// Restore runId → groupId mappings for ALL runs in the group.
-			// This ensures late events from older follow-up runs still route
-			// to this message after reconnect.
-			if (data.runIds) {
-				for (const rid of data.runIds) {
-					if (!isSafeObjectKey(rid)) continue;
-					groupIdByRunId[rid] = groupId;
-				}
-			}
-			// Always register the current runId
-			groupIdByRunId[data.runId] = groupId;
-		} catch {
-			// Malformed run-sync — skip
-		}
-	}
-
-	function connectSSE(threadId?: string): void {
-		const tid = threadId ?? currentThreadId.value;
-		if (eventSource) {
-			closeSSE();
-		}
-		sseState.value = 'connecting';
-
-		// Increment generation — stale EventSource handlers will check this
-		const gen = ++sseGeneration;
-		const capturedThreadId = tid;
-
-		const lastEventId = lastEventIdByThread.value[tid];
-		const baseUrl = rootStore.restApiContext.baseUrl;
-		const url =
-			lastEventId !== null && lastEventId !== undefined
-				? `${baseUrl}/instance-ai/events/${tid}?lastEventId=${String(lastEventId)}`
-				: `${baseUrl}/instance-ai/events/${tid}`;
-
-		eventSource = new EventSource(url, { withCredentials: true });
-
-		eventSource.onopen = () => {
-			if (gen !== sseGeneration) return;
-			sseState.value = 'connected';
-		};
-
-		eventSource.onmessage = (ev: MessageEvent) => {
-			// Guard: discard events from stale connections or wrong threads
-			if (gen !== sseGeneration || capturedThreadId !== currentThreadId.value) {
-				return;
-			}
-			onSSEMessage(ev);
-		};
-
-		// Listen for run-sync control frames (named SSE event, no id: field)
-		eventSource.addEventListener('run-sync', (ev: MessageEvent) => {
-			if (gen !== sseGeneration || capturedThreadId !== currentThreadId.value) return;
-			onRunSync(ev);
-		});
-
-		eventSource.onerror = () => {
-			if (gen !== sseGeneration) return;
-			// EventSource auto-reconnects. Mark as reconnecting if not already closed.
-			if (eventSource?.readyState === EventSource.CONNECTING) {
-				sseState.value = 'reconnecting';
-			} else if (eventSource?.readyState === EventSource.CLOSED) {
-				sseState.value = 'disconnected';
-				eventSource = null;
-			}
+	function toThreadSummary(thread: InstanceAiThreadInfo): InstanceAiThreadSummary {
+		return {
+			id: thread.id,
+			title: thread.title || NEW_CONVERSATION_TITLE,
+			createdAt: thread.createdAt,
+			updatedAt: thread.updatedAt,
+			metadata: thread.metadata ?? undefined,
 		};
 	}
 
-	function closeSSE(): void {
-		if (eventSource) {
-			eventSource.close();
-			eventSource = null;
-		}
-		sseState.value = 'disconnected';
+	/** Every local copy of a thread; the sidebar list and the history page can both hold one. */
+	function localThreadEntries(threadId: string): InstanceAiThreadSummary[] {
+		return [...threads.value, ...threadHistory.value.threads].filter((t) => t.id === threadId);
 	}
 
-	function resetThreadRuntimeState(nextHydratingThreadId: string | null): void {
-		hydratingThreadId.value = nextHydratingThreadId;
-		messages.value = [];
-		latestTasks.value = null;
-		activeRunId.value = null;
-		debugEvents.value = [];
-		resetFeedback();
-		resolvedConfirmationIds.value = new Map();
-		runStateByGroupId = {};
-		groupIdByRunId = {};
-		activeHydrationRequestToken = null;
-	}
-
-	function switchThread(threadId: string): void {
-		// 1. Close current SSE connection
-		closeSSE();
-		// 2. Clear store state
-		resetThreadRuntimeState(threadId);
-		// 3. Switch thread
-		currentThreadId.value = threadId;
-		// 4. Load rich historical messages first, then connect SSE after.
-		//    loadHistoricalMessages sets the SSE cursor (nextEventId) so SSE
-		//    only receives events that arrived AFTER the historical snapshot.
-		const hydrationRequestToken = ++hydrationRequestSequence;
-		activeHydrationRequestToken = hydrationRequestToken;
-		delete lastEventIdByThread.value[threadId];
-		void loadHistoricalMessages(threadId, hydrationRequestToken).then((hydrationStatus) => {
-			if (hydrationStatus !== 'stale' && activeHydrationRequestToken === hydrationRequestToken) {
-				activeHydrationRequestToken = null;
-			}
-			if (hydrationStatus !== 'applied') return;
-			void loadThreadStatus(threadId);
-			connectSSE(threadId);
-		});
-	}
-
-	// --- Actions ---
-
-	function newThread(): string {
-		const newThreadId = uuidv4();
-		closeSSE();
-		resetThreadRuntimeState(null);
-		currentThreadId.value = newThreadId;
-
-		threads.value.unshift({
-			id: newThreadId,
-			title: NEW_CONVERSATION_TITLE,
-			createdAt: new Date().toISOString(),
-		});
-
-		connectSSE(newThreadId);
-		return newThreadId;
-	}
-
-	async function deleteThread(
-		threadId: string,
-	): Promise<{ currentThreadId: string; wasActive: boolean }> {
-		const wasActive = threadId === currentThreadId.value;
-
-		// Only call API for threads that have been persisted to the backend
-		if (persistedThreadIds.has(threadId)) {
-			try {
-				await deleteThreadApi(rootStore.restApiContext, threadId);
-				persistedThreadIds.delete(threadId);
-			} catch {
-				toast.showError(new Error('Failed to delete thread. Try again.'), 'Delete failed');
-				return { currentThreadId: currentThreadId.value, wasActive };
-			}
-		}
-
-		// Remove thread from list
-		threads.value = threads.value.filter((t) => t.id !== threadId);
-
-		// Clean up event cursor
-		delete lastEventIdByThread.value[threadId];
-
-		if (wasActive) {
-			if (threads.value.length > 0) {
-				// Switch to first remaining thread
-				switchThread(threads.value[0].id);
-			} else {
-				// No threads left — create a new one
-				const freshId = uuidv4();
-				closeSSE();
-				resetThreadRuntimeState(null);
-				currentThreadId.value = freshId;
-				threads.value.push({
-					id: freshId,
-					title: NEW_CONVERSATION_TITLE,
-					createdAt: new Date().toISOString(),
-				});
-				connectSSE(freshId);
-			}
-		}
-
-		return { currentThreadId: currentThreadId.value, wasActive };
-	}
-
-	async function loadThreads(): Promise<void> {
+	async function loadThreads(): Promise<boolean> {
 		try {
 			const result = await fetchThreadsApi(rootStore.restApiContext);
 			for (const thread of result.threads) {
@@ -606,388 +208,146 @@ export const useInstanceAiStore = defineStore('instanceAi', () => {
 			// (e.g. a freshly created thread that hasn't been persisted yet)
 			const serverIds = new Set(result.threads.map((t) => t.id));
 			const localOnly = threads.value.filter((t) => !serverIds.has(t.id));
-			const serverThreads: InstanceAiThreadSummary[] = result.threads.map((t) => ({
-				id: t.id,
-				title: t.title || NEW_CONVERSATION_TITLE,
-				createdAt: t.createdAt,
-				metadata: t.metadata ?? undefined,
-			}));
-			threads.value = [...localOnly, ...serverThreads];
-		} catch {
-			// Silently ignore — threads will remain client-side only
-		}
-	}
-
-	async function syncThread(threadId: string): Promise<void> {
-		if (persistedThreadIds.has(threadId)) return;
-
-		const result = await ensureThread(rootStore.restApiContext, threadId);
-		persistedThreadIds.add(result.thread.id);
-
-		const existingThread = threads.value.find((thread) => thread.id === threadId);
-		if (existingThread) {
-			existingThread.createdAt = result.thread.createdAt;
-			existingThread.title = result.thread.title || existingThread.title;
-			return;
-		}
-
-		threads.value.unshift({
-			id: result.thread.id,
-			title: result.thread.title || NEW_CONVERSATION_TITLE,
-			createdAt: result.thread.createdAt,
-		});
-	}
-
-	async function loadHistoricalMessages(
-		threadId: string,
-		hydrationRequestToken?: number,
-	): Promise<HistoricalHydrationStatus> {
-		hydratingThreadId.value = threadId;
-		const effectiveHydrationRequestToken = hydrationRequestToken ?? ++hydrationRequestSequence;
-		if (hydrationRequestToken === undefined) {
-			activeHydrationRequestToken = effectiveHydrationRequestToken;
-		}
-		const isCurrentHydrationRequest = () =>
-			activeHydrationRequestToken === effectiveHydrationRequestToken;
-
-		try {
-			const result = await fetchThreadMessagesApi(rootStore.restApiContext, threadId, 100);
-			if (!isCurrentHydrationRequest()) return 'stale';
-			// Only hydrate if we're still on the same thread and SSE hasn't delivered messages
-			if (currentThreadId.value !== threadId || messages.value.length > 0) return 'skipped';
-			// Backend now returns InstanceAiMessage[] directly — no conversion needed
-			if (result.messages.length > 0) {
-				messages.value = result.messages;
-				latestTasks.value = findLatestTasksFromMessages(result.messages);
-
-				// Rebuild reducer routing state from historical messages so SSE
-				// replay events (which arrive before run-sync) can reduce into
-				// existing run states instead of being dropped or creating phantoms.
-				for (const msg of result.messages) {
-					if (msg.role !== 'assistant' || !msg.agentTree) continue;
-					const groupId = msg.messageGroupId ?? msg.runId;
-					if (!groupId || !isSafeObjectKey(groupId)) continue;
-					const rebuiltRunState = rebuildRunStateFromTree(msg.agentTree);
-					if (!rebuiltRunState) continue;
-					runStateByGroupId[groupId] = rebuiltRunState;
-					// Register ALL runIds in the group — not just the latest one.
-					// This ensures late events from older runs in a merged A→B→C
-					// chain still route to the correct message after restore.
-					if (msg.runIds) {
-						for (const rid of msg.runIds) {
-							if (!isSafeObjectKey(rid)) continue;
-							groupIdByRunId[rid] = groupId;
-						}
-					}
-					if (msg.runId && isSafeObjectKey(msg.runId)) groupIdByRunId[msg.runId] = groupId;
-				}
-			}
-			// Set SSE cursor to skip past events already covered by historical messages.
-			// This prevents duplicate messages when SSE replays in-memory events.
-			if (result.nextEventId !== null && result.nextEventId !== undefined) {
-				lastEventIdByThread.value[threadId] = result.nextEventId - 1;
-			}
-			return 'applied';
-		} catch {
-			// Silently ignore — messages will appear if SSE delivers them
-			return isCurrentHydrationRequest() ? 'applied' : 'stale';
-		} finally {
-			if (isCurrentHydrationRequest() && hydratingThreadId.value === threadId) {
-				hydratingThreadId.value = null;
-			}
-		}
-	}
-
-	async function loadThreadStatus(threadId: string): Promise<void> {
-		try {
-			const status = await fetchThreadStatusApi(rootStore.restApiContext, threadId);
-			if (currentThreadId.value !== threadId) return;
-
-			const hasActivity =
-				status.hasActiveRun || status.isSuspended || status.backgroundTasks.length > 0;
-			if (!hasActivity) return;
-
-			const lastAssistant = [...messages.value].reverse().find((m) => m.role === 'assistant');
-			if (!lastAssistant) return;
-
-			if (status.hasActiveRun || status.isSuspended) {
-				activeRunId.value = lastAssistant.runId ?? null;
-				lastAssistant.isStreaming = status.hasActiveRun;
-			}
-
-			// Background task visibility is handled by the run-sync control frame
-			// that is sent on SSE connect. No need to inject children directly here.
-		} catch {
-			// Silently ignore
-		}
-	}
-
-	async function sendMessage(
-		message: string,
-		attachments?: InstanceAiAttachment[],
-		pushRef?: string,
-	): Promise<void> {
-		// Clear amend context on new message
-		amendContext.value = null;
-		pendingMessageCount.value += 1;
-
-		// Ensure SSE is connected before sending. Vue's Suspense boundary can
-		// unmount → remount InstanceAiView during layout transitions, which closes
-		// the SSE connection via onUnmounted. If the user sends a message before
-		// the remounted component's async connectSSE() fires, the response events
-		// would be lost. Re-establish the connection here as a safety net.
-		if (sseState.value === 'disconnected') {
-			connectSSE();
-		}
-		const userMessage: InstanceAiMessage = {
-			id: uuidv4(),
-			role: 'user',
-			createdAt: new Date().toISOString(),
-			content: message,
-			reasoning: '',
-			isStreaming: false,
-			attachments: attachments && attachments.length > 0 ? attachments : undefined,
-		};
-		messages.value.push(userMessage);
-
-		try {
-			await syncThread(currentThreadId.value);
-		} catch {
-			const idx = messages.value.indexOf(userMessage);
-			if (idx !== -1) {
-				messages.value.splice(idx, 1);
-			}
-			toast.showError(new Error('Failed to start a new thread. Try again.'), 'Send failed');
-			pendingMessageCount.value = Math.max(0, pendingMessageCount.value - 1);
-			return;
-		}
-
-		const isFirstMessage = messages.value.filter((m) => m.role === 'user').length === 1;
-		const sentProps = {
-			thread_id: currentThreadId.value,
-			instance_id: rootStore.instanceId,
-			is_first_message: isFirstMessage,
-		};
-		telemetry.track('User sent builder message', sentProps);
-
-		// 2. POST to backend — returns { runId }
-		// Thread title is generated by Mastra asynchronously after the agent responds.
-		// activeRunId is set by the run-start event arriving over SSE, NOT by the POST response.
-		try {
-			await postMessage(
-				rootStore.restApiContext,
-				currentThreadId.value,
-				message,
-				researchMode.value || undefined,
-				attachments,
-				Intl.DateTimeFormat().resolvedOptions().timeZone,
-				pushRef,
-			);
-		} catch (error: unknown) {
-			const status = error instanceof ResponseError ? error.httpStatusCode : undefined;
-			if (status === 409) {
-				toast.showError(
-					new Error('Agent is still working on your previous message'),
-					'Cannot send message',
-				);
-			} else if (status === 400) {
-				toast.showError(new Error('Message cannot be empty'), 'Invalid message');
-			} else {
-				toast.showError(new Error('Failed to send message. Try again.'), 'Send failed');
-			}
-			// Remove the optimistic user message on failure
-			const idx = messages.value.indexOf(userMessage);
-			if (idx !== -1) {
-				messages.value.splice(idx, 1);
-			}
-		} finally {
-			pendingMessageCount.value = Math.max(0, pendingMessageCount.value - 1);
-		}
-	}
-
-	async function cancelRun(): Promise<void> {
-		if (!activeRunId.value) return;
-		try {
-			await postCancel(rootStore.restApiContext, currentThreadId.value);
-			// Don't clear activeRunId here — wait for the run-finish event via SSE
-		} catch {
-			toast.showError(new Error('Failed to cancel. Try again.'), 'Cancel failed');
-		}
-	}
-
-	/** Cancel a specific background task. */
-	async function cancelBackgroundTask(taskId: string): Promise<void> {
-		try {
-			await postCancelTask(rootStore.restApiContext, currentThreadId.value, taskId);
-		} catch {
-			toast.showError(new Error('Failed to cancel task. Try again.'), 'Cancel failed');
-		}
-	}
-
-	/** Stop an agent and prime the input for amend instructions. */
-	function amendAgent(agentId: string, role: string, taskId?: string): void {
-		if (taskId) {
-			void cancelBackgroundTask(taskId);
-		} else {
-			void cancelRun();
-		}
-		amendContext.value = { agentId, role };
-	}
-
-	async function confirmAction(
-		requestId: string,
-		approved: boolean,
-		credentialId?: string,
-		credentials?: Record<string, string>,
-		autoSetup?: { credentialType: string },
-		userInput?: string,
-		domainAccessAction?: string,
-		setupWorkflowData?: {
-			action?: 'apply' | 'test-trigger';
-			nodeCredentials?: Record<string, Record<string, string>>;
-			nodeParameters?: Record<string, Record<string, unknown>>;
-			testTriggerNode?: string;
-		},
-		answers?: InstanceAiConfirmResponse['answers'],
-		resourceDecision?: string,
-	): Promise<boolean> {
-		try {
-			await postConfirmation(
-				rootStore.restApiContext,
-				requestId,
-				approved,
-				credentialId,
-				credentials,
-				autoSetup,
-				userInput,
-				domainAccessAction,
-				setupWorkflowData,
-				answers,
-				resourceDecision,
-			);
+			threads.value = [...localOnly, ...result.threads.map(toThreadSummary)];
 			return true;
 		} catch {
-			toast.showError(new Error('Failed to send confirmation. Try again.'), 'Confirmation failed');
+			// Silently ignore — threads will remain client-side only
 			return false;
 		}
 	}
 
-	async function confirmResourceDecision(requestId: string, decision: string): Promise<void> {
-		resolveConfirmation(requestId, 'approved');
-		await confirmAction(
-			requestId,
-			true,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			decision,
-		);
+	/** Fetch a thread the sidebar list does not hold, e.g. an older one opened by URL. */
+	async function loadThread(threadId: string): Promise<void> {
+		const { thread } = await fetchThread(rootStore.restApiContext, threadId);
+		persistedThreadIds.add(thread.id);
+		if (!threads.value.some((t) => t.id === thread.id)) {
+			threads.value.push(toThreadSummary(thread));
+		}
 	}
 
-	function toggleResearchMode(): void {
-		researchMode.value = !researchMode.value;
-		localStorage.setItem('instanceAi.researchMode', String(researchMode.value));
+	let threadHistoryCursor: string | undefined;
+	// Bumped by every reset so a response still in flight for the old state is dropped.
+	let threadHistoryRequest = 0;
+
+	function resetThreadHistory(search = ''): void {
+		threadHistoryRequest++;
+		threadHistoryCursor = undefined;
+		threadHistory.value = emptyThreadHistory(search);
 	}
 
-	function copyFullTrace(): string {
-		// Collapse consecutive text-delta / reasoning-delta events from the same agent
-		// into single entries so traces are compact and readable.
-		const collapsed: Array<{ timestamp: string; event: InstanceAiEvent }> = [];
-		let pendingText: { timestamp: string; event: InstanceAiEvent; buffer: string } | null = null;
-		let pendingReasoning: { timestamp: string; event: InstanceAiEvent; buffer: string } | null =
-			null;
+	async function loadThreadHistoryPage(): Promise<void> {
+		const history = threadHistory.value;
+		if (history.loading || !history.hasMore) return;
+		const request = threadHistoryRequest;
+		history.loading = true;
+		history.error = false;
+		let result: InstanceAiThreadHistoryResponse | undefined;
+		try {
+			result = await fetchThreadHistory(rootStore.restApiContext, {
+				limit: THREAD_HISTORY_PAGE_SIZE,
+				search: history.search || undefined,
+				cursor: threadHistoryCursor,
+			});
+		} catch {
+			// Reported through `error` below
+		}
+		if (request !== threadHistoryRequest) return;
+		history.loading = false;
+		if (!result) {
+			history.error = true;
+			return;
+		}
+		for (const thread of result.threads) {
+			persistedThreadIds.add(thread.id);
+		}
+		// A thread that gets activity while paging moves onto a later page; keep each row once.
+		const known = new Set(history.threads.map((t) => t.id));
+		history.threads.push(...result.threads.filter((t) => !known.has(t.id)).map(toThreadSummary));
+		threadHistoryCursor = result.nextCursor ?? undefined;
+		history.hasMore = result.hasMore;
+	}
 
-		for (const entry of debugEvents.value) {
-			const { event } = entry;
+	async function syncThread(
+		threadId: string,
+		projectId: string,
+		launch: InstanceAiThreadLaunchInput,
+	): Promise<void> {
+		if (persistedThreadIds.has(threadId)) return;
 
-			if (event.type === 'text-delta') {
-				if (pendingText && pendingText.event.agentId === event.agentId) {
-					pendingText.buffer += event.payload.text;
-				} else {
-					if (pendingText) {
-						(pendingText.event as InstanceAiEvent & { type: 'text-delta' }).payload.text =
-							pendingText.buffer;
-						collapsed.push(pendingText);
-					}
-					pendingText = {
-						timestamp: entry.timestamp,
-						event: { ...event, payload: { ...event.payload } },
-						buffer: event.payload.text,
-					};
+		const result = await ensureThread(rootStore.restApiContext, threadId, projectId, launch);
+		persistedThreadIds.add(result.thread.id);
+
+		const templateId = launch.sourceContext?.templateId;
+		telemetry.track('User launched Instance AI thread', {
+			thread_id: result.thread.id,
+			instance_id: rootStore.instanceId,
+			source: launch.source,
+			origin: launch.origin ?? 'internal',
+			...(typeof templateId === 'string' || typeof templateId === 'number'
+				? { template_id: templateId }
+				: {}),
+		});
+
+		const existingThread = threads.value.find((thread) => thread.id === threadId);
+		if (existingThread) {
+			existingThread.createdAt = result.thread.createdAt;
+			existingThread.updatedAt = result.thread.updatedAt;
+			existingThread.title = result.thread.title || existingThread.title;
+			existingThread.metadata = result.thread.metadata ?? existingThread.metadata;
+			return;
+		}
+
+		threads.value.unshift(toThreadSummary(result.thread));
+	}
+
+	/**
+	 * Delete a thread. Returns false if the backend refused, in which case the thread is
+	 * left in the list because it genuinely still exists.
+	 *
+	 * `silent` suppresses the failure toast, for callers cleaning up after some other
+	 * failure they have already reported -- a second, unrelated "delete failed" on top of
+	 * the real error only confuses. Those callers should handle `false` themselves.
+	 */
+	async function deleteThread(
+		threadId: string,
+		options: { silent?: boolean } = {},
+	): Promise<boolean> {
+		// Only call API for threads that have been persisted to the backend
+		if (persistedThreadIds.has(threadId)) {
+			try {
+				await deleteThreadApi(rootStore.restApiContext, threadId);
+				persistedThreadIds.delete(threadId);
+			} catch {
+				if (!options.silent) {
+					toast.showError(new Error('Failed to delete thread. Try again.'), 'Delete failed');
 				}
-				continue;
+				return false;
 			}
-
-			if (event.type === 'reasoning-delta') {
-				if (pendingReasoning && pendingReasoning.event.agentId === event.agentId) {
-					pendingReasoning.buffer += event.payload.text;
-				} else {
-					if (pendingReasoning) {
-						(pendingReasoning.event as InstanceAiEvent & { type: 'reasoning-delta' }).payload.text =
-							pendingReasoning.buffer;
-						collapsed.push(pendingReasoning);
-					}
-					pendingReasoning = {
-						timestamp: entry.timestamp,
-						event: { ...event, payload: { ...event.payload } },
-						buffer: event.payload.text,
-					};
-				}
-				continue;
-			}
-
-			// Non-delta event — flush any pending buffers
-			if (pendingText) {
-				(pendingText.event as InstanceAiEvent & { type: 'text-delta' }).payload.text =
-					pendingText.buffer;
-				collapsed.push(pendingText);
-				pendingText = null;
-			}
-			if (pendingReasoning) {
-				(pendingReasoning.event as InstanceAiEvent & { type: 'reasoning-delta' }).payload.text =
-					pendingReasoning.buffer;
-				collapsed.push(pendingReasoning);
-				pendingReasoning = null;
-			}
-			collapsed.push(entry);
-		}
-		// Flush remaining
-		if (pendingText) {
-			(pendingText.event as InstanceAiEvent & { type: 'text-delta' }).payload.text =
-				pendingText.buffer;
-			collapsed.push(pendingText);
-		}
-		if (pendingReasoning) {
-			(pendingReasoning.event as InstanceAiEvent & { type: 'reasoning-delta' }).payload.text =
-				pendingReasoning.buffer;
-			collapsed.push(pendingReasoning);
 		}
 
-		return JSON.stringify(
-			{
-				threadId: currentThreadId.value,
-				exportedAt: new Date().toISOString(),
-				messages: messages.value,
-				events: collapsed,
-			},
-			null,
-			2,
-		);
+		// Remove thread from list
+		threads.value = threads.value.filter((t) => t.id !== threadId);
+		threadHistory.value.threads = threadHistory.value.threads.filter((t) => t.id !== threadId);
+		disposeRuntime(threadId);
+
+		return true;
 	}
 
 	async function renameThread(threadId: string, title: string): Promise<void> {
-		const thread = threads.value.find((t) => t.id === threadId);
-		if (thread) {
-			thread.title = title;
-		}
+		const entries = localThreadEntries(threadId);
+		const previousTitle = entries[0]?.title;
+		for (const entry of entries) entry.title = title;
 
 		// Only call API for threads that have been persisted to the backend
-		if (persistedThreadIds.has(threadId)) {
+		if (!persistedThreadIds.has(threadId)) return;
+		try {
 			await renameThreadApi(rootStore.restApiContext, threadId, title);
+		} catch (error) {
+			// Roll back the optimistic title so the list does not keep a name the server rejected
+			if (previousTitle !== undefined) {
+				for (const entry of entries) entry.title = previousTitle;
+			}
+			throw error;
 		}
 	}
 
@@ -995,13 +355,28 @@ export const useInstanceAiStore = defineStore('instanceAi', () => {
 		return threads.value.find((t) => t.id === threadId)?.metadata;
 	}
 
+	/** Reactive per-thread credit total (decimal), or undefined if none recorded yet. */
+	function threadCreditsUsed(threadId: string): number | undefined {
+		const used = threads.value.find((t) => t.id === threadId)?.metadata?.creditsUsed;
+		return typeof used === 'number' ? used : undefined;
+	}
+
+	/**
+	 * Replace a thread's metadata with an authoritative server copy — used after a
+	 * write the server itself made (e.g. persisting a pending agent binds it),
+	 * where a merge would keep locally-known keys the server just removed.
+	 */
+	function setThreadMetadata(threadId: string, metadata: Record<string, unknown> | undefined) {
+		const thread = threads.value.find((t) => t.id === threadId);
+		if (thread) thread.metadata = metadata;
+	}
+
 	async function updateThreadMetadata(
 		threadId: string,
 		metadata: Record<string, unknown>,
 	): Promise<void> {
-		// Optimistic update
-		const thread = threads.value.find((t) => t.id === threadId);
-		if (thread) {
+		// Optimistic update, on every local copy
+		for (const thread of localThreadEntries(threadId)) {
 			thread.metadata = { ...thread.metadata, ...metadata };
 		}
 
@@ -1010,63 +385,133 @@ export const useInstanceAiStore = defineStore('instanceAi', () => {
 		}
 	}
 
+	const pendingComposerAttachments = ref<InstanceAiAttachment[]>([]);
+
+	function stageNodeSets(workflowId: string, newSets: InstanceAiNodesAttachment['sets']): void {
+		const existing = pendingComposerAttachments.value.find(
+			(a): a is InstanceAiNodesAttachment => a.type === 'nodes' && a.workflowId === workflowId,
+		);
+		if (existing) {
+			existing.sets = mergeNodeSets(existing.sets, newSets);
+		} else {
+			pendingComposerAttachments.value = [
+				...pendingComposerAttachments.value,
+				{ type: 'nodes', workflowId, sets: newSets },
+			];
+		}
+	}
+
+	function consumePendingAttachments(): InstanceAiAttachment[] {
+		const staged = pendingComposerAttachments.value;
+		pendingComposerAttachments.value = [];
+		return staged;
+	}
+
+	const composerFocusRequest = ref(0);
+	function requestComposerFocus(): void {
+		composerFocusRequest.value++;
+	}
+
+	const clearCanvasSelectionRequest = ref(0);
+	function requestClearCanvasSelection(): void {
+		clearCanvasSelectionRequest.value++;
+	}
+
+	// ponytail: the exits of this session, so a thread-list refresh that races the metadata write
+	// (`onRunFinish` reloads the list on the same event as the `run_failed` exit) cannot hide the
+	// chrome again.
+	const leftOnboardingThreadIds = new Set<string>();
+	/** An onboarding thread hides the host chrome (chat header, sidebar, artifacts) until the user leaves it. */
+	function isOnboardingChromeHidden(threadId: string): boolean {
+		return (
+			!leftOnboardingThreadIds.has(threadId) &&
+			localThreadEntries(threadId).some(
+				(t) => t.metadata?.source === 'onboarding' && !t.metadata.onboardingLeft,
+			)
+		);
+	}
+	/** The exit lives in thread metadata, so a reload keeps it. Idempotent. */
+	function leaveOnboarding(
+		threadId: string,
+		outcome: OnboardingExitOutcome,
+		leaveReason?: string,
+	): void {
+		if (!isOnboardingChromeHidden(threadId)) return;
+		leftOnboardingThreadIds.add(threadId);
+		updateThreadMetadata(threadId, { onboardingLeft: true }).catch((error: unknown) => {
+			toast.showError(error, i18n.baseText('generic.error'));
+		});
+		telemetry.track(TELEMETRY_EVENT.INSTANCE_AI.AI_ASSISTANT_ONBOARDING_ENDED, {
+			thread_id: threadId,
+			instance_id: rootStore.instanceId,
+			outcome,
+			leave_reason: leaveReason ?? null,
+		});
+	}
+
 	return {
-		// State
-		currentThreadId,
+		// Instance-level state
 		threads,
-		sseState,
-		lastEventIdByThread,
-		activeRunId,
-		messages,
-		debugEvents,
 		debugMode,
-		researchMode,
-		amendContext,
-		feedbackByResponseId,
 		creditsQuota,
 		creditsClaimed,
-		resolvedConfirmationIds,
+
 		// Computed
-		isStreaming,
-		isSendingMessage,
-		hasMessages,
-		isHydratingThread,
-		isGatewayConnected,
-		gatewayDirectory,
-		activeDirectory,
-		contextualSuggestion,
-		currentTasks,
-		resourceRegistry,
-		rateableResponseId,
 		creditsRemaining,
 		creditsPercentageRemaining,
 		isLowCredits,
-		pendingConfirmations,
-		// Actions
-		newThread,
+		isOutOfCredits,
+
+		// Thread-list actions
 		deleteThread,
 		renameThread,
 		getThreadMetadata,
+		threadCreditsUsed,
 		updateThreadMetadata,
-		switchThread,
+		setThreadMetadata,
 		loadThreads,
-		loadHistoricalMessages,
-		loadThreadStatus,
-		sendMessage,
-		cancelRun,
-		cancelBackgroundTask,
-		amendAgent,
-		toggleResearchMode,
-		confirmAction,
-		confirmResourceDecision,
-		resolveConfirmation,
-		findToolCallByRequestId,
-		copyFullTrace,
-		submitFeedback,
+		loadThread,
+		threadHistory,
+		resetThreadHistory,
+		loadThreadHistoryPage,
 		fetchCredits,
-		startCreditsPushListener,
-		stopCreditsPushListener,
-		connectSSE,
-		closeSSE,
+		handleCreditsPush,
+		getOrCreateRuntime,
+		getRuntime,
+		disposeRuntime,
+		syncThread,
+		pendingComposerAttachments,
+		stageNodeSets,
+		consumePendingAttachments,
+		composerFocusRequest,
+		requestComposerFocus,
+		clearCanvasSelectionRequest,
+		isOnboardingChromeHidden,
+		leaveOnboarding,
+		requestClearCanvasSelection,
 	};
 });
+
+const ThreadKey: InjectionKey<ThreadRuntime> = Symbol('instanceAiThread');
+
+export function provideThread(thread: ThreadRuntime | string): ThreadRuntime {
+	if (typeof thread === 'string') {
+		const runtime = useInstanceAiStore().getOrCreateRuntime(thread);
+		provide(ThreadKey, runtime);
+		return runtime;
+	}
+	provide(ThreadKey, thread);
+	return thread;
+}
+
+export function useThread(threadId?: string): ThreadRuntime {
+	if (threadId) {
+		return useInstanceAiStore().getOrCreateRuntime(threadId);
+	}
+
+	const thread = inject(ThreadKey, null);
+	if (!thread) {
+		throw new Error('useThread() requires a provideThread() ancestor.');
+	}
+	return thread;
+}

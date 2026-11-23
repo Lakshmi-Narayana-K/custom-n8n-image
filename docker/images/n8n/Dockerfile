@@ -1,82 +1,104 @@
-ARG NODE_VERSION=24.14.1
+ARG NODE_VERSION=26.13.0
 ARG N8N_VERSION=snapshot
 
-# --- Stage 1: compiled artifact from CI ---
-FROM debian:bookworm-slim AS app-artifact
-WORKDIR /app
-# We rely on compiled.tar.gz (created in CI) to preserve pnpm symlinks
-COPY ./compiled /app/
+# The digest pins node:26.13.0-alpine3.24 for amd64 and arm64. Change the tag and the digest together.
+ARG BUILDER_IMAGE=node:26.13.0-alpine3.24@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216
+ARG RUNTIME_IMAGE=n8nio/base:26.13.0@sha256:f4db5ffdbde188b568911640907797830033f2af2eb06b700a2c252bde960695
 
-# --- Stage 2: launcher download (works on Debian too) ---
-FROM debian:bookworm-slim AS launcher
-ARG TARGETPLATFORM
-ARG LAUNCHER_VERSION
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget && rm -rf /var/lib/apt/lists/*
-RUN set -e; \
-    case "$TARGETPLATFORM" in \
-    "linux/amd64") ARCH_NAME="amd64" ;; \
-    "linux/arm64") ARCH_NAME="arm64" ;; \
-    *) echo "Unsupported platform: $TARGETPLATFORM" && exit 1 ;; \
-    esac; \
-    mkdir /launcher-temp && cd /launcher-temp && \
-    wget -q "https://github.com/n8n-io/task-runner-launcher/releases/download/${LAUNCHER_VERSION}/task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz" && \
-    wget -q "https://github.com/n8n-io/task-runner-launcher/releases/download/${LAUNCHER_VERSION}/task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz.sha256" && \
-    echo "$(cat task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz.sha256)  task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz" > checksum.sha256 && \
-    sha256sum -c checksum.sha256 && \
-    mkdir -p /launcher-bin && \
-    tar xzf task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz -C /launcher-bin && \
-    cd / && rm -rf /launcher-temp
+# The runtime base has no compiler, so this stage supplies one.
+FROM ${BUILDER_IMAGE} AS toolchain
+RUN apk add --no-cache python3 make g++
+ENV NODE_GYP=/usr/local/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js
 
-# --- Stage 3: final runtime (glibc; no sqlite3 build needed) ---
-FROM node:${NODE_VERSION}-slim AS runtime
+# Compile the native modules above `COPY ./compiled`. An application change
+# then does not start a new compile.
+FROM toolchain AS native-builder
+
+# These paths are pnpm symlinks. Copying through them uses the resolved version.
+COPY ./compiled/node_modules/.pnpm/isolated-vm@*/node_modules/isolated-vm /build/isolated-vm
+WORKDIR /build/isolated-vm
+# node-gyp-build reads /etc/alpine-release to find musl. DHI Alpine does not
+# have that file, so the loader uses the glibc prebuild and crashes.
+RUN rm -rf prebuilds && node "$NODE_GYP" rebuild --release -j max
+
+# sqlite3 needs node-addon-api for the headers, and `tar` because a gyp action
+# unpacks the sqlite source. pnpm gives each package its own directory, so the
+# dependencies of `tar` must come too.
+COPY ./compiled/node_modules/.pnpm/sqlite3@*/node_modules/node-addon-api /build/node_modules/node-addon-api
+COPY ./compiled/node_modules/.pnpm/sqlite3@*/node_modules/tar /build/node_modules/tar
+COPY ./compiled/node_modules/.pnpm/tar@*/node_modules/@isaacs/fs-minipass /build/node_modules/@isaacs/fs-minipass
+COPY ./compiled/node_modules/.pnpm/tar@*/node_modules/chownr /build/node_modules/chownr
+COPY ./compiled/node_modules/.pnpm/tar@*/node_modules/minipass /build/node_modules/minipass
+COPY ./compiled/node_modules/.pnpm/tar@*/node_modules/minizlib /build/node_modules/minizlib
+COPY ./compiled/node_modules/.pnpm/tar@*/node_modules/yallist /build/node_modules/yallist
+COPY ./compiled/node_modules/.pnpm/sqlite3@*/node_modules/sqlite3 /build/node_modules/sqlite3
+WORKDIR /build/node_modules/sqlite3
+RUN node "$NODE_GYP" rebuild --release
+
+# Confluent has no prebuild for the Node version that CI installs, so
+# `./compiled` has none. Compile it here against the base image librdkafka.
+# See https://github.com/confluentinc/confluent-kafka-javascript/issues/397
+RUN apk add --no-cache librdkafka-dev
+COPY ./compiled/node_modules/.pnpm/@confluentinc+kafka-javascript@*/node_modules/nan /build/node_modules/nan
+COPY ./compiled/node_modules/.pnpm/@confluentinc+kafka-javascript@*/node_modules/@confluentinc/kafka-javascript /build/node_modules/@confluentinc/kafka-javascript
+WORKDIR /build/node_modules/@confluentinc/kafka-javascript
+RUN BUILD_LIBRDKAFKA=0 node "$NODE_GYP" rebuild --release
+
+# A separate workflow builds the base image. A new base reaches this image only
+# when you change RUNTIME_IMAGE above.
+FROM ${RUNTIME_IMAGE}
 
 ARG N8N_VERSION
 ARG N8N_RELEASE_TYPE=dev
-
-ENV NODE_ENV=production \
-    N8N_RELEASE_TYPE=${N8N_RELEASE_TYPE} \
-    SHELL=/bin/sh
-
-# Base OS deps comparable to n8nio/base
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini tzdata ca-certificates graphicsmagick fontconfig curl jq \
-    libcairo2 libjpeg62-turbo libgif7 libpangocairo-1.0-0 libfreetype6 \
-    && rm -rf /var/lib/apt/lists/*
-
-# full-icu like upstream
-RUN npm i -g full-icu@1.5.0
-ENV NODE_ICU_DATA=/usr/local/lib/node_modules/full-icu
+ARG IMAGE_DESCRIPTION="Workflow Automation Tool"
+ENV NODE_ENV=production
+ENV N8N_RELEASE_TYPE=${N8N_RELEASE_TYPE}
+ENV SHELL=/bin/sh
+# Restrict GraphicsMagick to its commonly used coder set.
+ENV MAGICK_CODER_STABILITY=PRIMARY
 
 WORKDIR /home/node
 
-# App + launcher + entrypoint/config
-COPY --from=app-artifact /app /usr/local/lib/node_modules/n8n
-COPY --from=launcher /launcher-bin/* /usr/local/bin/
-COPY docker/images/n8n/docker-entrypoint.sh /
-COPY docker/images/runners/n8n-task-runners.json /etc/n8n-task-runners.json
+COPY --link ./compiled /usr/local/lib/node_modules/n8n
+COPY --link docker/images/n8n/docker-entrypoint.sh /
 
-# Ensure executables & symlink
-RUN set -eux; \
-    chmod +x /docker-entrypoint.sh; \
-    chmod +x /usr/local/lib/node_modules/n8n/bin/n8n; \
-    ln -sf /usr/local/lib/node_modules/n8n/bin/n8n /usr/local/bin/n8n; \
-    mkdir -p /home/node/.n8n && chown -R node:node /home/node
+# Do not use --link here. These destinations are pnpm symlinks. A --link copy
+# resolves the destination against an empty root. It replaces the symlink with
+# a directory, and the module does not load. The build still succeeds.
+COPY --from=native-builder /build/node_modules/sqlite3/build/Release/node_sqlite3.node \
+     /usr/local/lib/node_modules/n8n/node_modules/sqlite3/build/Release/node_sqlite3.node
+COPY --from=native-builder /build/isolated-vm/build/Release/isolated_vm.node \
+     /usr/local/lib/node_modules/n8n/node_modules/isolated-vm/build/Release/isolated_vm.node
+# kafka-javascript has no top-level symlink, and its pnpm directory name holds
+# a patch hash. The shell must expand this destination.
+COPY --from=native-builder /build/node_modules/@confluentinc/kafka-javascript/build/Release/confluent-kafka-javascript.node /tmp/
 
-# Build tools for native modules
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
+# The base image keeps node in /usr/bin and has no /usr/local/bin.
+RUN set -e; \
+    N8N=/usr/local/lib/node_modules/n8n; \
+    for coder in msl mvg pcd svg url; do \
+        rm -f \
+            /usr/lib/GraphicsMagick-*/modules-*/coders/$coder.la \
+            /usr/lib/GraphicsMagick-*/modules-*/coders/$coder.so; \
+    done; \
+    ! find /usr/lib/GraphicsMagick-* -path '*/coders/*' \
+        \( -name 'msl.*' -o -name 'mvg.*' -o -name 'pcd.*' -o -name 'svg.*' -o -name 'url.*' \) \
+        -print -quit | grep -q .; \
+    kafka=$(echo "$N8N"/node_modules/.pnpm/@confluentinc+kafka-javascript@*/node_modules/@confluentinc/kafka-javascript); \
+    install -D /tmp/confluent-kafka-javascript.node "$kafka/build/Release/confluent-kafka-javascript.node"; \
+    rm -rf "$N8N"/node_modules/.pnpm/isolated-vm@*/node_modules/isolated-vm/prebuilds; \
+    mkdir -p /usr/local/bin; \
+    ln -s "$N8N/bin/n8n" /usr/local/bin/n8n; \
+    mkdir -p /home/node/.n8n; \
+    chown -R node:node /home/node; \
+    rm -rf /root/.npm /tmp/*
 
-# Rebuild sqlite3 binding for the target platform/Node ABI
-RUN cd /usr/local/lib/node_modules/n8n && npm rebuild sqlite3 --update-binary
-
-# Canvas binding (should download prebuilt on glibc)
-RUN cd /usr/local/lib/node_modules/n8n/node_modules/pdfjs-dist && npm install @napi-rs/canvas
-
-EXPOSE 5678
+EXPOSE 5678/tcp
 USER node
 ENTRYPOINT ["tini", "--", "/docker-entrypoint.sh"]
 
 LABEL org.opencontainers.image.title="n8n" \
-    org.opencontainers.image.description="Workflow Automation Tool" \
-    org.opencontainers.image.source="https://github.com/n8n-io/n8n" \
-    org.opencontainers.image.url="https://n8n.io" \
-    org.opencontainers.image.version=${N8N_VERSION}
+      org.opencontainers.image.description="${IMAGE_DESCRIPTION}" \
+      org.opencontainers.image.source="https://github.com/n8n-io/n8n" \
+      org.opencontainers.image.url="https://n8n.io" \
+      org.opencontainers.image.version=${N8N_VERSION}

@@ -20,7 +20,7 @@ vi.mock('@/features/core/dataTable/composables/useDataTableTypes', () => ({
 	}),
 }));
 
-vi.mock('@/app/composables/useDebounce', () => ({
+vi.mock('@n8n/composables/useDebounce', () => ({
 	useDebounce: () => ({
 		debounce:
 			(fn: Function) =>
@@ -132,6 +132,48 @@ describe('AddColumnButton', () => {
 	it('should render the add column button', () => {
 		const { getByTestId } = setup();
 		expect(getByTestId('data-table-add-column-trigger-button')).toBeInTheDocument();
+	});
+
+	describe('disabled tooltip', () => {
+		const hoverTrigger = async (rendered: ReturnType<typeof renderComponent>) => {
+			const trigger = rendered.getByTestId('data-table-add-column-trigger-button');
+			await user.hover(trigger.closest('.add-column-header-component-wrapper') ?? trigger);
+		};
+
+		it('should show the disabled reason when disabled', async () => {
+			const rendered = renderComponent({
+				props: {
+					params: {
+						onAddColumn: addColumnHandler,
+						disabled: () => true,
+						disabledTooltip: () => 'Protected instance',
+					},
+				},
+			});
+
+			await hoverTrigger(rendered);
+
+			expect(await rendered.findByText('Protected instance')).toBeInTheDocument();
+		});
+
+		it('should show the default label when enabled', async () => {
+			const rendered = renderComponent({
+				props: {
+					params: {
+						onAddColumn: addColumnHandler,
+						disabled: () => false,
+						disabledTooltip: () => 'Protected instance',
+					},
+				},
+			});
+
+			await hoverTrigger(rendered);
+
+			await waitFor(() => {
+				expect(rendered.getAllByText('Add column').length).toBeGreaterThan(0);
+			});
+			expect(rendered.queryByText('Protected instance')).not.toBeInTheDocument();
+		});
 	});
 
 	it('should focus name input when popover opens', async () => {

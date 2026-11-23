@@ -5,19 +5,26 @@ import {
 	DeactivateWorkflowDto,
 	ExecutionRedactionQueryDtoSchema,
 	ImportWorkflowFromUrlDto,
-	ROLE,
+	ListCallableSubworkflowsQueryDto,
+	ManualRunDto,
+	TransferPreviewQueryDto,
 	TransferWorkflowBodyDto,
 	UpdateWorkflowDto,
+	type CallableSubworkflowsResponse,
+	type WorkflowPublicationStatus,
+	type WorkflowTransferPreview,
 } from '@n8n/api-types';
 import { Logger } from '@n8n/backend-common';
+import { OutboundHttp, SsrfBlockedIpError } from '@n8n/backend-network';
+import { EventService } from '@n8n/backend-services';
 import { GlobalConfig } from '@n8n/config';
 import {
-	SharedWorkflow,
-	WorkflowEntity,
+	AuthenticatedRequest,
 	ProjectRelationRepository,
 	ProjectRepository,
+	SharedWorkflow,
+	WorkflowEntity,
 	WorkflowRepository,
-	AuthenticatedRequest,
 } from '@n8n/db';
 import {
 	Body,
@@ -32,41 +39,63 @@ import {
 	Query,
 	RestController,
 } from '@n8n/decorators';
-import { PROJECT_OWNER_ROLE_SLUG } from '@n8n/permissions';
-// eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
+import { hasGlobalScope, PROJECT_OWNER_ROLE_SLUG } from '@n8n/permissions';
 import { In, type FindOptionsRelations } from '@n8n/typeorm';
-import axios from 'axios';
+import { ensureError } from '@n8n/utils/errors/ensure-error';
 import express from 'express';
 import { calculateWorkflowChecksum, type IDataObject } from 'n8n-workflow';
-import { CollaborationService } from '../collaboration/collaboration.service';
 
+import { AuthService } from '@/auth/auth.service';
+import { BadRequestError, ForbiddenError, NotFoundError } from '@n8n/errors';
+import { ExecutionService } from '@/executions/execution.service';
+import { IWorkflowResponse } from '@/interfaces';
+import { License } from '@/license';
+import { listQueryMiddleware } from '@/middlewares';
+import { userHasScopes } from '@/permissions.ee/check-access';
+import * as ResponseHelper from '@/response-helper';
+import { NamingService } from '@/services/naming.service';
+import { OwnershipService } from '@/services/ownership.service';
+import { ProjectService } from '@/services/project.service.ee';
+import { UserManagementMailer } from '@/user-management/email';
+import * as utils from '@/utils';
+import { getWorkflowProjectDetailsSafe } from '@/workflows/utils';
+
+import { CollaborationService } from '../collaboration/collaboration.service';
+import { WorkflowPublicationStatusService } from './publication/workflow-publication-status.service';
 import { WorkflowCreationService } from './workflow-creation.service';
+import { createWorkflowEntityFromPayload } from './workflow-entity-mapper';
 import { WorkflowExecutionService } from './workflow-execution.service';
 import { WorkflowFinderService } from './workflow-finder.service';
 import { WorkflowRequest } from './workflow.request';
 import { WorkflowService } from './workflow.service';
 import { EnterpriseWorkflowService } from './workflow.service.ee';
 
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
-import { NotFoundError } from '@/errors/response-errors/not-found.error';
-import { EventService } from '@/events/event.service';
-import { ExecutionService } from '@/executions/execution.service';
-import type { IWorkflowResponse } from '@/interfaces';
-import { License } from '@/license';
-import { listQueryMiddleware } from '@/middlewares';
-import { userHasScopes } from '@/permissions.ee/check-access';
-import * as ResponseHelper from '@/response-helper';
-import { NamingService } from '@/services/naming.service';
-import { ProjectService } from '@/services/project.service.ee';
-import { UserManagementMailer } from '@/user-management/email';
-import * as utils from '@/utils';
-
 @RestController('/workflows')
 export class WorkflowsController {
-	/**
-	 * Parses N8N_SCHEDULE_TRIGGER_LIMIT_INTERVALS to check if any expiry rules exist.
-	 */
+	constructor(
+		private readonly logger: Logger,
+		private readonly authService: AuthService,
+		private readonly enterpriseWorkflowService: EnterpriseWorkflowService,
+		private readonly namingService: NamingService,
+		private readonly workflowRepository: WorkflowRepository,
+		private readonly workflowService: WorkflowService,
+		private readonly workflowCreationService: WorkflowCreationService,
+		private readonly workflowExecutionService: WorkflowExecutionService,
+		private readonly license: License,
+		private readonly mailer: UserManagementMailer,
+		private readonly projectRepository: ProjectRepository,
+		private readonly projectService: ProjectService,
+		private readonly projectRelationRepository: ProjectRelationRepository,
+		private readonly eventService: EventService,
+		private readonly globalConfig: GlobalConfig,
+		private readonly workflowFinderService: WorkflowFinderService,
+		private readonly executionService: ExecutionService,
+		private readonly collaborationService: CollaborationService,
+		private readonly outboundHttp: OutboundHttp,
+		private readonly workflowPublicationStatusService: WorkflowPublicationStatusService,
+		private readonly ownershipService: OwnershipService,
+	) {}
+
 	private hasIntervalExpiryRules(): boolean {
 		const raw = process.env.N8N_SCHEDULE_TRIGGER_LIMIT_INTERVALS ?? '';
 		if (!raw.trim()) return false;
@@ -91,14 +120,12 @@ export class WorkflowsController {
 			Number(process.env.N8N_WORKFLOW_MEMBER_PUBLISH_MAX_COUNT ?? 0) || 0;
 		const hasExpiryRules = this.hasIntervalExpiryRules();
 
-		// Only relevant for global:member, and only when at least one rule is enabled
 		if (!isGlobalMember || (memberPublishMaxCount <= 0 && !hasExpiryRules)) {
 			return undefined;
 		}
 
 		const globalStaticData = staticData?.global as unknown as IDataObject | undefined;
 		const meta = ((globalStaticData?.__nxtwaveWorkflowPublish ??
-			// Backwards compat: earlier versions stored this at the top-level
 			staticData?.__nxtwaveWorkflowPublish) as
 			| { publishCount?: number; publishedAt?: string; expiresAt?: string }
 			| undefined) ?? { publishCount: 0 };
@@ -114,26 +141,6 @@ export class WorkflowsController {
 		};
 	}
 
-	constructor(
-		private readonly logger: Logger,
-		private readonly enterpriseWorkflowService: EnterpriseWorkflowService,
-		private readonly namingService: NamingService,
-		private readonly workflowRepository: WorkflowRepository,
-		private readonly workflowService: WorkflowService,
-		private readonly workflowCreationService: WorkflowCreationService,
-		private readonly workflowExecutionService: WorkflowExecutionService,
-		private readonly license: License,
-		private readonly mailer: UserManagementMailer,
-		private readonly projectRepository: ProjectRepository,
-		private readonly projectService: ProjectService,
-		private readonly projectRelationRepository: ProjectRelationRepository,
-		private readonly eventService: EventService,
-		private readonly globalConfig: GlobalConfig,
-		private readonly workflowFinderService: WorkflowFinderService,
-		private readonly executionService: ExecutionService,
-		private readonly collaborationService: CollaborationService,
-	) {}
-
 	@Post('/')
 	async create(req: AuthenticatedRequest, _res: unknown, @Body body: CreateWorkflowDto) {
 		if (body.id) {
@@ -143,12 +150,7 @@ export class WorkflowsController {
 			}
 		}
 
-		const newWorkflow = new WorkflowEntity();
-
-		// Security: Object.assign is now safe because the DTO validates and filters all input
-		// Only fields defined in CreateWorkflowDto are assigned; internal fields like
-		// triggerCount, versionCounter, isArchived, etc. are never set from user input
-		Object.assign(newWorkflow, body);
+		const newWorkflow = createWorkflowEntityFromPayload(body);
 
 		const savedWorkflow = await this.workflowCreationService.createWorkflow(req.user, newWorkflow, {
 			tagIds: body.tags,
@@ -165,16 +167,13 @@ export class WorkflowsController {
 		delete savedWorkflowWithMetaData.shared;
 
 		const scopes = await this.workflowService.getWorkflowScopes(req.user, savedWorkflow.id);
-		const nxtwavePublish = this.getNxtwavePublishInfo(
-			req.user.role.slug,
-			savedWorkflowWithMetaData.staticData,
-		);
 
 		const checksum = await calculateWorkflowChecksum(savedWorkflow);
 
-		return { ...savedWorkflowWithMetaData, scopes, nxtwavePublish, checksum };
+		return { ...savedWorkflowWithMetaData, scopes, checksum };
 	}
 
+	// oxlint-disable-next-line typescript/no-deprecated
 	@Get('/', { middlewares: listQueryMiddleware })
 	async getAll(req: WorkflowRequest.GetMany, res: express.Response) {
 		try {
@@ -187,9 +186,13 @@ export class WorkflowsController {
 			const { workflows: data, count } = await this.workflowService.getMany(
 				req.user,
 				req.listQueryOptions,
-				!!req.query.includeScopes,
-				userCanListProjectFolders && !!req.query.includeFolders,
-				!!req.query.onlySharedWithMe,
+				{
+					includeScopes: !!req.query.includeScopes,
+					includeFolders: userCanListProjectFolders && !!req.query.includeFolders,
+					onlySharedWithMe: !!req.query.onlySharedWithMe,
+					// The list UI renders the publication badge
+					includePublicationStatus: true,
+				},
 			);
 
 			res.json({ count, data });
@@ -230,13 +233,8 @@ export class WorkflowsController {
 				"You don't have the permissions to create a workflow in this project.",
 			);
 		}
-		let workflowData: IWorkflowResponse | undefined;
-		try {
-			const { data } = await axios.get<IWorkflowResponse>(query.url);
-			workflowData = data;
-		} catch (error) {
-			throw new BadRequestError('The URL does not point to valid JSON file!');
-		}
+
+		const workflowData = await this.fetchWorkflowFromUrl(query.url);
 
 		// Do a very basic check if it is really a n8n-workflow-json
 		if (
@@ -259,6 +257,7 @@ export class WorkflowsController {
 	async getWorkflow(req: WorkflowRequest.Get) {
 		const { workflowId } = req.params;
 
+		// oxlint-disable-next-line typescript/no-deprecated
 		if (this.license.isSharingEnabled()) {
 			const relations: FindOptionsRelations<WorkflowEntity> = {
 				shared: {
@@ -280,6 +279,7 @@ export class WorkflowsController {
 					includeTags: !this.globalConfig.tags.disabled,
 					includeParentFolder: true,
 					includeActiveVersion: true,
+					publishHistory: 'latestActivation',
 				},
 			);
 
@@ -317,6 +317,7 @@ export class WorkflowsController {
 				includeTags: !this.globalConfig.tags.disabled,
 				includeParentFolder: true,
 				includeActiveVersion: true,
+				publishHistory: 'latestActivation',
 			},
 		);
 
@@ -362,8 +363,15 @@ export class WorkflowsController {
 
 		await this.collaborationService.validateWriteLock(req.user.id, clientId, workflowId, 'update');
 
-		let updateData = new WorkflowEntity();
-		const { tags, parentFolderId, aiBuilderAssisted, expectedChecksum, autosaved, ...rest } = body;
+		const {
+			tags,
+			parentFolderId,
+			aiBuilderAssisted,
+			expectedChecksum,
+			autosaved,
+			restoredFromVersionId,
+			...rest
+		} = body;
 
 		// Validate timeSavedMode if present
 		if (
@@ -373,20 +381,11 @@ export class WorkflowsController {
 			throw new BadRequestError('Invalid timeSavedMode');
 		}
 
-		// Security: Object.assign is now safe because the DTO validates and filters all input
-		// Only fields defined in UpdateWorkflowDto are assigned; internal fields like
-		// triggerCount, versionCounter, isArchived, active, activeVersionId, etc. are never set from user input
-		Object.assign(updateData, rest);
+		const updateData = createWorkflowEntityFromPayload(rest);
 
+		// Credential tamper protection is enforced centrally in WorkflowService.update
+		// oxlint-disable-next-line typescript/no-deprecated
 		const isSharingEnabled = this.license.isSharingEnabled();
-		if (isSharingEnabled) {
-			updateData = await this.enterpriseWorkflowService.preventTampering(
-				updateData,
-				workflowId,
-				req.user,
-			);
-		}
-
 		const updatedWorkflow = await this.workflowService.update(req.user, updateData, workflowId, {
 			tagIds: tags,
 			parentFolderId,
@@ -394,6 +393,7 @@ export class WorkflowsController {
 			expectedChecksum,
 			aiBuilderAssisted,
 			autosaved,
+			restoredFromVersionId,
 		});
 
 		const scopes = await this.workflowService.getWorkflowScopes(req.user, workflowId);
@@ -528,6 +528,7 @@ export class WorkflowsController {
 			name,
 			description,
 			expectedChecksum,
+			publishHistory: 'latestActivation',
 		});
 
 		const scopes = await this.workflowService.getWorkflowScopes(req.user, workflowId);
@@ -572,7 +573,15 @@ export class WorkflowsController {
 
 	@Post('/:workflowId/run')
 	@ProjectScope('workflow:execute')
-	async runManually(req: WorkflowRequest.ManualRun, _res: unknown) {
+	async runManually(req: WorkflowRequest.ManualRun) {
+		// Manually validated since the schema is picked per execution case and
+		// TypeScript reflection doesn't work with plain Zod schemas
+		const parseResult = ManualRunDto.safeParse(req.body);
+		if (!parseResult.success) {
+			throw new BadRequestError(parseResult.error.errors[0].message);
+		}
+		const body = parseResult.data;
+
 		const workflowId = req.params.workflowId;
 
 		// Always load the stored workflow from the database.
@@ -584,14 +593,21 @@ export class WorkflowsController {
 			throw new NotFoundError(`Workflow with ID "${workflowId}" not found`);
 		}
 
+		const n8nAuthCookie = this.authService.getCookieToken(req);
+
 		const result = await this.workflowExecutionService.executeManually(
 			dbWorkflow,
-			req.body,
+			body,
 			req.user,
 			req.headers['push-ref'],
+			n8nAuthCookie,
 		);
 
 		if ('executionId' in result) {
+			const { projectId, projectName } = await getWorkflowProjectDetailsSafe(
+				this.ownershipService,
+				dbWorkflow.id,
+			);
 			this.eventService.emit('workflow-executed', {
 				user: {
 					id: req.user.id,
@@ -603,6 +619,8 @@ export class WorkflowsController {
 				workflowId: dbWorkflow.id,
 				workflowName: dbWorkflow.name,
 				executionId: result.executionId,
+				projectId,
+				projectName,
 				source: 'user-manual',
 			});
 		}
@@ -693,6 +711,21 @@ export class WorkflowsController {
 		});
 	}
 
+	@Get('/:workflowId/transfer-preview')
+	@ProjectScope('workflow:move')
+	async transferPreview(
+		req: AuthenticatedRequest,
+		_res: unknown,
+		@Param('workflowId') workflowId: string,
+		@Query query: TransferPreviewQueryDto,
+	): Promise<WorkflowTransferPreview> {
+		return await this.enterpriseWorkflowService.previewWorkflowTransfer(
+			req.user,
+			workflowId,
+			query.destinationProjectId,
+		);
+	}
+
 	@Put('/:workflowId/transfer')
 	@ProjectScope('workflow:move')
 	async transfer(
@@ -731,10 +764,49 @@ export class WorkflowsController {
 		return lastExecution ?? null;
 	}
 
+	@Get('/:workflowId/publication-status')
+	@ProjectScope('workflow:read')
+	async getPublicationStatus(
+		req: AuthenticatedRequest,
+		_res: unknown,
+		@Param('workflowId') workflowId: string,
+	): Promise<WorkflowPublicationStatus> {
+		// The publication tables this reads are only populated when the publication
+		// service is enabled; otherwise the legacy path runs and the status would be
+		// misleading. Treat the route as absent when the feature is off.
+		if (!this.globalConfig.workflows.useWorkflowPublicationService) {
+			throw new NotFoundError('Workflow publication status is not available');
+		}
+
+		const workflow = await this.workflowFinderService.findWorkflowForUser(workflowId, req.user, [
+			'workflow:read',
+		]);
+		if (!workflow) {
+			throw new NotFoundError(`Workflow with ID "${workflowId}" does not exist`);
+		}
+		return await this.workflowPublicationStatusService.getStatus(workflowId);
+	}
+
+	/**
+	 * Lists the workflows that this workflow can call as sub-workflows. Only
+	 * editors of the parent can add a sub-workflow call, so this requires
+	 * `workflow:update` on the parent.
+	 */
+	@Get('/:workflowId/callable-subworkflows')
+	@ProjectScope('workflow:update')
+	async getCallableSubworkflows(
+		req: AuthenticatedRequest,
+		_res: unknown,
+		@Param('workflowId') workflowId: string,
+		@Query query: ListCallableSubworkflowsQueryDto,
+	): Promise<CallableSubworkflowsResponse> {
+		return await this.workflowService.getCallableSubworkflows(req.user, workflowId, query);
+	}
+
 	@Post('/with-node-types')
 	async getWorkflowsWithNodesIncluded(req: AuthenticatedRequest, res: express.Response) {
 		try {
-			const hasPermission = req.user.role.slug === ROLE.Owner || req.user.role.slug === ROLE.Admin;
+			const hasPermission = hasGlobalScope(req.user, ['workflow:read']);
 
 			if (!hasPermission) {
 				res.json({ data: [], count: 0 });
@@ -756,5 +828,33 @@ export class WorkflowsController {
 			ResponseHelper.reportError(error);
 			ResponseHelper.sendErrorResponse(res, error);
 		}
+	}
+
+	private async fetchWorkflowFromUrl(url: string) {
+		// user-supplied URL, so the default safe mode applies
+		const client = this.outboundHttp.requests();
+
+		try {
+			return await client.request<IWorkflowResponse>({ method: 'GET', url });
+		} catch (error) {
+			const blockedError = this.findSsrfBlockedError(error);
+			if (blockedError) throw blockedError;
+			throw new BadRequestError('The URL does not point to valid JSON file!');
+		}
+	}
+
+	/**
+	 * Walk the error cause chain to find a {@link SsrfBlockedIpError} buried
+	 * inside axios/redirect wrappers (AxiosError → RedirectionError → SsrfBlockedIpError).
+	 */
+	private findSsrfBlockedError(error: unknown): SsrfBlockedIpError | undefined {
+		let current = ensureError(error);
+
+		for (let depth = 0; depth < 4 && current; depth++) {
+			if (current instanceof SsrfBlockedIpError) return current;
+			current = ensureError(current.cause);
+		}
+
+		return undefined;
 	}
 }

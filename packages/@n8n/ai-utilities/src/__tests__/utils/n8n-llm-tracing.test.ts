@@ -1,25 +1,29 @@
 import type { Serialized } from '@langchain/core/load/serializable';
 import type { BaseMessage } from '@langchain/core/messages';
-import type { LLMResult } from '@langchain/core/outputs';
+import { AIMessage } from '@langchain/core/messages';
+import type { ChatGeneration, Generation, LLMResult } from '@langchain/core/outputs';
 import type { INode, ISupplyDataFunctions } from 'n8n-workflow';
 import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import type { Mock, Mocked } from 'vitest';
 
-import { N8nLlmTracing } from 'src/utils/n8n-llm-tracing';
+import * as logAiEventModule from 'src/utils/log-ai-event';
+import { anthropicTokensUsageParser, N8nLlmTracing } from 'src/utils/n8n-llm-tracing';
+import * as tokenEstimatorModule from 'src/utils/tokenizer/token-estimator';
 
 // Mock the dependencies
-jest.mock('src/utils/log-ai-event', () => ({
-	logAiEvent: jest.fn(),
+vi.mock('src/utils/log-ai-event', () => ({
+	logAiEvent: vi.fn(),
 }));
 
-jest.mock('src/utils/tokenizer/token-estimator', () => ({
-	estimateTokensFromStringList: jest.fn().mockResolvedValue(100),
+vi.mock('src/utils/tokenizer/token-estimator', () => ({
+	estimateTokensFromStringList: vi.fn().mockResolvedValue(100),
 }));
 
-const { logAiEvent } = jest.requireMock('src/utils/log-ai-event');
-const { estimateTokensFromStringList } = jest.requireMock('src/utils/tokenizer/token-estimator');
+const logAiEvent = vi.mocked(logAiEventModule.logAiEvent);
+const estimateTokensFromStringList = vi.mocked(tokenEstimatorModule.estimateTokensFromStringList);
 
 describe('N8nLlmTracing', () => {
-	let mockExecutionFunctions: jest.Mocked<ISupplyDataFunctions>;
+	let mockExecutionFunctions: Mocked<ISupplyDataFunctions>;
 	let mockNode: INode;
 
 	beforeEach(() => {
@@ -33,15 +37,16 @@ describe('N8nLlmTracing', () => {
 		};
 
 		mockExecutionFunctions = {
-			getNode: jest.fn().mockReturnValue(mockNode),
-			addOutputData: jest.fn(),
-			addInputData: jest.fn().mockReturnValue({ index: 0 }),
-			getNextRunIndex: jest.fn().mockReturnValue(0),
-		} as unknown as jest.Mocked<ISupplyDataFunctions>;
+			getNode: vi.fn().mockReturnValue(mockNode),
+			addOutputData: vi.fn(),
+			addInputData: vi.fn().mockReturnValue({ index: 0 }),
+			getNextRunIndex: vi.fn().mockReturnValue(0),
+			setMetadata: vi.fn(),
+		} as unknown as Mocked<ISupplyDataFunctions>;
 	});
 
 	afterEach(() => {
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 	});
 
 	describe('constructor', () => {
@@ -55,7 +60,7 @@ describe('N8nLlmTracing', () => {
 		});
 
 		it('should create instance with custom tokensUsageParser', () => {
-			const customParser = jest.fn().mockReturnValue({
+			const customParser = vi.fn().mockReturnValue({
 				completionTokens: 50,
 				promptTokens: 30,
 				totalTokens: 80,
@@ -69,7 +74,7 @@ describe('N8nLlmTracing', () => {
 		});
 
 		it('should create instance with custom errorDescriptionMapper', () => {
-			const customMapper = jest.fn().mockReturnValue('Custom error description');
+			const customMapper = vi.fn().mockReturnValue('Custom error description');
 
 			const tracer = new N8nLlmTracing(mockExecutionFunctions, {
 				errorDescriptionMapper: customMapper,
@@ -152,6 +157,244 @@ describe('N8nLlmTracing', () => {
 			expect(estimateTokensFromStringList).toHaveBeenCalledWith(prompts, 'gpt-4o');
 		});
 
+		it('should mask declared header values in persisted input data', async () => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions, {
+				redactedHeaders: ['x-secret-header'],
+			});
+
+			const llm: Serialized = {
+				lc: 1,
+				type: 'constructor',
+				id: ['langchain', 'chat_models', 'openai'],
+				kwargs: {
+					model: 'gpt-4',
+					configuration: {
+						baseURL: 'https://api.openai.com/v1',
+						defaultHeaders: {
+							'User-Agent': 'n8n',
+							'x-secret-header': 'My_secret_API_key123456789',
+						},
+					},
+				},
+			};
+
+			await tracer.handleLLMStart(llm, ['hello'], 'run-123');
+
+			const inputArg = mockExecutionFunctions.addInputData.mock.calls[0][1] as Array<
+				Array<{ json: { options: { configuration: { defaultHeaders: Record<string, string> } } } }>
+			>;
+			const persistedHeaders = inputArg[0][0].json.options.configuration.defaultHeaders;
+
+			// declared header name stays, value is masked
+			expect(persistedHeaders['x-secret-header']).toBe('**********');
+			expect(persistedHeaders['x-secret-header']).not.toBe('My_secret_API_key123456789');
+			// non-declared header is untouched
+			expect(persistedHeaders['User-Agent']).toBe('n8n');
+
+			// stored run details are masked the same way
+			const storedOptions = tracer.runsMap['run-123'].options as {
+				configuration: { defaultHeaders: Record<string, string> };
+			};
+			expect(storedOptions.configuration.defaultHeaders['x-secret-header']).toBe('**********');
+
+			// The original serialized object is not mutated
+			expect(
+				(llm.kwargs.configuration as { defaultHeaders: Record<string, string> }).defaultHeaders[
+					'x-secret-header'
+				],
+			).toBe('My_secret_API_key123456789');
+		});
+
+		it('should mask declared header values inside clientOptions', async () => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions, {
+				redactedHeaders: ['x-secret-header'],
+			});
+
+			const llm: Serialized = {
+				lc: 1,
+				type: 'constructor',
+				id: ['langchain', 'chat_models', 'anthropic'],
+				kwargs: {
+					model: 'claude',
+					clientOptions: {
+						defaultHeaders: {
+							'User-Agent': 'n8n',
+							'x-secret-header': 'My_secret_API_key123456789',
+						},
+					},
+				},
+			};
+
+			await tracer.handleLLMStart(llm, ['hello'], 'run-123');
+
+			const inputArg = mockExecutionFunctions.addInputData.mock.calls[0][1] as Array<
+				Array<{ json: { options: { clientOptions: { defaultHeaders: Record<string, string> } } } }>
+			>;
+			const persistedHeaders = inputArg[0][0].json.options.clientOptions.defaultHeaders;
+
+			expect(persistedHeaders['x-secret-header']).toBe('**********');
+			expect(persistedHeaders['User-Agent']).toBe('n8n');
+		});
+
+		it('should always mask the Authorization header value', async () => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions);
+
+			const llm: Serialized = {
+				lc: 1,
+				type: 'constructor',
+				id: ['langchain', 'chat_models', 'openai'],
+				kwargs: {
+					model: 'llama3',
+					// top-level header map and nested wrapper
+					headers: { authorization: 'Bearer top-secret', Cookie: 'session=abc' },
+					configuration: {
+						defaultHeaders: { Authorization: 'Bearer nested-secret', 'x-api-key': 'sk-123' },
+					},
+				},
+			};
+
+			await tracer.handleLLMStart(llm, ['hello'], 'run-123');
+
+			const inputArg = mockExecutionFunctions.addInputData.mock.calls[0][1] as Array<
+				Array<{
+					json: {
+						options: {
+							headers: Record<string, string>;
+							configuration: { defaultHeaders: Record<string, string> };
+						};
+					};
+				}>
+			>;
+			const persisted = inputArg[0][0].json.options;
+			// Matched case-insensitively, in both container shapes
+			expect(persisted.headers.authorization).toBe('**********');
+			expect(persisted.headers.Cookie).toBe('**********');
+			expect(persisted.configuration.defaultHeaders.Authorization).toBe('**********');
+			expect(persisted.configuration.defaultHeaders['x-api-key']).toBe('**********');
+		});
+
+		it('should mask the Authorization header value at any nesting depth', async () => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions);
+
+			const llm: Serialized = {
+				lc: 1,
+				type: 'constructor',
+				id: ['langchain', 'chat_models', 'openai'],
+				kwargs: {
+					configuration: { httpAgent: { headers: { Authorization: 'Bearer deep-secret' } } },
+				},
+			};
+
+			await tracer.handleLLMStart(llm, ['hello'], 'run-123');
+
+			const inputArg = mockExecutionFunctions.addInputData.mock.calls[0][1] as Array<
+				Array<{
+					json: { options: { configuration: { httpAgent: { headers: Record<string, string> } } } };
+				}>
+			>;
+			expect(inputArg[0][0].json.options.configuration.httpAgent.headers.Authorization).toBe(
+				'**********',
+			);
+		});
+
+		it('should redact header values inside an array element', async () => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions);
+
+			const llm: Serialized = {
+				lc: 1,
+				type: 'constructor',
+				id: ['langchain', 'chat_models', 'openai'],
+				kwargs: {
+					transports: [{ headers: { Authorization: 'Bearer array-secret' } }],
+				},
+			};
+
+			await tracer.handleLLMStart(llm, ['hello'], 'run-123');
+
+			const inputArg = mockExecutionFunctions.addInputData.mock.calls[0][1] as Array<
+				Array<{ json: { options: { transports: Array<{ headers: Record<string, string> }> } } }>
+			>;
+			expect(inputArg[0][0].json.options.transports[0].headers.Authorization).toBe('**********');
+		});
+
+		it('should match a declared header name case-insensitively', async () => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions, {
+				redactedHeaders: ['X-Secret-Header'],
+			});
+
+			const llm: Serialized = {
+				lc: 1,
+				type: 'constructor',
+				id: ['langchain', 'chat_models', 'openai'],
+				kwargs: {
+					configuration: { defaultHeaders: { 'x-secret-header': 'My_secret_API_key123456789' } },
+				},
+			};
+
+			await tracer.handleLLMStart(llm, ['hello'], 'run-123');
+
+			const inputArg = mockExecutionFunctions.addInputData.mock.calls[0][1] as Array<
+				Array<{ json: { options: { configuration: { defaultHeaders: Record<string, string> } } } }>
+			>;
+			expect(inputArg[0][0].json.options.configuration.defaultHeaders['x-secret-header']).toBe(
+				'**********',
+			);
+		});
+
+		it('should not mask a non-header field that shares a declared name', async () => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions, {
+				redactedHeaders: ['model'],
+			});
+
+			const llm: Serialized = {
+				lc: 1,
+				type: 'constructor',
+				id: ['langchain', 'chat_models', 'openai'],
+				kwargs: {
+					model: 'gpt-4',
+					configuration: { defaultHeaders: { model: 'header-value' } },
+				},
+			};
+
+			await tracer.handleLLMStart(llm, ['hello'], 'run-123');
+
+			const inputArg = mockExecutionFunctions.addInputData.mock.calls[0][1] as Array<
+				Array<{
+					json: {
+						options: { model: string; configuration: { defaultHeaders: Record<string, string> } };
+					};
+				}>
+			>;
+			const persisted = inputArg[0][0].json.options;
+			// Top-level model field stays; only the header-container occurrence is masked
+			expect(persisted.model).toBe('gpt-4');
+			expect(persisted.configuration.defaultHeaders.model).toBe('**********');
+		});
+
+		it('should leave headers unchanged when nothing is declared', async () => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions);
+
+			const llm: Serialized = {
+				lc: 1,
+				type: 'constructor',
+				id: ['langchain', 'chat_models', 'openai'],
+				kwargs: {
+					configuration: {
+						defaultHeaders: { 'x-secret-header': 'My_secret_API_key123456789' },
+					},
+				},
+			};
+
+			await tracer.handleLLMStart(llm, ['hello'], 'run-123');
+
+			const inputArg = mockExecutionFunctions.addInputData.mock.calls[0][1] as Array<
+				Array<{ json: { options: { configuration: { defaultHeaders: Record<string, string> } } } }>
+			>;
+			expect(inputArg[0][0].json.options.configuration.defaultHeaders['x-secret-header']).toBe(
+				'My_secret_API_key123456789',
+			);
+		});
+
 		it('should use parent run index when set', async () => {
 			const tracer = new N8nLlmTracing(mockExecutionFunctions);
 			tracer.setParentRunIndex(5);
@@ -229,6 +472,17 @@ describe('N8nLlmTracing', () => {
 				'ai-llm-generated-output',
 				expect.any(Object),
 			);
+
+			expect(
+				(mockExecutionFunctions as unknown as { setMetadata: Mock }).setMetadata,
+			).toHaveBeenCalledWith({
+				tracing: {
+					'llm.tokens.in': 50,
+					'llm.tokens.out': 30,
+					'llm.tokens.total': 80,
+					'llm.tokens.estimated': false,
+				},
+			});
 		});
 
 		it('should use token estimates when actual tokens not available', async () => {
@@ -258,6 +512,16 @@ describe('N8nLlmTracing', () => {
 			expect(outputData.tokenUsageEstimate.completionTokens).toBe(25);
 			expect(outputData.tokenUsageEstimate.promptTokens).toBe(50);
 			expect(outputData.tokenUsageEstimate.totalTokens).toBe(75);
+			expect(
+				(mockExecutionFunctions as unknown as { setMetadata: Mock }).setMetadata,
+			).toHaveBeenCalledWith({
+				tracing: {
+					'llm.tokens.in': 50,
+					'llm.tokens.out': 25,
+					'llm.tokens.total': 75,
+					'llm.tokens.estimated': true,
+				},
+			});
 		});
 
 		it('should handle string messages', async () => {
@@ -290,7 +554,7 @@ describe('N8nLlmTracing', () => {
 			const tracer = new N8nLlmTracing(mockExecutionFunctions);
 
 			const mockMessage: Partial<BaseMessage> = {
-				toJSON: jest.fn().mockReturnValue({ content: 'test', role: 'user' }),
+				toJSON: vi.fn().mockReturnValue({ content: 'test', role: 'user' }),
 			};
 
 			const runId = 'run-123';
@@ -362,6 +626,118 @@ describe('N8nLlmTracing', () => {
 			expect(generations).toHaveProperty('text');
 			expect(generations).toHaveProperty('generationInfo');
 			expect(generations).not.toHaveProperty('extraField');
+		});
+	});
+
+	describe('responding model name', () => {
+		const runId = 'run-123';
+
+		type PersistedGeneration = { text: string; generationInfo?: Record<string, unknown> };
+
+		const persistGeneration = async (generation: Generation): Promise<PersistedGeneration> => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions);
+			tracer.runsMap[runId] = { index: 0, messages: ['Test'], options: {} };
+
+			await tracer.handleLLMEnd({ generations: [[generation]], llmOutput: {} }, runId);
+
+			const [, , data] = mockExecutionFunctions.addOutputData.mock.calls[0] as unknown as [
+				unknown,
+				unknown,
+				Array<Array<{ json: { response: { generations: PersistedGeneration[][] } } }>>,
+			];
+			return data[0][0].json.response.generations[0][0];
+		};
+
+		const createChatGeneration = (
+			responseMetadata: Record<string, unknown>,
+			generationInfo?: Record<string, unknown>,
+		): ChatGeneration => ({
+			text: 'Hello',
+			message: new AIMessage({ content: 'Hello', response_metadata: responseMetadata }),
+			...(generationInfo && { generationInfo }),
+		});
+
+		it('keeps the name LangChain wrote to generationInfo when streaming', async () => {
+			const persisted = await persistGeneration({
+				text: 'Hello',
+				generationInfo: { finish_reason: 'stop', model_name: 'gpt-4.1-mini-2025-04-14' },
+			});
+
+			expect(persisted.generationInfo).toEqual({
+				finish_reason: 'stop',
+				model_name: 'gpt-4.1-mini-2025-04-14',
+			});
+		});
+
+		it('creates generationInfo from the message name when the generation has none', async () => {
+			const persisted = await persistGeneration(
+				createChatGeneration({ model_name: 'gpt-4.1-mini-2025-04-14' }),
+			);
+
+			expect(persisted).toEqual({
+				text: 'Hello',
+				generationInfo: { model_name: 'gpt-4.1-mini-2025-04-14' },
+			});
+		});
+
+		it('adds the message name to the existing generationInfo', async () => {
+			const persisted = await persistGeneration(
+				createChatGeneration({ model_name: 'gpt-4.1-mini-2025-04-14' }, { finish_reason: 'stop' }),
+			);
+
+			expect(persisted.generationInfo).toEqual({
+				finish_reason: 'stop',
+				model_name: 'gpt-4.1-mini-2025-04-14',
+			});
+		});
+
+		it('omits model_name when nothing reports a name', async () => {
+			const withInfo = await persistGeneration(createChatGeneration({}, { finish_reason: 'stop' }));
+			expect(withInfo.generationInfo).toEqual({ finish_reason: 'stop' });
+			expect('model_name' in (withInfo.generationInfo ?? {})).toBe(false);
+
+			mockExecutionFunctions.addOutputData.mockClear();
+
+			const withoutInfo = await persistGeneration(createChatGeneration({}));
+			expect('generationInfo' in withoutInfo).toBe(false);
+		});
+
+		it.each([
+			['blank', ''],
+			['whitespace-only', '   '],
+			['non-string', 42],
+			['null', null],
+			['undefined', undefined],
+		])(
+			'omits an unresolvable %s model_name that is already in generationInfo',
+			async (_, value) => {
+				const persisted = await persistGeneration({
+					text: 'Hello',
+					generationInfo: { finish_reason: 'stop', model_name: value },
+				});
+
+				expect(persisted.generationInfo).toEqual({ finish_reason: 'stop' });
+				expect('model_name' in (persisted.generationInfo ?? {})).toBe(false);
+			},
+		);
+
+		it('replaces an unresolvable model_name with the name from the message', async () => {
+			const persisted = await persistGeneration(
+				createChatGeneration({ model_name: 'gpt-4.1-mini-2025-04-14' }, { model_name: '' }),
+			);
+
+			expect(persisted.generationInfo).toEqual({ model_name: 'gpt-4.1-mini-2025-04-14' });
+		});
+
+		it('never lets the raw model key reach the output', async () => {
+			const persisted = await persistGeneration(
+				createChatGeneration({ model: 'gpt-4.1-minigpt-4.1-mini' }),
+			);
+
+			expect('generationInfo' in persisted).toBe(false);
+			expect(JSON.stringify(mockExecutionFunctions.addOutputData.mock.calls)).not.toContain(
+				'gpt-4.1-minigpt-4.1-mini',
+			);
 		});
 	});
 
@@ -447,7 +823,7 @@ describe('N8nLlmTracing', () => {
 		});
 
 		it('should use custom error description mapper', async () => {
-			const customMapper = jest.fn().mockReturnValue('Custom description');
+			const customMapper = vi.fn().mockReturnValue('Custom description');
 			const tracer = new N8nLlmTracing(mockExecutionFunctions, {
 				errorDescriptionMapper: customMapper,
 			});
@@ -539,10 +915,11 @@ describe('N8nLlmTracing', () => {
 
 	describe('custom token usage parser', () => {
 		it('should use custom token usage parser', async () => {
-			const customParser = jest.fn().mockReturnValue({
+			const customParser = vi.fn().mockReturnValue({
 				completionTokens: 100,
 				promptTokens: 50,
 				totalTokens: 150,
+				cost: 0.0042,
 			});
 
 			const tracer = new N8nLlmTracing(mockExecutionFunctions, {
@@ -572,6 +949,258 @@ describe('N8nLlmTracing', () => {
 				completionTokens: 100,
 				promptTokens: 50,
 				totalTokens: 150,
+				cost: 0.0042,
+			});
+			expect(
+				(mockExecutionFunctions as unknown as { setMetadata: Mock }).setMetadata,
+			).toHaveBeenCalledWith({
+				tracing: {
+					'llm.tokens.in': 50,
+					'llm.tokens.out': 100,
+					'llm.tokens.total': 150,
+					'llm.tokens.estimated': false,
+					'llm.cost.total': 0.0042,
+				},
+			});
+		});
+	});
+
+	describe('tracing metadata', () => {
+		it('default parser surfaces cost from llmOutput.tokenUsage.cost', async () => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions);
+
+			const runId = 'run-cost';
+			tracer.runsMap[runId] = {
+				index: 0,
+				messages: ['Test'],
+				options: {},
+			};
+
+			const output: LLMResult = {
+				generations: [[{ text: 'Response' }]],
+				llmOutput: {
+					tokenUsage: {
+						completionTokens: 10,
+						promptTokens: 5,
+						totalTokens: 15,
+						cost: 0.123,
+					},
+				},
+			};
+
+			await tracer.handleLLMEnd(output, runId);
+
+			expect(
+				(mockExecutionFunctions as unknown as { setMetadata: Mock }).setMetadata,
+			).toHaveBeenCalledWith({
+				tracing: {
+					'llm.tokens.in': 5,
+					'llm.tokens.out': 10,
+					'llm.tokens.total': 15,
+					'llm.tokens.estimated': false,
+					'llm.cost.total': 0.123,
+				},
+			});
+		});
+
+		it('default parser falls back to totalCost when cost is absent', async () => {
+			const tracer = new N8nLlmTracing(mockExecutionFunctions);
+
+			const runId = 'run-totalcost';
+			tracer.runsMap[runId] = {
+				index: 0,
+				messages: ['Test'],
+				options: {},
+			};
+
+			const output: LLMResult = {
+				generations: [[{ text: 'Response' }]],
+				llmOutput: {
+					tokenUsage: {
+						completionTokens: 10,
+						promptTokens: 5,
+						totalTokens: 15,
+						totalCost: 0.456,
+					},
+				},
+			};
+
+			await tracer.handleLLMEnd(output, runId);
+
+			expect(
+				(mockExecutionFunctions as unknown as { setMetadata: Mock }).setMetadata,
+			).toHaveBeenCalledWith(
+				expect.objectContaining({
+					tracing: expect.objectContaining({
+						'llm.cost.total': 0.456,
+					}),
+				}),
+			);
+		});
+
+		it('does not throw when the execution context has no setMetadata', async () => {
+			const ctxWithoutSetMetadata = {
+				getNode: vi.fn().mockReturnValue(mockNode),
+				addOutputData: vi.fn(),
+				addInputData: vi.fn().mockReturnValue({ index: 0 }),
+				getNextRunIndex: vi.fn().mockReturnValue(0),
+			} as unknown as Mocked<ISupplyDataFunctions>;
+
+			const tracer = new N8nLlmTracing(ctxWithoutSetMetadata);
+
+			const runId = 'run-no-setmetadata';
+			tracer.runsMap[runId] = {
+				index: 0,
+				messages: ['Test'],
+				options: {},
+			};
+
+			const output: LLMResult = {
+				generations: [[{ text: 'Response' }]],
+				llmOutput: {
+					tokenUsage: {
+						completionTokens: 10,
+						promptTokens: 5,
+						totalTokens: 15,
+					},
+				},
+			};
+
+			await expect(tracer.handleLLMEnd(output, runId)).resolves.not.toThrow();
+			expect(ctxWithoutSetMetadata.addOutputData).toHaveBeenCalled();
+		});
+
+		it('omits llm.cost.total when the parsed cost is not finite', async () => {
+			const customParser = vi.fn().mockReturnValue({
+				completionTokens: 10,
+				promptTokens: 5,
+				totalTokens: 15,
+				cost: Number.NaN,
+			});
+
+			const tracer = new N8nLlmTracing(mockExecutionFunctions, {
+				tokensUsageParser: customParser,
+			});
+
+			const runId = 'run-nan-cost';
+			tracer.runsMap[runId] = {
+				index: 0,
+				messages: ['Test'],
+				options: {},
+			};
+
+			const output: LLMResult = {
+				generations: [[{ text: 'Response' }]],
+				llmOutput: {},
+			};
+
+			await tracer.handleLLMEnd(output, runId);
+
+			const setMetadataMock = (mockExecutionFunctions as unknown as { setMetadata: Mock })
+				.setMetadata;
+			const tracingArg = setMetadataMock.mock.calls[0][0].tracing as Record<string, unknown>;
+			expect(tracingArg).not.toHaveProperty('llm.cost.total');
+		});
+
+		describe('GenAI attributes on the chat model task', () => {
+			const runId = 'run-gen-ai';
+			const chatModelMetadata = { ls_model_type: 'chat', ls_model_name: 'gpt-4o-mini' };
+			const reportedUsageOutput: LLMResult = {
+				generations: [
+					[{ text: 'Response', generationInfo: { model_name: 'gpt-4o-mini-2024-07-18' } }],
+				],
+				llmOutput: { tokenUsage: { completionTokens: 10, promptTokens: 5, totalTokens: 15 } },
+			};
+
+			const runLlmCall = async (
+				nodeType: string,
+				startMetadata: Record<string, unknown> | undefined,
+				output: LLMResult,
+				tracerOptions?: ConstructorParameters<typeof N8nLlmTracing>[1],
+			) => {
+				mockNode.type = nodeType;
+				const tracer = new N8nLlmTracing(mockExecutionFunctions, tracerOptions);
+				const llm: Serialized = { lc: 1, type: 'constructor', id: ['langchain'], kwargs: {} };
+
+				await tracer.handleLLMStart(
+					llm,
+					['Hi'],
+					runId,
+					undefined,
+					undefined,
+					undefined,
+					startMetadata,
+				);
+				await tracer.handleLLMEnd(output, runId);
+
+				return mockExecutionFunctions.addOutputData.mock.calls[0][3];
+			};
+
+			it('writes the chat attributes with numeric usage to the chat model output', async () => {
+				const metadata = await runLlmCall(
+					'@n8n/n8n-nodes-langchain.lmChatOpenAi',
+					chatModelMetadata,
+					reportedUsageOutput,
+				);
+
+				expect(metadata).toEqual({
+					tracing: {
+						'gen_ai.operation.name': 'chat',
+						'gen_ai.provider.name': 'openai',
+						'gen_ai.request.model': 'gpt-4o-mini',
+						'gen_ai.response.model': 'gpt-4o-mini-2024-07-18',
+						'gen_ai.usage.input_tokens': 5,
+						'gen_ai.usage.output_tokens': 10,
+					},
+				});
+			});
+
+			it.each([
+				['@n8n/n8n-nodes-langchain.lmChatOllama', 'ollama', undefined],
+				['n8n-nodes-community.lmChatCustom', undefined, undefined],
+				[
+					'@n8n/n8n-nodes-langchain.lmChatAzureOpenAi',
+					'anthropic',
+					{ genAiProviderName: 'anthropic' },
+				],
+			] as const)(
+				'sets the provider name of %s to %s',
+				async (nodeType, providerName, tracerOptions) => {
+					const metadata = await runLlmCall(
+						nodeType,
+						chatModelMetadata,
+						reportedUsageOutput,
+						tracerOptions,
+					);
+
+					expect(metadata?.tracing?.['gen_ai.provider.name']).toBe(providerName);
+				},
+			);
+
+			it('marks usage as not reported instead of sending the estimate', async () => {
+				const metadata = await runLlmCall(
+					'@n8n/n8n-nodes-langchain.lmChatOllama',
+					{ ls_model_type: 'chat' },
+					{ generations: [[{ text: 'Response' }]], llmOutput: {} },
+				);
+
+				expect(metadata).toEqual({
+					tracing: {
+						'gen_ai.operation.name': 'chat',
+						'gen_ai.provider.name': 'ollama',
+						'n8n.llm.usage_reported': false,
+					},
+				});
+			});
+
+			it('writes no GenAI attributes for a text completion model', async () => {
+				const metadata = await runLlmCall(
+					'@n8n/n8n-nodes-langchain.lmOpenAi',
+					undefined,
+					reportedUsageOutput,
+				);
+
+				expect(metadata).toBeUndefined();
 			});
 		});
 	});
@@ -595,6 +1224,42 @@ describe('N8nLlmTracing', () => {
 			expect(tracer.runsMap['run-1']).toBeDefined();
 			expect(tracer.runsMap['run-2']).toBeDefined();
 			expect(tracer.runsMap['run-3']).toBeDefined();
+		});
+	});
+});
+
+describe('anthropicTokensUsageParser', () => {
+	const result = (usage?: Record<string, number>): LLMResult => ({
+		generations: [],
+		llmOutput: usage ? { usage } : {},
+	});
+
+	it('should count cache creation and cache read tokens as prompt tokens', () => {
+		expect(
+			anthropicTokensUsageParser(
+				result({
+					input_tokens: 10,
+					output_tokens: 5,
+					cache_creation_input_tokens: 3,
+					cache_read_input_tokens: 2,
+				}),
+			),
+		).toEqual({ promptTokens: 15, completionTokens: 5, totalTokens: 20 });
+	});
+
+	it('should work without cache fields', () => {
+		expect(anthropicTokensUsageParser(result({ input_tokens: 10, output_tokens: 5 }))).toEqual({
+			promptTokens: 10,
+			completionTokens: 5,
+			totalTokens: 15,
+		});
+	});
+
+	it('should return zeros when usage is missing', () => {
+		expect(anthropicTokensUsageParser(result())).toEqual({
+			promptTokens: 0,
+			completionTokens: 0,
+			totalTokens: 0,
 		});
 	});
 });

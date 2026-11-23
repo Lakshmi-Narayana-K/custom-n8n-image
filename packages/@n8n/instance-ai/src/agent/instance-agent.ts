@@ -1,263 +1,325 @@
-import type { ToolsInput } from '@mastra/core/agent';
-import { Agent } from '@mastra/core/agent';
-import { Mastra } from '@mastra/core/mastra';
-import { ToolSearchProcessor, type ToolSearchProcessorOptions } from '@mastra/core/processors';
-import type { MastraCompositeStore } from '@mastra/core/storage';
-import { MCPClient } from '@mastra/mcp';
-import { nanoid } from 'nanoid';
+import {
+	Agent,
+	createObservationLogObserveFn,
+	createObservationLogReflectFn,
+	extendRuntimeSkillSource,
+	Memory,
+} from '@n8n/agents';
+import { SPLIT_BUILDER_TOOLS } from '@n8n/api-types';
 
-import { createMemory } from '../memory/memory-config';
-import { createAllTools, createOrchestrationTools } from '../tools';
-import { createToolsFromLocalMcpServer } from '../tools/filesystem/create-tools-from-mcp-server';
-import { buildAgentTraceInputs, mergeTraceRunInputs } from '../tracing/langsmith-tracing';
-import type { CreateInstanceAgentOptions, McpServerConfig } from '../types';
-import { sanitizeMcpToolSchemas } from './sanitize-mcp-schemas';
-import { getSystemPrompt } from './system-prompt';
-import { getOrchestratorDomainTools } from './tool-access';
+import { applyAgentThinking } from './apply-agent-thinking';
+import {
+	addSafeMcpTools,
+	createClaimedToolNames,
+	type McpToolNameValidationError,
+} from './mcp-tool-name-validation';
+import { listConnectedMcpServices } from '../mcp/connected-mcp-services';
+import { getVersionedSystemPrompt, resolvePromptProfile } from '../prompts/prompt-profiles';
+import { createToolRegistry, mergeToolRegistries, toolRegistryValues } from '../tool-registry';
+import {
+	createOrchestratorDomainTools,
+	createOrchestrationTools,
+	getActiveOrchestratorDomainToolNames,
+} from '../tools';
+import { createToolsFromLocalMcpServer } from '../tools/create-tools-from-mcp-server';
+import { ALWAYS_LOADED_TOOL_NAMES } from '../tools/tool-ids';
+import { isSetupPanelEnabled } from '../tools/workflows/setup-items';
+import {
+	buildAgentTraceInputs,
+	mergeTraceRunInputs,
+	modelIdTraceMetadata,
+	setTraceModelId,
+	setTracePromptVersion,
+} from '../tracing/langsmith-tracing';
+import type {
+	CreateInstanceAgentOptions,
+	InstanceAiContext,
+	InstanceAiToolRegistry,
+	ModelConfig,
+} from '../types';
+import { withModalSession } from '../utils/modal-session';
 
-function buildMcpServers(
-	configs: McpServerConfig[],
-): Record<
-	string,
-	{ url: URL } | { command: string; args?: string[]; env?: Record<string, string> }
-> {
-	const servers: Record<
-		string,
-		{ url: URL } | { command: string; args?: string[]; env?: Record<string, string> }
-	> = {};
-	for (const server of configs) {
-		if (server.url) {
-			servers[server.name] = { url: new URL(server.url) };
-		} else if (server.command) {
-			servers[server.name] = { command: server.command, args: server.args, env: server.env };
-		}
-	}
-	return servers;
-}
+function resolveModalSessionModelId(
+	modelId: ModelConfig,
+	context: InstanceAiContext,
+	orchestrationThreadId: string | undefined,
+): ModelConfig {
+	const threadId = [context.threadId, orchestrationThreadId]
+		.map((value) => value?.trim())
+		.find((value): value is string => value !== undefined && value.length > 0);
+	if (!threadId) return modelId;
 
-// ── Cached MCP tools (expensive to initialize — spawn processes, connect, list) ──
+	const stickyModelId = withModalSession(modelId, threadId);
+	if (stickyModelId === modelId) return modelId;
 
-let cachedMcpTools: ToolsInput | null = null;
-let cachedMcpServersKey = '';
-
-let cachedBrowserMcpTools: ToolsInput | null = null;
-let cachedBrowserMcpKey = '';
-
-let cachedMastra: Mastra | null = null;
-let cachedMastraStorageKey = '';
-
-// Tools that are always loaded into the orchestrator's context (no search required).
-// These are used in nearly every conversation per system prompt analysis.
-// All other tools are deferred behind ToolSearchProcessor for on-demand discovery.
-const ALWAYS_LOADED_TOOLS = new Set([
-	'plan',
-	'create-tasks',
-	'delegate',
-	'ask-user',
-	'web-search',
-	'fetch-url',
-]);
-
-function getOrCreateToolSearchProcessor(tools: ToolsInput): ToolSearchProcessor {
-	// Deferred tools capture per-run closures via the orchestration context.
-	// Reusing a processor across runs can inject stale tool instances into a new agent.
-	return new ToolSearchProcessor({
-		tools: tools as ToolSearchProcessorOptions['tools'],
-		search: { topK: 5 },
-	});
-}
-
-async function getMcpTools(mcpServers: McpServerConfig[]): Promise<ToolsInput> {
-	const key = JSON.stringify(mcpServers);
-	if (cachedMcpTools && cachedMcpServersKey === key) return cachedMcpTools;
-
-	if (mcpServers.length === 0) {
-		cachedMcpTools = {};
-		cachedMcpServersKey = key;
-		return cachedMcpTools;
-	}
-
-	const mcpClient = new MCPClient({
-		id: `mcp-${nanoid(6)}`,
-		servers: buildMcpServers(mcpServers),
-	});
-	cachedMcpTools = sanitizeMcpToolSchemas(await mcpClient.listTools());
-	cachedMcpServersKey = key;
-	return cachedMcpTools;
-}
-
-async function getBrowserMcpTools(config: McpServerConfig | undefined): Promise<ToolsInput> {
-	if (!config) return {};
-
-	const key = JSON.stringify(config);
-	if (cachedBrowserMcpTools && cachedBrowserMcpKey === key) return cachedBrowserMcpTools;
-
-	const browserClient = new MCPClient({
-		id: `browser-mcp-${nanoid(6)}`,
-		servers: buildMcpServers([config]),
-	});
-	cachedBrowserMcpTools = sanitizeMcpToolSchemas(await browserClient.listTools());
-	cachedBrowserMcpKey = key;
-	return cachedBrowserMcpTools;
-}
-
-function ensureMastraRegistered(agent: Agent, storage: MastraCompositeStore): void {
-	const key = storage.id ?? 'default';
-	if (!cachedMastra || cachedMastraStorageKey !== key) {
-		// Create a storage-only Mastra — no agents registered.
-		// The agent only needs the Mastra back-reference to access getStorage()
-		// for workflow snapshot persistence during suspend/resume.
-		cachedMastra = new Mastra({ storage });
-		cachedMastraStorageKey = key;
-	}
-	agent.__registerMastra(cachedMastra);
+	context.modelId = stickyModelId;
+	return stickyModelId;
 }
 
 // ── Agent factory ───────────────────────────────────────────────────────────
 
-export async function createInstanceAgent(options: CreateInstanceAgentOptions): Promise<Agent> {
+function splitDeferredTools(tools: InstanceAiToolRegistry) {
+	const coreTools = createToolRegistry();
+	const deferredTools = createToolRegistry();
+
+	for (const [name, tool] of tools) {
+		if (ALWAYS_LOADED_TOOL_NAMES.has(name)) {
+			coreTools.set(name, tool);
+		} else {
+			deferredTools.set(name, tool);
+		}
+	}
+
+	return { coreTools, deferredTools };
+}
+
+export async function createInstanceAgent(
+	options: CreateInstanceAgentOptions,
+): Promise<{ agent: Agent; mcpConnectionFailures: Array<{ server: string; error: string }> }> {
 	const {
-		modelId,
+		modelId: rawModelId,
 		context,
 		orchestrationContext,
 		mcpServers = [],
+		mcpManager,
 		memoryConfig,
-		disableDeferredTools = false,
 	} = options;
 
-	// Build native n8n domain tools (context captured via closures — per-run)
-	const domainTools = createAllTools(context);
-
-	const orchestratorDomainTools = getOrchestratorDomainTools(domainTools);
-
-	// Load MCP tools (cached — only spawns processes on first call or config change)
-	const mcpTools = await getMcpTools(mcpServers);
-	const browserMcpTools = await getBrowserMcpTools(orchestrationContext?.browserMcpConfig);
-
-	// Browser tool names — used to exclude them from the orchestrator's direct toolset.
-	// Browser tools are only accessible via browser-credential-setup (sub-agent) to prevent
-	// 200KB+ screenshots/snapshots from bloating the orchestrator's context.
-	const browserToolNames = new Set([
-		...Object.keys(browserMcpTools),
-		...(context.localMcpServer?.getToolsByCategory('browser').map((t) => t.name) ?? []),
-	]);
-
-	// Store ALL MCP tools (external + browser) on orchestrationContext for sub-agents
-	// (browser-credential-setup, delegate). NOT given to the orchestrator directly.
-	const allMcpTools: ToolsInput = {};
-	const domainToolNames = new Set(Object.keys(domainTools));
-	for (const [name, tool] of Object.entries({ ...mcpTools, ...browserMcpTools })) {
-		if (!domainToolNames.has(name)) {
-			allMcpTools[name] = tool;
-		}
-	}
-	if (orchestrationContext && Object.keys(allMcpTools).length > 0) {
-		orchestrationContext.mcpTools = allMcpTools;
+	const modelId = resolveModalSessionModelId(rawModelId, context, orchestrationContext?.threadId);
+	if (orchestrationContext && orchestrationContext.modelId !== modelId) {
+		orchestrationContext.modelId = modelId;
 	}
 
-	// Build orchestration tools (plan, delegate) — orchestrator-only
-	// Must happen after mcpTools are set on orchestrationContext
+	// Thread the trace handle in so domain tools (e.g. workflow_builder_build_workflow) can emit
+	// explicit child runs that land on the active trace — orchestration tools
+	// (e.g. verify) already get it via OrchestrationContext.
+	const domainContext: InstanceAiContext = {
+		...context,
+		tracing: orchestrationContext?.tracing,
+	};
+	if (orchestrationContext) {
+		orchestrationContext.domainContext = domainContext;
+	}
+	// Load MCP tools (cached by config hash inside the manager — only spawns
+	// processes / opens connections on first call or config change). The manager
+	// returns per-server connection failures alongside the tools so they travel
+	// with this call (not shared mutable state) — concurrent runs with different
+	// configs can't read each other's failures.
+	const { tools: mcpTools, connectionFailures: managerMcpFailures } =
+		await mcpManager.getRegularTools(mcpServers, context.logger, context.permissions);
+	// Map manager-reported connection failures to the generic SDK event type so
+	// the runtime can inject a model-facing note into the orchestrator's system
+	// message. The adapter owns the n8n-specific server config → plain SDK event
+	// translation; the SDK runtime does the rest.
+	const mcpConnectionFailures = managerMcpFailures.map((f) => ({
+		server: f.server.name,
+		error: f.error,
+	}));
+	const browserCredentialSetup = context.browserCredentialSetup;
+	const rawLocalMcpTools = context.localMcpServer
+		? createToolsFromLocalMcpServer({
+				server: context.localMcpServer,
+				logger: context.logger,
+				onCredentialCreateResult: browserCredentialSetup
+					? (credentialType, outcome) => {
+							if (outcome.ok) browserCredentialSetup.markCreated(credentialType);
+							else browserCredentialSetup.markCreateFailed(credentialType, outcome.errorCode);
+						}
+					: undefined,
+			})
+		: createToolRegistry();
+
+	const warnSkippedMcpTool = (error: McpToolNameValidationError) => {
+		context.logger.warn('Skipped MCP tool with unsafe name', {
+			toolName: error.toolName,
+			source: error.source,
+			reason: error.message,
+		});
+	};
+
+	// Build orchestration tools — orchestrator-only.
 	const orchestrationTools = orchestrationContext
 		? createOrchestrationTools(orchestrationContext)
-		: {};
+		: createToolRegistry();
 
-	// Prevent MCP tools from shadowing domain or orchestration tools.
-	// A malicious/misconfigured MCP server could register a tool named "run-workflow"
-	// which would silently replace the real domain tool via object spread.
-	const reservedToolNames = new Set([
-		...Object.keys(domainTools),
-		...Object.keys(orchestrationTools),
+	// Keep MCP tools from shadowing domain or orchestration tools. Former split tool
+	// names stay reserved so persisted calls still resolve through their legacy actions.
+	const reservedToolNames = new Set<string>([
+		...getActiveOrchestratorDomainToolNames(domainContext),
+		...orchestrationTools.keys(),
+		...Object.keys(SPLIT_BUILDER_TOOLS),
 	]);
-	const safeMcpTools: ToolsInput = {};
-	for (const [name, tool] of Object.entries(mcpTools)) {
-		if (reservedToolNames.has(name)) continue;
-		safeMcpTools[name] = tool;
+
+	const claimedOrchestratorToolNames = createClaimedToolNames(reservedToolNames);
+	const safeLocalMcpTools = createToolRegistry();
+	addSafeMcpTools(safeLocalMcpTools, rawLocalMcpTools, {
+		source: 'Browser Use MCP',
+		claimedToolNames: claimedOrchestratorToolNames,
+		warn: warnSkippedMcpTool,
+	});
+	const safeMcpTools = createToolRegistry();
+	addSafeMcpTools(safeMcpTools, mcpTools, {
+		source: 'external MCP',
+		claimedToolNames: claimedOrchestratorToolNames,
+		warn: warnSkippedMcpTool,
+	});
+	if (orchestrationContext) {
+		const builderMcpTools = mergeToolRegistries(safeLocalMcpTools, safeMcpTools);
+		if (builderMcpTools.size > 0) orchestrationContext.mcpTools = builderMcpTools;
 	}
 
-	// ── Tool search: split tools into always-loaded core vs deferred ────────
-	// Anthropic guidance: "Keep your 3-5 most-used tools always loaded, defer the rest."
-	// Tool selection accuracy degrades past 10+ tools; tool search improves it significantly.
-	const localMcpTools = context.localMcpServer
-		? Object.fromEntries(
-				Object.entries(createToolsFromLocalMcpServer(context.localMcpServer)).filter(
-					([name]) => !browserToolNames.has(name),
-				),
-			)
-		: {};
+	domainContext.connectedMcpServices = listConnectedMcpServices(mcpServers, safeMcpTools);
+	const orchestratorDomainTools = createOrchestratorDomainTools(domainContext);
 
-	const allOrchestratorTools: ToolsInput = {
-		...orchestratorDomainTools,
-		...orchestrationTools,
-		...safeMcpTools, // external MCP only — browser tools excluded
-		...localMcpTools, // gateway tools — browser tools excluded via browserToolNames
-	};
+	const allOrchestratorTools = mergeToolRegistries(
+		orchestratorDomainTools,
+		orchestrationTools,
+		safeLocalMcpTools,
+		safeMcpTools,
+	);
+	for (const name of orchestrationContext?.disabledToolNames ?? [])
+		allOrchestratorTools.delete(name);
 	const tracedOrchestratorTools =
 		orchestrationContext?.tracing?.wrapTools(allOrchestratorTools, {
 			agentRole: 'orchestrator',
 			tags: ['orchestrator'],
 		}) ?? allOrchestratorTools;
+	const { coreTools, deferredTools } = splitDeferredTools(tracedOrchestratorTools);
+	const hasDeferrableTools = !options.disableDeferredTools && deferredTools.size > 0;
+	const hasDeferredExternalMcpTools =
+		hasDeferrableTools && Array.from(safeMcpTools.keys()).some((name) => deferredTools.has(name));
+	const runtimeTools = hasDeferrableTools ? coreTools : tracedOrchestratorTools;
+	const systemPrompt = getVersionedSystemPrompt(
+		orchestrationContext?.promptConfiguration?.systemPromptVersion ??
+			resolvePromptProfile({}).profile.systemPromptVersion,
+		{
+			browserUseState: context.browserUseState,
+			toolSearchEnabled: hasDeferrableTools,
+			mcpToolSearchEnabled: hasDeferredExternalMcpTools,
+			licenseHints: context.licenseHints,
+			branchReadOnly: context.branchReadOnly,
+			parameterValuesHidden: context.allowSendingParameterValues === false,
+			projectId: context.projectId,
+			// Presence of the service IS the experiment gate — the host only wires it
+			// for flagged-in users on project-bound runs.
+			conversationHistoryEnabled: Boolean(context.conversationHistoryService),
+			preferenceSavingEnabled: Boolean(context.aiPreferenceService),
+			skillManagementEnabled: Boolean(context.skillService),
+			setupPanelEnabled: isSetupPanelEnabled(context),
+			workspaceRoot:
+				orchestrationContext?.workspace && orchestrationContext.workspaceRoot
+					? orchestrationContext.workspaceRoot
+					: undefined,
+		},
+	);
 
-	const coreTools: ToolsInput = {};
-	const deferrableTools: ToolsInput = {};
-	for (const [name, tool] of Object.entries(tracedOrchestratorTools)) {
-		if (ALWAYS_LOADED_TOOLS.has(name)) {
-			coreTools[name] = tool;
-		} else {
-			deferrableTools[name] = tool;
-		}
-	}
-
-	const hasDeferrableTools = !disableDeferredTools && Object.keys(deferrableTools).length > 0;
-	const toolSearchProcessor = hasDeferrableTools
-		? getOrCreateToolSearchProcessor(deferrableTools)
-		: undefined;
-
-	// Use pre-built memory if provided, otherwise create from config
-	const memory = options.memory ?? createMemory(memoryConfig);
-	const systemPrompt = getSystemPrompt({
-		researchMode: orchestrationContext?.researchMode,
-		webhookBaseUrl: orchestrationContext?.webhookBaseUrl,
-		filesystemAccess: (context.localMcpServer?.getToolsByCategory('filesystem').length ?? 0) > 0,
-		localGateway: context.localGatewayStatus,
-		toolSearchEnabled: hasDeferrableTools,
-		licenseHints: context.licenseHints,
-		timeZone: options.timeZone,
-		browserAvailable: browserToolNames.size > 0,
-		branchReadOnly: context.branchReadOnly,
+	setTracePromptVersion(
+		orchestrationContext?.tracing,
+		orchestrationContext?.promptConfiguration?.version,
+	);
+	setTraceModelId(orchestrationContext?.tracing, modelId);
+	const functionId = 'instance-ai.orchestrator';
+	const telemetry = orchestrationContext?.tracing?.getTelemetry?.({
+		agentRole: 'orchestrator',
+		functionId,
+		executionMode: 'foreground',
+		metadata: modelIdTraceMetadata(modelId),
 	});
-
-	const agent = new Agent({
-		id: 'n8n-instance-agent',
-		name: 'n8n Instance Agent',
-		instructions: {
-			role: 'system' as const,
-			content: systemPrompt,
+	const agent = new Agent('n8n-instance-agent')
+		.model(modelId)
+		.instructions(systemPrompt, {
 			providerOptions: {
 				anthropic: { cacheControl: { type: 'ephemeral' } },
 			},
-		},
-		model: modelId,
-		tools: hasDeferrableTools ? coreTools : tracedOrchestratorTools,
-		inputProcessors: toolSearchProcessor ? [toolSearchProcessor] : undefined,
-		memory,
-		workspace: options.workspace,
-	});
+		})
+		.tool(toolRegistryValues(runtimeTools))
+		.checkpoint(options.checkpointStore ?? 'memory');
+	if (mcpConnectionFailures.length > 0) {
+		agent.mcpConnectionFailures(mcpConnectionFailures);
+	}
+	if (options.modelFetch) agent.modelFetch(options.modelFetch);
+	if (options.requestLabels) agent.functionId(functionId);
+	if (options.thinkingEnabled !== false) {
+		applyAgentThinking(agent, modelId);
+	}
+	if (hasDeferrableTools) {
+		agent.deferredTool(toolRegistryValues(deferredTools), { search: { topK: 5 } });
+	}
+	// The agents module owns the builder skills that are generated from its config schema.
+	const builderSkills = context.builderDelegate?.getRuntimeSkills() ?? [];
+	const baseSkills = orchestrationContext?.skills;
+	const skills =
+		baseSkills && builderSkills.length > 0
+			? extendRuntimeSkillSource(baseSkills, builderSkills)
+			: baseSkills;
+	if (telemetry) {
+		agent.telemetry(telemetry);
+	}
+	if (orchestrationContext?.workspace) agent.workspace(orchestrationContext.workspace);
+	if (skills) agent.skills(skills);
 
+	if (options.memory) {
+		const mem = new Memory().storage(options.memory);
+
+		if (memoryConfig.observationalMemory) {
+			const {
+				observerThresholdTokens,
+				reflectorThresholdTokens,
+				midRunObservation,
+				onTaskUsage,
+				model: memoryModel,
+			} = memoryConfig.observationalMemory;
+			const taskModel = memoryModel ?? modelId;
+			mem.observationalMemory({
+				observerThresholdTokens,
+				reflectorThresholdTokens,
+				...(midRunObservation !== undefined ? { midRunObservation } : {}),
+				...(onTaskUsage || memoryModel
+					? {
+							observe: createObservationLogObserveFn(taskModel, { onUsage: onTaskUsage }),
+							reflect: createObservationLogReflectFn(taskModel, { onUsage: onTaskUsage }),
+						}
+					: {}),
+			});
+		}
+
+		if (memoryConfig.titleGeneration) {
+			mem.titleGeneration({ ...memoryConfig.titleGeneration });
+		}
+
+		agent.memory(mem);
+	}
+	if (options.onMemoryTaskEvent) {
+		agent.memoryTaskObserver(options.onMemoryTaskEvent);
+	}
 	mergeTraceRunInputs(
 		orchestrationContext?.tracing?.actorRun,
 		buildAgentTraceInputs({
 			systemPrompt,
-			tools: hasDeferrableTools ? coreTools : tracedOrchestratorTools,
-			deferredTools: hasDeferrableTools ? deferrableTools : undefined,
+			promptConfiguration: orchestrationContext?.promptConfiguration,
+			tools: runtimeTools,
+			deferredTools: hasDeferrableTools ? deferredTools : undefined,
 			modelId,
-			memory,
+			memory: options.memory
+				? {
+						...(memoryConfig.observationalMemory
+							? {
+									observationalMemory: {
+										enabled: true,
+										observerThresholdTokens:
+											memoryConfig.observationalMemory.observerThresholdTokens,
+										reflectorThresholdTokens:
+											memoryConfig.observationalMemory.reflectorThresholdTokens,
+									},
+								}
+							: {}),
+					}
+				: undefined,
 			toolSearchEnabled: hasDeferrableTools,
-			inputProcessors: toolSearchProcessor ? ['ToolSearchProcessor'] : undefined,
+			inputProcessors: hasDeferrableTools ? ['NativeToolSearch'] : undefined,
+			skills: skills?.registry,
 		}),
 	);
 
-	// Register agent with Mastra for HITL suspend/resume snapshot storage
-	ensureMastraRegistered(agent, memoryConfig.storage);
-
-	return agent;
+	return { agent, mcpConnectionFailures };
 }

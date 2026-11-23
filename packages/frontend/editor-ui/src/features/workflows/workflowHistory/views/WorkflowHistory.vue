@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeMount, ref, watchEffect, computed, h } from 'vue';
+import { onBeforeMount, ref, watch, watchEffect, computed, h } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { IWorkflowDb, UserAction } from '@/Interface';
 import {
@@ -8,10 +8,11 @@ import {
 	WORKFLOW_HISTORY_PUBLISH_MODAL_KEY,
 	WORKFLOW_HISTORY_NAME_VERSION_MODAL_KEY,
 	WORKFLOW_HISTORY_DIFF_MODAL_KEY,
+	WORKFLOW_HISTORY_PUBLISH_TIMELINE_TAB,
 	EnterpriseEditionFeature,
 } from '@/app/constants';
 import { useI18n } from '@n8n/i18n';
-import { useToast } from '@/app/composables/useToast';
+import { useToast } from '@n8n/composables/useToast';
 import type {
 	WorkflowHistoryActionTypes,
 	WorkflowVersionId,
@@ -22,11 +23,12 @@ import type {
 import WorkflowHistoryList from '../components/WorkflowHistoryList.vue';
 import WorkflowHistoryContent from '../components/WorkflowHistoryContent.vue';
 import WorkflowHistoryDiff from './WorkflowHistoryDiff.vue';
+import WorkflowPublishTimelineContent from '../components/WorkflowPublishTimelineContent.vue';
 import Modal from '@/app/components/Modal.vue';
 import { useWorkflowHistoryStore } from '../workflowHistory.store';
 import { useUIStore } from '@/app/stores/ui.store';
 import { useWorkflowsListStore } from '@/app/stores/workflowsList.store';
-import { useSettingsStore } from '@/app/stores/settings.store';
+import { useSettingsStore } from '@n8n/stores/settings.store';
 import { telemetry } from '@/app/plugins/telemetry';
 import { useRootStore } from '@n8n/stores/useRootStore';
 import { useWorkflowActivate } from '@/app/composables/useWorkflowActivate';
@@ -34,13 +36,14 @@ import { getResourcePermissions } from '@n8n/permissions';
 import { usePageRedirectionHelper } from '@/app/composables/usePageRedirectionHelper';
 import type { IUser } from 'n8n-workflow';
 
-import { N8nBadge, N8nButton, N8nHeading } from '@n8n/design-system';
+import { N8nBadge, N8nHeading, N8nIcon, N8nTabs } from '@n8n/design-system';
+import type { TabOptions } from '@n8n/design-system';
 import { createEventBus } from '@n8n/utils/event-bus';
 import type { WorkflowHistoryVersionUnpublishModalEventBusEvents } from '../components/WorkflowHistoryVersionUnpublishModal.vue';
 import type { WorkflowVersionFormModalEventBusEvents } from '../components/WorkflowVersionFormModal.vue';
 import type { WorkflowHistoryAction } from '@/features/workflows/workflowHistory/types';
 import { useEnvFeatureFlag } from '@/features/shared/envFeatureFlag/useEnvFeatureFlag';
-import { useUsersStore } from '@/features/settings/users/users.store';
+import { useUsersStore } from '@n8n/stores/users.store';
 import { getPublishedVersionId } from '../utils';
 
 type WorkflowHistoryActionRecord = {
@@ -105,7 +108,7 @@ const diffWithVersionId = computed(() => {
 const editorRoute = computed(() => ({
 	name: VIEWS.WORKFLOW,
 	params: {
-		name: workflowId.value,
+		workflowId: workflowId.value,
 	},
 }));
 const workflowPermissions = computed(
@@ -123,28 +126,41 @@ const publishedWorkflowVersionId = computed(() => {
 	return publishedVersionId;
 });
 
-const isDraftPublishEnabled = IS_DRAFT_PUBLISH_ENABLED;
 const isWorkflowPublishDisabled = computed(() =>
 	checkEnvFeatureFlag.value('DISABLE_WORKFLOW_PUBLISH'),
 );
 const isPublishLimitReached = computed(
-	() => activeWorkflow.value?.nxtwavePublish?.isLimitReached ?? false,
+	() => publishedWorkflow.value?.nxtwavePublish?.isLimitReached ?? false,
 );
 
 const actions = computed<Array<UserAction<IUser>>>(() =>
-	availableActionTypes
-		.filter((value) => !(value === 'publish' && activeWorkflow.value?.isArchived))
-		.map((value) => ({
-			label: i18n.baseText(`workflowHistory.item.actions.${value}`),
-			disabled:
-				(value === 'clone' && !workflowPermissions.value.create) ||
-				(value === 'restore' && !workflowPermissions.value.update) ||
-				((value === 'publish' || value === 'unpublish') && !workflowPermissions.value.update) ||
-				((value === 'publish' || value === 'unpublish') && isWorkflowPublishDisabled.value) ||
-				(value === 'publish' && isPublishLimitReached.value),
-			value,
-		})),
+	availableActionTypes.value.map((value) => ({
+		label: i18n.baseText(`workflowHistory.item.actions.${value}`),
+		disabled:
+			(value === 'clone' && !workflowPermissions.value.create) ||
+			((value === 'restore' || value === 'name') && !workflowPermissions.value.update) ||
+			((value === 'publish' || value === 'unpublish') && !workflowPermissions.value.publish) ||
+			((value === 'publish' || value === 'unpublish') && isWorkflowPublishDisabled.value) ||
+			(value === 'publish' && isPublishLimitReached.value),
+		value,
+	})),
 );
+
+type HistoryTab = 'history' | 'publishTimeline';
+const initialTab: HistoryTab =
+	route.query.tab === WORKFLOW_HISTORY_PUBLISH_TIMELINE_TAB ? 'publishTimeline' : 'history';
+const activeTab = ref<HistoryTab>(initialTab);
+
+const tabOptions = computed<Array<TabOptions<HistoryTab>>>(() => [
+	{
+		label: i18n.baseText('workflowHistory.tab.history'),
+		value: 'history',
+	},
+	{
+		label: i18n.baseText('workflowHistory.tab.publishTimeline'),
+		value: 'publishTimeline',
+	},
+]);
 
 const isFirstItemShown = computed(() => workflowHistory.value[0]?.versionId === versionId.value);
 const createCompareRoute = (compareVersionId: string, selectedVersionId = versionId.value) => {
@@ -180,8 +196,22 @@ const loadMore = async (queryParams: WorkflowHistoryRequestParams) => {
 	workflowHistory.value = workflowHistory.value.concat(history);
 };
 
+watch(activeTab, (newTab) => {
+	if (newTab === 'publishTimeline') {
+		sendTelemetry('User opened publish timeline');
+	}
+});
+
+const onSelectPublishTimelineVersion = async (id: WorkflowVersionId) => {
+	sendTelemetry('User selected version from publish timeline');
+	await navigateToVersion(id);
+};
+
 onBeforeMount(async () => {
 	sendTelemetry('User opened workflow history');
+	if (activeTab.value === 'publishTimeline') {
+		sendTelemetry('User opened publish timeline');
+	}
 	try {
 		const [workflow] = await Promise.all([
 			workflowsListStore.fetchWorkflow(workflowId.value),
@@ -197,6 +227,7 @@ onBeforeMount(async () => {
 					workflowId: workflowId.value,
 					versionId: workflowHistory.value[0].versionId,
 				},
+				query: route.query,
 			});
 		}
 	} catch (error) {
@@ -234,7 +265,7 @@ const cloneWorkflowVersion = async (
 	const { href } = router.resolve({
 		name: VIEWS.WORKFLOW,
 		params: {
-			name: clonedWorkflow.id,
+			workflowId: clonedWorkflow.id,
 		},
 	});
 
@@ -299,7 +330,7 @@ const publishWorkflowVersion = (id: WorkflowVersionId, data: WorkflowHistoryActi
 
 				if (success) {
 					// Refresh the published workflow to get the latest publishedVersion from workflowPublishHistory
-					publishedWorkflow.value = workflowsListStore.getWorkflowById(workflowId.value);
+					publishedWorkflow.value = workflowsListStore.getWorkflowById(workflowId.value) ?? null;
 
 					// Update the history list with the new name, description, and workflowPublishHistory
 					const historyItem = workflowHistory.value.find(
@@ -357,7 +388,7 @@ const unpublishWorkflowVersion = (id: WorkflowVersionId, data: WorkflowHistoryAc
 			return;
 		}
 
-		publishedWorkflow.value = workflowsListStore.getWorkflowById(workflowId.value);
+		publishedWorkflow.value = workflowsListStore.getWorkflowById(workflowId.value) ?? null;
 
 		toast.showMessage({
 			title: i18n.baseText('workflowHistory.action.unpublish.success.title'),
@@ -370,6 +401,7 @@ const unpublishWorkflowVersion = (id: WorkflowVersionId, data: WorkflowHistoryAc
 	uiStore.openModalWithData({
 		name: WORKFLOW_HISTORY_VERSION_UNPUBLISH,
 		data: {
+			workflowId: workflowId.value,
 			versionName: data.versionName,
 			eventBus: unpublishEventBus,
 		},
@@ -478,18 +510,22 @@ const onAction = async ({ action, id, data }: WorkflowHistoryAction) => {
 	}
 };
 
+const navigateToVersion = async (id: WorkflowVersionId) => {
+	await router.push({
+		name: VIEWS.WORKFLOW_HISTORY,
+		params: {
+			workflowId: workflowId.value,
+			versionId: id,
+		},
+	});
+};
+
 const onPreview = async ({ event, id }: { event: MouseEvent; id: WorkflowVersionId }) => {
 	if (event.metaKey || event.ctrlKey) {
 		openInNewTab(id);
 		sendTelemetry('User opened version in new tab');
 	} else {
-		await router.push({
-			name: VIEWS.WORKFLOW_HISTORY,
-			params: {
-				workflowId: workflowId.value,
-				versionId: id,
-			},
-		});
+		await navigateToVersion(id);
 	}
 };
 
@@ -577,11 +613,12 @@ watchEffect(async () => {
 		publishedWorkflow.value = workflow;
 
 		sendTelemetry('User selected version');
-	} catch (error) {
+	} catch (error: unknown) {
+		const message = error instanceof Error ? error.message : undefined;
 		// Handle workflow version fetch error
-		if (error.message?.includes('version')) {
+		if (message?.includes('version')) {
 			toast.showError(
-				new Error(`${error.message} "${versionId.value}"&nbsp;`),
+				new Error(`${message} "${versionId.value}"&nbsp;`),
 				i18n.baseText('workflowHistory.title'),
 			);
 		} else {
@@ -599,22 +636,29 @@ watchEffect(async () => {
 				{{ publishedWorkflow?.name }}
 			</N8nHeading>
 			<span v-if="publishedWorkflow?.isArchived">
-				<N8nBadge class="ml-s" theme="tertiary" bold data-test-id="workflow-archived-tag">
+				<N8nBadge class="ml-s" variant="outline" data-test-id="workflow-archived-tag">
 					{{ i18n.baseText('workflows.item.archived') }}
 				</N8nBadge>
 			</span>
 		</div>
 		<div :class="$style.corner">
-			<N8nHeading tag="h2" size="medium" bold>
-				{{ i18n.baseText('workflowHistory.title') }}
-			</N8nHeading>
-			<RouterLink :to="editorRoute" data-test-id="workflow-history-close-button">
-				<N8nButton variant="ghost" icon="x" size="small" square />
+			<N8nTabs
+				v-model="activeTab"
+				:options="tabOptions"
+				size="small"
+				data-test-id="workflow-history-tabs"
+			/>
+			<RouterLink
+				:to="editorRoute"
+				:class="$style.closeButton"
+				data-test-id="workflow-history-close-button"
+			>
+				<N8nIcon icon="x" size="small" />
 			</RouterLink>
 		</div>
 		<div :class="$style.listComponentWrapper">
 			<WorkflowHistoryList
-				v-if="canRender"
+				v-if="canRender && activeTab === 'history'"
 				:items="workflowHistory"
 				:last-received-items-length="lastReceivedItemsLength"
 				:selected-item="selectedWorkflowVersion"
@@ -630,6 +674,14 @@ watchEffect(async () => {
 				@compare="({ id }) => openCompareView(id)"
 				@load-more="loadMore"
 				@upgrade="onUpgrade"
+			/>
+			<!-- Keep pagination state scoped to one workflow. -->
+			<WorkflowPublishTimelineContent
+				:key="workflowId"
+				v-if="canRender && activeTab === 'publishTimeline'"
+				:workflow-id="workflowId"
+				:selected-version-id="versionId"
+				@select-version="onSelectPublishTimelineVersion"
 			/>
 		</div>
 		<div :class="$style.contentComponentWrapper">
@@ -693,11 +745,41 @@ watchEffect(async () => {
 	grid-area: corner;
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
-	padding: 0 var(--spacing--3xs) 0 var(--spacing--sm);
-	background-color: var(--color--background--light-2er);
-	border-bottom: var(--border-width) var(--border-style) var(--color--foreground);
+	padding: var(--spacing--xs) 0 0 var(--spacing--sm);
 	border-left: var(--border-width) var(--border-style) var(--color--foreground);
+	position: relative;
+
+	&::after {
+		content: '';
+		position: absolute;
+		bottom: 1px;
+		left: 0;
+		right: 0;
+		height: var(--border-width);
+		background-color: var(--color--foreground);
+		z-index: 1;
+	}
+}
+
+.closeButton {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	position: absolute;
+	right: var(--spacing--xs);
+	top: 50%;
+	transform: translateY(-50%);
+	padding: var(--spacing--4xs);
+	background: none;
+	border: none;
+	cursor: pointer;
+	color: var(--color--text--tint-1);
+	border-radius: var(--radius);
+	z-index: 2;
+
+	&:hover {
+		color: var(--color--text);
+	}
 }
 
 .contentComponentWrapper {

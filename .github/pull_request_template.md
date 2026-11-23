@@ -1,8 +1,22 @@
 ## Summary
 
 <!--
-Describe what the PR does and how to test.
-Photos and videos are recommended.
+Start with 1 to 3 sentences of background for a new reader. Then describe what the PR does, in prose, not as a list of edits.
+Add photos or videos for UI changes.
+-->
+
+## Why
+
+<!--
+State the problem or the constraint that makes the current code unfit. Do not repeat the Summary.
+Add a rejected alternative only when a reviewer would ask about it, in one or two sentences.
+-->
+
+## How to test
+
+<!--
+Describe all steps needed to test the changes.
+Include an example workflow if the changes affect Workflow builder, execution or a Node, that can be tested with a workflow.
 -->
 
 ## Related Linear tickets, Github issues, and Community forum posts

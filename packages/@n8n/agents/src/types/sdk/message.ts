@@ -1,4 +1,6 @@
 import type { ProviderOptions } from '@ai-sdk/provider-utils';
+import { isRecord } from '@n8n/utils/is-record';
+import { toJsonValue } from '@n8n/utils/json/to-json-value';
 
 import type { JSONValue } from '../utils/json';
 
@@ -8,10 +10,11 @@ export type MessageContent =
 	| ContentText
 	| ContentToolCall
 	| ContentInvalidToolCall
-	| ContentToolResult
 	| ContentReasoning
+	| ContentReasoningFile
 	| ContentFile
 	| ContentCitation
+	| ContentCustom
 	| ContentProvider;
 
 export interface ContentMetadata {
@@ -63,6 +66,17 @@ export type ContentReasoning = ContentMetadata & {
 	text: string;
 };
 
+/**
+ * Reference to file bytes held in a host-provided store (see `BuiltFileStore`).
+ * Only the reference is persisted.
+ */
+export interface ContentFileRef {
+	/** Stable identifier resolvable by the injected file store. */
+	id: string;
+	fileName?: string;
+	sizeBytes?: number;
+}
+
 export type ContentFile = ContentMetadata & {
 	type: 'file';
 
@@ -80,8 +94,25 @@ export type ContentFile = ContentMetadata & {
 	 * If the API returns base64 encoded strings, the file data should be returned
 	 * as base64 encoded strings. If the API returns binary data, the file data should
 	 * be returned as binary data.
+	 *
+	 * Absent on reference-only parts (`fileRef` set); hydrated by the runtime
+	 * before LLM calls.
 	 */
-	data: Uint8Array | ArrayBuffer | Buffer | string;
+	data?: Uint8Array | ArrayBuffer | Buffer | string;
+
+	/** External-store reference for the file bytes. At least one of `data` / `fileRef` must be set. */
+	fileRef?: ContentFileRef;
+};
+
+export type ContentReasoningFile = ContentMetadata & {
+	type: 'reasoning-file';
+	data: ContentFile['data'];
+	mediaType: string;
+};
+
+export type ContentCustom = ContentMetadata & {
+	type: 'custom';
+	kind: `${string}.${string}`;
 };
 
 export type ContentToolCall = ContentMetadata & {
@@ -90,7 +121,7 @@ export type ContentToolCall = ContentMetadata & {
 	/**
 	 * The identifier of the tool call. It must be unique across all tool calls.
 	 */
-	toolCallId?: string;
+	toolCallId: string;
 
 	/**
 	 * The name of the tool that should be called.
@@ -104,31 +135,35 @@ export type ContentToolCall = ContentMetadata & {
 	input: JSONValue;
 
 	providerExecuted?: boolean;
-};
 
-export type ContentToolResult = ContentMetadata & {
-	type: 'tool-result';
-
-	/**
-	 * The name of the tool that was called.
-	 */
-	toolName: string;
+	/** Provider options for the result. Its item ID can differ from the call ID. */
+	resultProviderOptions?: ProviderOptions;
 
 	/**
-	 * The ID of the tool call that this result is associated with.
+	 * Skills this tool activated programmatically (via `ctx.loadSkill`), so the
+	 * skill body can re-anchor to this result on a later turn instead of falling
+	 * back to the system prompt. Metadata only — never sent to the model.
 	 */
-	toolCallId: string;
+	activatedSkillIds?: string[];
+	/** Versions delivered by this activation. Used by skills with append updates. */
+	activatedSkillVersions?: Record<string, string>;
+} & (
+		| { state: 'pending'; suspension?: ToolCallSuspensionInfo }
+		| { state: 'resolved'; output: JSONValue; canceled?: boolean }
+		| { state: 'rejected'; error: string }
+	);
 
-	/**
-	 * Result of the tool call. This is a JSON-serializable object.
-	 */
-	result: JSONValue;
-
-	/**
-	 * Optional flag if the result is an error or an error message.
-	 */
-	isError?: boolean;
-};
+/**
+ * Present on a pending block when the call suspended for user confirmation
+ * (HITL). Records what was asked of the user, so a later history load can
+ * settle an abandoned confirmation with an explanation instead of silently
+ * dropping the call.
+ */
+export interface ToolCallSuspensionInfo {
+	/** Human-readable confirmation message shown to the user (e.g. the approval card text). */
+	message?: string;
+	requestId?: string;
+}
 
 export type ContentInvalidToolCall = ContentMetadata & {
 	type: 'invalid-tool-call';
@@ -159,6 +194,18 @@ export type ContentProvider = ContentMetadata & {
 	value: Record<string, unknown>;
 };
 
+/**
+ * Provenance for messages that were not authored by the user or the model,
+ * e.g. produced from a tool result via `toMessage`. Consumers that build
+ * derived transcripts (like the observation log observer) use this to keep
+ * tool-sourced content inside untrusted-data boundaries. Never sent to the
+ * model — `toAiMessages` only reads `role`/`content`.
+ */
+export interface MessageOrigin {
+	kind: 'tool';
+	toolName: string;
+}
+
 // LLM message that can be passed to the LLM
 export interface Message {
 	id?: string;
@@ -167,6 +214,7 @@ export interface Message {
 	content: MessageContent[];
 	name?: string;
 	providerOptions?: ProviderOptions;
+	origin?: MessageOrigin;
 }
 
 export interface AgentMessageBase {
@@ -189,7 +237,21 @@ export interface AgentMessageBase {
  */
 export interface CustomAgentMessages {
 	___dummyCustomMessage: { dummy: string };
-	// Empty by default - apps extend via declaration merging
+	runtimeSkillCatalog: {
+		type: 'n8n:runtime-skill-catalog';
+		content: string;
+	};
+	runtimeSkillUpdate: {
+		type: 'n8n:runtime-skill-update';
+		skillUpdate: {
+			skillId: string;
+			version: string | null;
+			content: string;
+			name?: string;
+			change?: 'updated' | 'restored' | 'unavailable';
+		};
+	};
+	// Apps can add message types through declaration merging.
 }
 
 export type CustomAgentMessage = {
@@ -204,4 +266,92 @@ export type CustomAgentMessage = {
  */
 export type AgentMessage = Message | CustomAgentMessage;
 
+/**
+ * Persisted message shape returned by `BuiltMemory.getMessages`. The
+ * `(createdAt, id)` pair forms the keyset used by observational memory
+ * cursors; both fields are populated on read by every backend.
+ */
 export type AgentDbMessage = { id: string; createdAt: Date } & AgentMessage;
+
+/**
+ * Return a copy of the message with hydrated bytes removed from file parts
+ * that carry a `fileRef`. Persistence backends must apply this before
+ * serializing message content, so stored messages hold only references.
+ * Parts without a `fileRef` keep their inline `data`. Non-content messages
+ * and messages without hydrated file parts are returned as-is.
+ */
+export function stripHydratedFileData<T extends AgentMessage>(message: T): T {
+	if (!('content' in message) || !Array.isArray(message.content)) return message;
+
+	let changed = false;
+	const content = message.content.map((block) => {
+		if (block.type === 'file' && block.fileRef && block.data !== undefined) {
+			changed = true;
+			const { data: _data, ...rest } = block;
+			return rest;
+		}
+		if (
+			block.type === 'tool-call' &&
+			block.state === 'resolved' &&
+			toolOutputFileParts(block.output).some((part) => part.data !== undefined)
+		) {
+			changed = true;
+			return { ...block, output: stripToolOutputFileData(block.output) };
+		}
+		return block;
+	});
+
+	return changed ? { ...message, content } : message;
+}
+
+export type ContentFileWithRef = ContentFile & { fileRef: ContentFileRef };
+
+export function isFileRefPart(part: unknown): part is ContentFileWithRef {
+	return (
+		isRecord(part) &&
+		part.type === 'file' &&
+		isRecord(part.fileRef) &&
+		typeof part.fileRef.id === 'string'
+	);
+}
+
+/**
+ * Return the file parts with a `fileRef` in a tool output of type 'content'.
+ * The parts are the same objects as in the output, so the runtime can set
+ * `data` on them in place.
+ */
+export function toolOutputFileParts(output: unknown): ContentFileWithRef[] {
+	if (!isRecord(output) || output.type !== 'content' || !Array.isArray(output.value)) return [];
+	return output.value.filter(isFileRefPart);
+}
+
+function stripToolOutputFileData(output: JSONValue): JSONValue {
+	if (!isRecord(output) || !Array.isArray(output.value)) return output;
+	const value: unknown[] = output.value.map((part: unknown) => {
+		if (!isFileRefPart(part)) return part;
+		const { data: _data, ...rest } = part;
+		return rest;
+	});
+	return toJsonValue({ ...output, value });
+}
+
+const TEXT_MEDIA_TYPES = new Set([
+	'application/json',
+	'application/xml',
+	'application/yaml',
+	'application/x-yaml',
+	'application/javascript',
+	'application/sql',
+]);
+
+/** Whether the model gets a file of this media type as UTF-8 text. */
+export function isTextMediaType(mediaType: string | undefined): boolean {
+	if (!mediaType) return false;
+	const type = mediaType.split(';')[0].trim().toLowerCase();
+	return (
+		type.startsWith('text/') ||
+		type.endsWith('+json') ||
+		type.endsWith('+xml') ||
+		TEXT_MEDIA_TYPES.has(type)
+	);
+}

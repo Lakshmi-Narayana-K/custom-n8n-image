@@ -1,146 +1,63 @@
-import type { UsersListFilterDto } from '@n8n/api-types';
-import type { AuthenticatedRequest, User, UserRepository } from '@n8n/db';
-import { mock } from 'jest-mock-extended';
+import type { AuthenticatedRequest, PersonRepository, User, UserRepository } from '@n8n/db';
 import type { Response } from 'express';
+import { mock } from 'vitest-mock-extended';
 
-import type { EventService } from '@/events/event.service';
-import type { JwtService } from '@/services/jwt.service';
-import type { ProvisioningService } from '@/modules/provisioning.ee/provisioning.service.ee';
-import type { ProjectService } from '@/services/project.service.ee';
-import type { UrlService } from '@/services/url.service';
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
-import { NotFoundError } from '@/errors/response-errors/not-found.error';
+import { NotFoundError } from '@n8n/errors';
+import type { UserRequest } from '@/requests';
+import type { JwtService, UrlService } from '@n8n/backend-services';
+import type { UserService } from '@/services/user.service';
 
 import { UsersController } from '../users.controller';
 
 describe('UsersController', () => {
-	const eventService = mock<EventService>();
 	const userRepository = mock<UserRepository>();
+	const personRepository = mock<PersonRepository>();
+	const userService = mock<UserService>();
 	const jwtService = mock<JwtService>();
 	const urlService = mock<UrlService>();
-	const provisioningService = mock<ProvisioningService>();
-	const projectService = mock<ProjectService>();
 
 	const controller = new UsersController(
-		mock(),
-		mock(),
-		mock(),
-		mock(),
 		userRepository,
+		personRepository,
 		mock(),
-		mock(),
-		mock(),
-		mock(),
-		mock(),
-		eventService,
-		mock(),
+		userService,
 		jwtService,
 		urlService,
-		projectService,
-		provisioningService,
+		mock(),
 	);
 
 	beforeEach(() => {
-		jest.restoreAllMocks();
-		jest.clearAllMocks();
+		vi.restoreAllMocks();
+		vi.clearAllMocks();
 	});
 
 	describe('changeGlobalRole', () => {
-		it('should emit event user-changed-role', async () => {
+		it('delegates to userService.changeGlobalRole', async () => {
 			const request = mock<AuthenticatedRequest>({
 				user: { id: '123' },
 			});
-			userRepository.findOne.mockResolvedValue(mock<User>({ id: '456' }));
-			provisioningService.isInstanceRoleManaged.mockResolvedValue(false);
+			const payload = mock({ newRoleName: 'global:member' });
+			userService.changeGlobalRole.mockResolvedValue({ success: true });
 
-			await controller.changeGlobalRole(
-				request,
-				mock(),
-				mock({ newRoleName: 'global:member' }),
-				'456',
-			);
-
-			expect(eventService.emit).toHaveBeenCalledWith('user-changed-role', {
-				userId: '123',
-				targetUserId: '456',
-				targetUserNewRole: 'global:member',
-				publicApi: false,
+			await expect(controller.changeGlobalRole(request, mock(), payload, '456')).resolves.toEqual({
+				success: true,
 			});
+
+			expect(userService.changeGlobalRole).toHaveBeenCalledWith(request.user, '456', payload);
 		});
 	});
 
-	describe('listUsers', () => {
-		const mockQueryBuilder = () => mock({ getManyAndCount: jest.fn().mockResolvedValue([[], 0]) });
-
-		it('should allow global:owner to list users without checking project scopes', async () => {
-			userRepository.buildUserQuery.mockReturnValue(mockQueryBuilder() as never);
-			const req = mock<AuthenticatedRequest>({
-				user: mock<User>({ role: { slug: 'global:owner', scopes: [] } }),
+	describe('deleteUser', () => {
+		it('delegates to userService.deleteUser', async () => {
+			const request = mock<UserRequest.Delete>({
+				user: { id: '123' },
+				params: { id: '456' },
+				query: { transferId: 'project-1' },
 			});
+			userService.deleteUser.mockResolvedValue({ success: true });
 
-			await expect(
-				controller.listUsers(
-					req,
-					mock<Response>(),
-					mock<UsersListFilterDto>({ filter: undefined, select: undefined }),
-				),
-			).resolves.toBeDefined();
-
-			expect(projectService.getProjectIdsWithScope).not.toHaveBeenCalled();
-		});
-
-		it('should allow user with project:update scope to list all users without projectId filter', async () => {
-			userRepository.buildUserQuery.mockReturnValue(mockQueryBuilder() as never);
-			projectService.getProjectIdsWithScope.mockResolvedValue(['project-1']);
-			const req = mock<AuthenticatedRequest>({
-				user: mock<User>({ role: { slug: 'global:member', scopes: [] } }),
-			});
-
-			await expect(
-				controller.listUsers(
-					req,
-					mock<Response>(),
-					mock<UsersListFilterDto>({ filter: undefined, select: undefined }),
-				),
-			).resolves.toBeDefined();
-
-			expect(projectService.getProjectIdsWithScope).toHaveBeenCalledWith(req.user, [
-				'project:update',
-			]);
-		});
-
-		it('should throw ForbiddenError when member has no project:update scope and no projectId filter', async () => {
-			projectService.getProjectIdsWithScope.mockResolvedValue([]);
-			const req = mock<AuthenticatedRequest>({
-				user: mock<User>({ role: { slug: 'global:member' } }),
-			});
-
-			await expect(
-				controller.listUsers(
-					req,
-					mock<Response>(),
-					mock<UsersListFilterDto>({ filter: undefined }),
-				),
-			).rejects.toThrow(ForbiddenError);
-
-			expect(projectService.getProjectIdsWithScope).toHaveBeenCalledWith(req.user, [
-				'project:update',
-			]);
-		});
-
-		it('should throw NotFoundError when filtering by an unknown projectId', async () => {
-			projectService.getProjectWithScope.mockResolvedValue(null);
-			const req = mock<AuthenticatedRequest>({
-				user: mock<User>({ role: { slug: 'global:member' } }),
-			});
-
-			await expect(
-				controller.listUsers(
-					req,
-					mock<Response>(),
-					mock<UsersListFilterDto>({ filter: { projectId: 'unknown-project-id' } }),
-				),
-			).rejects.toThrow(NotFoundError);
+			await expect(controller.deleteUser(request)).resolves.toEqual({ success: true });
+			expect(userService.deleteUser).toHaveBeenCalledWith(request.user, '456', 'project-1');
 		});
 	});
 
@@ -160,16 +77,15 @@ describe('UsersController', () => {
 				id: inviteeId,
 			});
 
-			userRepository.findOne.mockResolvedValue(targetUser);
+			personRepository.findById.mockResolvedValue(targetUser);
 			jwtService.sign.mockReturnValue(mockToken);
 			urlService.getInstanceBaseUrl.mockReturnValue(baseUrl);
 
 			const result = await controller.generateInviteLink(request, mock<Response>());
 
-			expect(userRepository.findOne).toHaveBeenCalledWith({
-				where: { id: inviteeId },
-			});
+			expect(personRepository.findById).toHaveBeenCalledWith(inviteeId);
 			expect(jwtService.sign).toHaveBeenCalledWith(
+				'invite',
 				{
 					inviterId,
 					inviteeId,
@@ -193,7 +109,7 @@ describe('UsersController', () => {
 				params: { id: inviteeId },
 			});
 
-			userRepository.findOne.mockResolvedValue(null);
+			personRepository.findById.mockResolvedValue(null);
 
 			await expect(controller.generateInviteLink(request, mock<Response>())).rejects.toThrow(
 				NotFoundError,
@@ -202,10 +118,8 @@ describe('UsersController', () => {
 				'User to generate invite link for not found',
 			);
 
-			expect(userRepository.findOne).toHaveBeenCalledTimes(2);
-			expect(userRepository.findOne).toHaveBeenCalledWith({
-				where: { id: inviteeId },
-			});
+			expect(personRepository.findById).toHaveBeenCalledTimes(2);
+			expect(personRepository.findById).toHaveBeenCalledWith(inviteeId);
 			expect(jwtService.sign).not.toHaveBeenCalled();
 			expect(urlService.getInstanceBaseUrl).not.toHaveBeenCalled();
 		});
@@ -221,13 +135,14 @@ describe('UsersController', () => {
 				params: { id: inviteeId },
 			});
 
-			userRepository.findOne.mockResolvedValue(mock<User>({ id: inviteeId }));
+			personRepository.findById.mockResolvedValue(mock<User>({ id: inviteeId }));
 			jwtService.sign.mockReturnValue(mockToken);
 			urlService.getInstanceBaseUrl.mockReturnValue(baseUrl);
 
 			await controller.generateInviteLink(request, mock<Response>());
 
 			expect(jwtService.sign).toHaveBeenCalledWith(
+				'invite',
 				{
 					inviterId,
 					inviteeId,

@@ -21,7 +21,7 @@ import {
 } from '@n8n/decorators';
 import type { NextFunction, Request, Response } from 'express';
 
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
+import { ForbiddenError } from '@n8n/errors';
 import { sendErrorResponse } from '@/response-helper';
 
 import { ExternalSecretsConfig } from './external-secrets.config';
@@ -96,7 +96,7 @@ export class SecretProvidersConnectionsController {
 			'secretsProviderConnection:user',
 			req.user.role?.slug,
 		);
-		return this.connectionsService.toPublicConnection(savedConnection);
+		return await this.connectionsService.toPublicConnection(savedConnection);
 	}
 
 	@Patch('/:providerKey')
@@ -114,7 +114,7 @@ export class SecretProvidersConnectionsController {
 			req.user.id,
 			req.user.role?.slug,
 		);
-		return this.connectionsService.toPublicConnection(connection);
+		return await this.connectionsService.toPublicConnection(connection);
 	}
 
 	@Delete('/:providerKey')
@@ -149,7 +149,7 @@ export class SecretProvidersConnectionsController {
 	): Promise<SecretProviderConnection> {
 		this.logger.debug('Getting connection', { providerKey });
 		const connection = await this.connectionsService.getConnection(providerKey);
-		return this.connectionsService.toPublicConnection(connection);
+		return await this.connectionsService.toPublicConnection(connection);
 	}
 
 	@Post('/:providerKey/test')

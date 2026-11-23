@@ -1,15 +1,23 @@
-ARG NODE_VERSION=24.14.1
-ARG PYTHON_VERSION=3.13
+ARG PNPM_VERSION=12.4.2
+
+# Each digest pins the multi-arch index of its tag. Change the tag and the digest together.
+# NODE_IMAGE matches BUILDER_IMAGE in docker/images/n8n/Dockerfile.
+ARG NODE_IMAGE=node:26.13.0-alpine3.24@sha256:8996bb5821d62a8fd9bb27c1cb07462f3fdce6e47d640c6a881ead0b064ce216
+ARG PYTHON_IMAGE=python:3.13.18-alpine3.24@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
+ARG ALPINE_IMAGE=alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 # ==============================================================================
 # STAGE 1: JavaScript runner (@n8n/task-runner) artifact from CI
 # ==============================================================================
-FROM node:${NODE_VERSION}-alpine AS javascript-runner-builder
+FROM ${NODE_IMAGE} AS javascript-runner-builder
 COPY ./dist/task-runner-javascript /app/task-runner-javascript
 
 WORKDIR /app/task-runner-javascript
 
-RUN corepack enable pnpm
+# Pin pnpm to the repo's packageManager version. `pnpm deploy` drops the
+# packageManager field from the deployed package.json, so nothing else here pins it.
+ARG PNPM_VERSION
+RUN npm i -g "pnpm@${PNPM_VERSION}"
 
 # Remove `catalog` and `workspace` references from package.json to allow `pnpm add` in extended images
 RUN node -e "const pkg = require('./package.json'); \
@@ -26,21 +34,20 @@ RUN node -e "const pkg = require('./package.json'); \
     delete pkg.devDependencies; \
     require('fs').writeFileSync('./package.json', JSON.stringify(pkg, null, 2));"
 
+# `--config.minimum-release-age=0`: pnpm defaults it to 1440 (24h), which would make
+# this reject any dependency published less than a day ago — e.g. a first-party
+# @n8n_io/ai-assistant-sdk bump landed within hours of its npm publish. This step only
+# re-resolves an already-vetted, already-pinned dependency set; the real supply-chain age
+# policy is enforced by the host install (pnpm-workspace.yaml + SafeChain).
 # Install moment (special case for backwards compatibility)
 RUN rm -f node_modules/.modules.yaml && \
-    pnpm add moment@2.30.1 --prod --no-lockfile
-
-# Rebuild isolated-vm for the container platform. Install build tools as
-# fallback in case prebuild-install cannot find a prebuilt binary.
-RUN apk add --no-cache --virtual .build-deps python3 make g++ && \
-    npm rebuild isolated-vm && \
-    apk del .build-deps
+    pnpm add moment@2.31.0 --save-prod --no-lockfile --config.minimum-release-age=0
 
 # ==============================================================================
 # STAGE 2: Python runner build (@n8n/task-runner-python) with uv
 # Produces a relocatable venv tied to the python version used
 # ==============================================================================
-FROM python:${PYTHON_VERSION}-alpine AS python-runner-builder
+FROM ${PYTHON_IMAGE} AS python-runner-builder
 ARG TARGETPLATFORM
 ARG UV_VERSION=0.8.14
 
@@ -86,9 +93,9 @@ RUN uv pip install . && rm -rf /app/task-runner-python/src
 # ==============================================================================
 # STAGE 3: Task Runner Launcher download
 # ==============================================================================
-FROM alpine:3.22 AS launcher-downloader
+FROM ${ALPINE_IMAGE} AS launcher-downloader
 ARG TARGETPLATFORM
-ARG LAUNCHER_VERSION=1.4.3
+ARG LAUNCHER_VERSION=1.6.0
 
 RUN set -e; \
     case "$TARGETPLATFORM" in \
@@ -108,12 +115,14 @@ RUN set -e; \
 # ==============================================================================
 # STAGE 4: Node alpine base for JS task runner
 # ==============================================================================
-FROM node:${NODE_VERSION}-alpine AS node-alpine
+FROM ${NODE_IMAGE} AS node-alpine
+ARG PNPM_VERSION
+RUN npm i -g "pnpm@${PNPM_VERSION}"
 
 # ==============================================================================
 # STAGE 5: Runtime
 # ==============================================================================
-FROM python:${PYTHON_VERSION}-alpine AS runtime
+FROM ${PYTHON_IMAGE} AS runtime
 ARG N8N_VERSION=snapshot
 ARG N8N_RELEASE_TYPE=dev
 
@@ -127,17 +136,16 @@ COPY --from=python-runner-builder /usr/local/bin/uv /usr/local/bin/uv
 # Bring node over from node-alpine
 COPY --from=node-alpine /usr/local/bin/node /usr/local/bin/node
 
-# libstdc++ is required by Node
+# libstdc++ and libatomic are required by Node
 # libc6-compat is required by task-runner-launcher
-RUN apk add --no-cache ca-certificates tini libstdc++ libc6-compat && \
+RUN apk add --no-cache ca-certificates tini libstdc++ libatomic libc6-compat && \
     apk upgrade --no-cache && \
     pip install --no-cache-dir "pip>=26.0" && \
     apk del apk-tools
 
-# Bring corepack and pnpm over, to make the image easier to extend
-COPY --from=node-alpine /usr/local/lib/node_modules/corepack /usr/local/lib/node_modules/corepack
-RUN ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack && \
-		ln -s ../lib/node_modules/corepack/dist/pnpm.js /usr/local/bin/pnpm
+# Bring pnpm over, to make the image easier to extend. pnpm 12 installs a
+# standalone native executable, so the runtime does not need npm.
+COPY --from=node-alpine /usr/local/lib/node_modules/pnpm/pnpm /usr/local/bin/pnpm
 
 RUN addgroup -g 1000 -S runner \
  && adduser  -u 1000 -S -G runner -h /home/runner -D runner

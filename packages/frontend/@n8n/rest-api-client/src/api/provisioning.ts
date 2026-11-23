@@ -8,7 +8,16 @@ export interface ProvisioningConfig {
 	scopesProvisionInstanceRole: boolean;
 	scopesProvisionProjectRoles: boolean;
 	scopesUseExpressionMapping: boolean;
+	/**
+	 * Default condition: role slug (or BLOCK_ACCESS_ASSIGNMENT) applied when a
+	 * login doesn't resolve to an instance role. Unset preserves legacy behavior.
+	 */
+	defaultInstanceRole?: string;
 }
+
+export type ProvisioningConfigPatch = Partial<ProvisioningConfig> & {
+	deleteProjectRules?: boolean;
+};
 
 export const getProvisioningConfig = async (
 	context: IRestApiContext,
@@ -18,7 +27,7 @@ export const getProvisioningConfig = async (
 
 export const saveProvisioningConfig = async (
 	context: IRestApiContext,
-	config: Partial<ProvisioningConfig>,
+	config: ProvisioningConfigPatch,
 ): Promise<ProvisioningConfig> => {
 	return await makeRestApiRequest(context, 'PATCH', '/sso/provisioning/config', config);
 };

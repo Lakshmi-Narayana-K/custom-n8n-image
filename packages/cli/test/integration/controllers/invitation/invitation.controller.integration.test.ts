@@ -1,3 +1,4 @@
+import { EventService, JwtService } from '@n8n/backend-services';
 import {
 	mockInstance,
 	randomEmail,
@@ -16,6 +17,10 @@ import { Container } from '@n8n/di';
 import { PROJECT_OWNER_ROLE_SLUG } from '@n8n/permissions';
 import { Not } from '@n8n/typeorm';
 
+import { ExternalHooks } from '@/external-hooks';
+import { PasswordUtility } from '@/services/password.utility';
+import { UserManagementMailer } from '@/user-management/email';
+
 import {
 	assertReturnedUserProps,
 	assertStoredUserProps,
@@ -24,12 +29,6 @@ import {
 import { createMember, createOwner, createUserShell } from '../../shared/db/users';
 import * as utils from '../../shared/utils';
 import type { UserInvitationResult } from '../../shared/utils/users';
-
-import { EventService } from '@/events/event.service';
-import { ExternalHooks } from '@/external-hooks';
-import { JwtService } from '@/services/jwt.service';
-import { PasswordUtility } from '@/services/password.utility';
-import { UserManagementMailer } from '@/user-management/email';
 
 describe('InvitationController', () => {
 	const mailer = mockInstance(UserManagementMailer);
@@ -49,16 +48,16 @@ describe('InvitationController', () => {
 	});
 
 	beforeEach(async () => {
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 		await userRepository.delete({ role: Not('global:owner') });
 	});
 
 	afterEach(() => {
-		jest.restoreAllMocks();
+		vi.restoreAllMocks();
 	});
 
 	function invitationToken(inviterId: string, inviteeId: string): string {
-		return Container.get(JwtService).sign({ inviterId, inviteeId }, { expiresIn: '90d' });
+		return Container.get(JwtService).sign('invite', { inviterId, inviteeId }, { expiresIn: '90d' });
 	}
 
 	describe('POST /invitations/accept', () => {
@@ -125,10 +124,12 @@ describe('InvitationController', () => {
 		});
 
 		test('should fail with invalid payloads', async () => {
-			const memberShell = await userRepository.save({
-				email: randomEmail(),
-				role: { slug: 'global:member' },
-			});
+			const memberShell = await userRepository.save(
+				userRepository.create({
+					email: randomEmail(),
+					role: { slug: 'global:member' },
+				}),
+			);
 			const validToken = invitationToken(instanceOwner.id, memberShell.id);
 
 			const invalidPayloads = [
@@ -431,7 +432,7 @@ describe('InvitationController', () => {
 						publicApi: false,
 					});
 				} else {
-					fail(`Unexpected event name: ${eventName}`);
+					expect.fail(`Unexpected event name: ${eventName}`);
 				}
 			}
 		});

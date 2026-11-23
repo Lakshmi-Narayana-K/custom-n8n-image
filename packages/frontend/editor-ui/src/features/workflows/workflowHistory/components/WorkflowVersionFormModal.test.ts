@@ -19,7 +19,7 @@ const renderComponent = createComponentRenderer(WorkflowVersionFormModal, {
 		stubActions: false,
 		initialState: {
 			[STORES.UI]: {
-				modalsById: {
+				modalStateById: {
 					[TEST_MODAL_KEY]: {
 						open: true,
 					},

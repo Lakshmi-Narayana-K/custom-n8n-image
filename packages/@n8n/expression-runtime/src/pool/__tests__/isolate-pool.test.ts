@@ -1,15 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { RuntimeBridge } from '../../types';
 import { IsolatePool, PoolDisposedError, PoolExhaustedError } from '../isolate-pool';
-
-function createMockBridge(): RuntimeBridge {
-	return {
-		initialize: vi.fn().mockResolvedValue(undefined),
-		execute: vi.fn().mockReturnValue('result'),
-		dispose: vi.fn().mockResolvedValue(undefined),
-		isDisposed: vi.fn().mockReturnValue(false),
-	};
-}
+import { createMockBridge } from '../../__tests__/helpers';
 
 function createFactory() {
 	return vi.fn().mockImplementation(async () => createMockBridge());
@@ -119,5 +111,46 @@ describe('IsolatePool', () => {
 		const replenished = pool.acquire();
 		expect(replenished).toBeDefined();
 		await pool.dispose();
+	});
+
+	it('should retry replenishment without leaking a rejection when setTimeout returns a number', async () => {
+		const nodeSetTimeout = globalThis.setTimeout;
+		const wait = async (ms: number) => await new Promise((resolve) => nodeSetTimeout(resolve, ms));
+		vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+			handler: () => void,
+			ms?: number,
+		): number => {
+			nodeSetTimeout(handler, ms);
+			return 1;
+		}) as unknown as typeof globalThis.setTimeout);
+
+		const leaked: unknown[] = [];
+		const onUnhandled = (reason: unknown) => leaked.push(reason);
+		process.on('unhandledRejection', onUnhandled);
+
+		let attempts = 0;
+		const factory = vi.fn().mockImplementation(async () => {
+			attempts++;
+			if (attempts === 1) return createMockBridge();
+			throw new Error('fail');
+		});
+
+		const pool = new IsolatePool(factory, 1);
+		await pool.initialize();
+
+		try {
+			pool.acquire();
+
+			const deadline = Date.now() + 3000;
+			while (attempts < 3 && Date.now() < deadline) await wait(50);
+			await wait(50);
+
+			expect(attempts).toBeGreaterThanOrEqual(3);
+			expect(leaked).toEqual([]);
+		} finally {
+			process.off('unhandledRejection', onUnhandled);
+			vi.mocked(globalThis.setTimeout).mockRestore();
+			await pool.dispose();
+		}
 	});
 });

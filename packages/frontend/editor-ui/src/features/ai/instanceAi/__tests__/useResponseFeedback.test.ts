@@ -50,13 +50,22 @@ function makeUserMessage(overrides: Partial<InstanceAiMessage> = {}): InstanceAi
 // Setup
 // ---------------------------------------------------------------------------
 
-function setup(initialMessages: InstanceAiMessage[] = []) {
+type PostFeedback = (
+	threadId: string,
+	responseId: string,
+	payload: { rating: 'up' | 'down'; comment?: string },
+) => Promise<void>;
+
+function setup(
+	initialMessages: InstanceAiMessage[] = [],
+	options: { postFeedback?: PostFeedback } = {},
+) {
 	const messages = ref<InstanceAiMessage[]>(initialMessages);
-	const currentThreadId = ref('thread-1');
 	const mockTrack = vi.fn();
 	const telemetry = { track: mockTrack };
-	const result = useResponseFeedback({ messages, currentThreadId, telemetry });
-	return { messages, currentThreadId, mockTrack, ...result };
+	const postFeedback = options.postFeedback;
+	const result = useResponseFeedback({ messages, threadId: 'thread-1', telemetry, postFeedback });
+	return { messages, mockTrack, postFeedback, ...result };
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +325,20 @@ describe('useResponseFeedback - submitFeedback', () => {
 		);
 	});
 
+	test('scrubs secrets and PII from the feedback text', () => {
+		const { submitFeedback, mockTrack } = setup();
+		submitFeedback('resp-1', {
+			feedback: 'broke for jane.doe@example.com with key sk-ant-api03-' + 'A'.repeat(24),
+		});
+		expect(mockTrack).toHaveBeenCalledWith(
+			'User submitted workflow generation feedback',
+			expect.objectContaining({
+				response_id: 'resp-1',
+				feedback: 'broke for [REDACTED] with key [REDACTED]',
+			}),
+		);
+	});
+
 	test('includes thread_id in telemetry', () => {
 		const { submitFeedback, mockTrack } = setup();
 		submitFeedback('resp-1', { rating: 'up' });
@@ -323,6 +346,50 @@ describe('useResponseFeedback - submitFeedback', () => {
 			'User rated workflow generation',
 			expect.objectContaining({ thread_id: 'thread-1' }),
 		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// postFeedback (LangSmith annotation)
+// ---------------------------------------------------------------------------
+
+describe('useResponseFeedback - postFeedback', () => {
+	test('thumbs-up posts rating to backend', () => {
+		const postFeedback = vi.fn<PostFeedback>().mockResolvedValue(undefined);
+		const { submitFeedback } = setup([], { postFeedback });
+		submitFeedback('resp-1', { rating: 'up' });
+		expect(postFeedback).toHaveBeenCalledWith('thread-1', 'resp-1', { rating: 'up' });
+	});
+
+	test('thumbs-down posts rating to backend', () => {
+		const postFeedback = vi.fn<PostFeedback>().mockResolvedValue(undefined);
+		const { submitFeedback } = setup([], { postFeedback });
+		submitFeedback('resp-1', { rating: 'down' });
+		expect(postFeedback).toHaveBeenCalledWith('thread-1', 'resp-1', { rating: 'down' });
+	});
+
+	test('text feedback merges the saved rating so comment upserts against rating', () => {
+		const postFeedback = vi.fn<PostFeedback>().mockResolvedValue(undefined);
+		const { submitFeedback } = setup([], { postFeedback });
+		submitFeedback('resp-1', { rating: 'down' });
+		submitFeedback('resp-1', { feedback: 'Too slow' });
+		expect(postFeedback).toHaveBeenLastCalledWith('thread-1', 'resp-1', {
+			rating: 'down',
+			comment: 'Too slow',
+		});
+	});
+
+	test('standalone text feedback without a prior rating is not posted', () => {
+		const postFeedback = vi.fn<PostFeedback>().mockResolvedValue(undefined);
+		const { submitFeedback } = setup([], { postFeedback });
+		submitFeedback('resp-1', { feedback: 'Random comment' });
+		expect(postFeedback).not.toHaveBeenCalled();
+	});
+
+	test('postFeedback rejection is swallowed and does not throw', () => {
+		const postFeedback = vi.fn<PostFeedback>().mockRejectedValue(new Error('network down'));
+		const { submitFeedback } = setup([], { postFeedback });
+		expect(() => submitFeedback('resp-1', { rating: 'up' })).not.toThrow();
 	});
 });
 

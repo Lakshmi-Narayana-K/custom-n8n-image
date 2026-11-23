@@ -1,7 +1,8 @@
 import type { IRunExecutionData } from 'n8n-workflow';
 import { NodeApiError, NodeOperationError } from 'n8n-workflow';
 
-import type { RedactableExecution } from '@/executions/execution-redaction';
+import type { RedactableExecution } from '@n8n/backend-services';
+
 import type { RedactionContext } from '../../execution-redaction.interfaces';
 import { FullItemRedactionStrategy } from '../full-item-redaction.strategy';
 
@@ -9,7 +10,10 @@ const makeContext = (overrides: Partial<RedactionContext> = {}): RedactionContex
 	user: { id: 'user-1' } as RedactionContext['user'],
 	redactExecutionData: undefined,
 	userCanReveal: false,
-	hasDynamicCredentials: false,
+	enforceDynCredRedaction: false,
+	enforceCredentialUsabilityRedaction: false,
+	inaccessibleCredentialIds: [],
+	redactedBySubWorkflow: false,
 	memo: new Map(),
 	...overrides,
 });
@@ -198,7 +202,7 @@ describe('FullItemRedactionStrategy', () => {
 			expect(execution.data.redactionInfo?.reason).toBe('workflow_redaction_policy');
 		});
 
-		it('sets reason "dynamic_credentials" when hasDynamicCredentials is true', async () => {
+		it('sets reason "dynamic_credentials" when enforceDynCredRedaction is true', async () => {
 			const execution = makeExecution({
 				NodeA: [
 					{
@@ -212,11 +216,110 @@ describe('FullItemRedactionStrategy', () => {
 				],
 			});
 
-			await strategy.apply(execution, makeContext({ hasDynamicCredentials: true }));
+			await strategy.apply(execution, makeContext({ enforceDynCredRedaction: true }));
 
 			const item = execution.data.resultData.runData.NodeA[0].data!.main[0]![0];
 			expect(item.redaction?.reason).toBe('dynamic_credentials');
 			expect(execution.data.redactionInfo?.reason).toBe('dynamic_credentials');
+		});
+
+		it('sets reason "credential_inaccessible" when enforceCredentialUsabilityRedaction is true', async () => {
+			const execution = makeExecution({
+				NodeA: [
+					{
+						startTime: 0,
+						executionIndex: 0,
+						executionTime: 0,
+						executionStatus: 'success',
+						source: [],
+						data: { main: [[{ json: { x: 1 } }]] },
+					},
+				],
+			});
+
+			await strategy.apply(
+				execution,
+				makeContext({
+					enforceCredentialUsabilityRedaction: true,
+					inaccessibleCredentialIds: ['alice-gmail'],
+				}),
+			);
+
+			const item = execution.data.resultData.runData.NodeA[0].data!.main[0]![0];
+			expect(item.redaction?.reason).toBe('credential_inaccessible');
+			expect(execution.data.redactionInfo?.reason).toBe('credential_inaccessible');
+			// Names the credentials, so the editor can link to where access is granted.
+			expect(execution.data.redactionInfo?.credentialIds).toEqual(['alice-gmail']);
+		});
+
+		it('prefers "dynamic_credentials" over "credential_inaccessible" when both are set', async () => {
+			const execution = makeExecution({
+				NodeA: [
+					{
+						startTime: 0,
+						executionIndex: 0,
+						executionTime: 0,
+						executionStatus: 'success',
+						source: [],
+						data: { main: [[{ json: { x: 1 } }]] },
+					},
+				],
+			});
+
+			await strategy.apply(
+				execution,
+				makeContext({ enforceDynCredRedaction: true, enforceCredentialUsabilityRedaction: true }),
+			);
+
+			expect(execution.data.redactionInfo?.reason).toBe('dynamic_credentials');
+		});
+
+		describe('sub-workflow redaction', () => {
+			const execution = () =>
+				makeExecution({
+					NodeA: [
+						{
+							startTime: 0,
+							executionIndex: 0,
+							executionTime: 0,
+							executionStatus: 'success',
+							source: [],
+							data: { main: [[{ json: { x: 1 } }]] },
+						},
+					],
+				});
+
+			it('sets reason "sub_workflow_redaction_policy" when redactedBySubWorkflow is true', async () => {
+				const target = execution();
+
+				await strategy.apply(target, makeContext({ redactedBySubWorkflow: true }));
+
+				const item = target.data.resultData.runData.NodeA[0].data!.main[0]![0];
+				expect(item.redaction?.reason).toBe('sub_workflow_redaction_policy');
+				expect(target.data.redactionInfo?.reason).toBe('sub_workflow_redaction_policy');
+			});
+
+			it('prefers "user_requested" over "sub_workflow_redaction_policy"', async () => {
+				const target = execution();
+
+				await strategy.apply(
+					target,
+					makeContext({ redactedBySubWorkflow: true, redactExecutionData: true }),
+				);
+
+				expect(target.data.redactionInfo?.reason).toBe('user_requested');
+			});
+
+			it('prefers "dynamic_credentials" over "sub_workflow_redaction_policy"', async () => {
+				const target = execution();
+
+				await strategy.apply(
+					target,
+					makeContext({ redactedBySubWorkflow: true, enforceDynCredRedaction: true }),
+				);
+
+				expect(target.data.redactionInfo?.reason).toBe('dynamic_credentials');
+			});
 		});
 	});
 
@@ -436,6 +539,92 @@ describe('FullItemRedactionStrategy', () => {
 
 				expect(execution.data.resultData.redactedError).toBeUndefined();
 			});
+		});
+	});
+
+	describe('executionData subtrees', () => {
+		const stackNode = {
+			id: 'node-1',
+			name: 'Test Node',
+			type: 'n8n-nodes-base.httpRequest',
+			typeVersion: 1,
+			position: [0, 0] as [number, number],
+			parameters: {},
+		};
+
+		it('clears item json and binary in nodeExecutionStack', async () => {
+			const execution = makeExecution({});
+			execution.data.executionData!.nodeExecutionStack = [
+				{
+					node: stackNode,
+					source: null,
+					data: {
+						main: [
+							[
+								{
+									json: { secret: 'stack-value' },
+									binary: { file: { mimeType: 'text/plain', data: 'abc' } },
+								},
+							],
+						],
+					},
+				},
+			];
+
+			await strategy.apply(execution, makeContext());
+
+			const item = execution.data.executionData!.nodeExecutionStack[0].data.main[0]![0];
+			expect(item.json).toEqual({});
+			expect(item.binary).toBeUndefined();
+			expect(item.redaction).toEqual({ redacted: true, reason: 'workflow_redaction_policy' });
+		});
+
+		it('moves item error to redaction.error in nodeExecutionStack', async () => {
+			const error = new NodeApiError(stackNode, { message: 'Bad Gateway' }, { httpCode: '502' });
+			const execution = makeExecution({});
+			execution.data.executionData!.nodeExecutionStack = [
+				{
+					node: stackNode,
+					source: null,
+					data: { main: [[{ json: { secret: 'stack-value' }, error }]] },
+				},
+			];
+
+			await strategy.apply(execution, makeContext());
+
+			const item = execution.data.executionData!.nodeExecutionStack[0].data.main[0]![0];
+			expect(item.error).toBeUndefined();
+			expect(item.redaction?.error).toEqual({ type: 'NodeApiError', httpCode: '502' });
+		});
+
+		it('clears item json and binary in waitingExecution', async () => {
+			const execution = makeExecution({});
+			execution.data.executionData!.waitingExecution = {
+				'Test Node': {
+					0: {
+						main: [
+							[
+								{
+									json: { secret: 'waiting-value' },
+									binary: { file: { mimeType: 'text/plain', data: 'abc' } },
+								},
+							],
+						],
+					},
+				},
+			};
+
+			await strategy.apply(execution, makeContext());
+
+			const item = execution.data.executionData!.waitingExecution['Test Node'][0].main[0]![0];
+			expect(item.json).toEqual({});
+			expect(item.binary).toBeUndefined();
+			expect(item.redaction).toEqual({ redacted: true, reason: 'workflow_redaction_policy' });
+		});
+
+		it('does nothing when executionData has no stack or waiting items', async () => {
+			const execution = makeExecution({});
+			await expect(strategy.apply(execution, makeContext())).resolves.toBeUndefined();
 		});
 	});
 

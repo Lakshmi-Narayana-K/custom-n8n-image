@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 import { DynamicStructuredTool, StructuredTool, Tool } from '@langchain/core/tools';
+import { sleep } from '@n8n/utils/sleep';
 import type {
 	AINodeConnectionType,
 	ChatNodeMessageWithButtons,
@@ -23,12 +24,11 @@ import type {
 	WorkflowExecuteMode,
 } from 'n8n-workflow';
 import {
-	ApplicationError,
+	UnexpectedError,
 	ExecutionBaseError,
 	NodeConnectionTypes,
 	NodeOperationError,
 	UserError,
-	sleepWithAbort,
 	isHitlToolType,
 } from 'n8n-workflow';
 import z, { ZodType } from 'zod';
@@ -36,8 +36,7 @@ import z, { ZodType } from 'zod';
 import { StructuredToolkit, type SupplyDataToolResponse } from './ai-tool-types';
 import { createNodeAsTool, getSchema } from './create-node-as-tool';
 import type { ExecuteContext, WebhookContext } from '../../node-execution-context';
-// eslint-disable-next-line import-x/no-cycle
-import { SupplyDataContext } from '../../node-execution-context/supply-data-context';
+import type { SupplyDataContext } from '../../node-execution-context/supply-data-context';
 import { isEngineRequest } from '../../requests-response';
 
 /**
@@ -46,6 +45,19 @@ import { isEngineRequest } from '../../requests-response';
 function ensureArray<T>(value: T | T[] | undefined): T[] {
 	if (value === undefined) return [];
 	return Array.isArray(value) ? value : [value];
+}
+
+// Tools are matched structurally, not by class identity
+function isTool(value: unknown): value is StructuredTool | Tool {
+	if (value instanceof StructuredTool || value instanceof Tool) return true;
+	if (value instanceof StructuredToolkit) return false;
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		typeof (value as { name?: unknown }).name === 'string' &&
+		typeof (value as { description?: unknown }).description === 'string' &&
+		typeof (value as { invoke?: unknown }).invoke === 'function'
+	);
 }
 
 export function createHitlToolkit(
@@ -79,6 +91,8 @@ export function createHitlToolkit(
 			metadata: {
 				sourceNodeName: hitlNode.name,
 				gatedToolNodeName: tool.metadata?.sourceNodeName as string | undefined,
+				// Keep the partner label so the agent still appends it after approval
+				attribution: tool.metadata?.attribution,
 				originalSchema: tool.schema,
 			},
 		});
@@ -101,6 +115,7 @@ export function createHitlToolkit(
  * 5. If denied: denial message → Agent knows not to retry
  */
 export async function createHitlToolSupplyData(
+	supplyDataContextClass: typeof SupplyDataContext,
 	hitlNode: INode,
 	workflow: Workflow,
 	runExecutionData: IRunExecutionData,
@@ -115,7 +130,7 @@ export async function createHitlToolSupplyData(
 	abortSignal?: AbortSignal,
 	parentNode?: INode,
 ): Promise<SupplyData> {
-	const context = new SupplyDataContext(
+	const context = new supplyDataContextClass(
 		workflow,
 		hitlNode,
 		additionalData,
@@ -185,8 +200,20 @@ function mapResult(result?: NodeOutput) {
 	if (result === undefined) {
 		response = undefined;
 	} else if (isEngineRequest(result)) {
-		response =
-			'Error: The Tool attempted to return an engine request, which is not supported in Agents';
+		// Tools running inside `makeHandleToolInvocation` cannot relay an
+		// `EngineRequest` to the workflow engine — the request/response loop
+		// only runs at top level. Sub-agent (`AgentToolV3`) resolves its own
+		// requests inline, so reaching this branch means another tool
+		// returned an EngineRequest from inside a parent agent's tool
+		// callback. Throw a clear UserError so the failure is loud and the
+		// builder gets an actionable message.
+		throw new UserError(
+			'A connected tool returned an engine request to its parent agent, which is only supported for top-level node execution.',
+			{
+				description:
+					'If you are seeing this from a nested AgentToolV3 sub-agent, update n8n — recent versions resolve sub-agent engine requests inline.',
+			},
+		);
 	} else if (containsBinaryData(result) && !containsDataThatIsUsefulToTheAgent(result)) {
 		response = 'Error: The Tool attempted to return binary data, which is not supported in Agents';
 	} else {
@@ -250,7 +277,7 @@ export function makeHandleToolInvocation(
 				lastError = undefined;
 				if (waitBetweenTries !== 0) {
 					try {
-						await sleepWithAbort(waitBetweenTries, abortSignal);
+						await sleep(waitBetweenTries, abortSignal);
 					} catch (abortError) {
 						return 'Error during node execution: Execution was cancelled';
 					}
@@ -352,7 +379,7 @@ function validateInputConfiguration(
 // Extends metadata for tools and toolkits to include the source node name that is used for HITL routing
 export function extendResponseMetadata(response: unknown, connectedNode: INode) {
 	// Ensure sourceNodeName is set for proper routing
-	if (response instanceof StructuredTool || response instanceof Tool) {
+	if (isTool(response)) {
 		response.metadata ??= {};
 		response.metadata.sourceNodeName = connectedNode.name;
 	}
@@ -367,6 +394,7 @@ export function extendResponseMetadata(response: unknown, connectedNode: INode) 
 
 export async function getInputConnectionData(
 	this: ExecuteContext | WebhookContext | SupplyDataContext,
+	supplyDataContextClass: typeof SupplyDataContext,
 	workflow: Workflow,
 	runExecutionData: IRunExecutionData,
 	parentRunIndex: number,
@@ -421,6 +449,7 @@ export async function getInputConnectionData(
 		// HITL tools need special handling to create the middleware tool
 		if (isHitlToolType(connectedNode?.type)) {
 			const supplyData = await createHitlToolSupplyData(
+				supplyDataContextClass,
 				connectedNode,
 				workflow,
 				runExecutionData,
@@ -444,7 +473,7 @@ export async function getInputConnectionData(
 			connectedNode.typeVersion,
 		);
 		const contextFactory = (runIndex: number, inputData: ITaskDataConnections) =>
-			new SupplyDataContext(
+			new supplyDataContextClass(
 				workflow,
 				connectedNode,
 				additionalData,
@@ -471,10 +500,16 @@ export async function getInputConnectionData(
 						connectedNodeType,
 						runExecutionData,
 					),
+					// Pass a context so n8n expressions in the user-provided
+					// `toolDescription` are evaluated against the upstream input
+					// data (matches the behaviour of nodes that supply their own
+					// tool, such as `toolWorkflow`).
+					context: contextFactory(parentRunIndex, parentInputData),
+					itemIndex,
 				});
 				nodes.push(supplyData);
 			} else {
-				throw new ApplicationError('Node does not have a `supplyData` method defined', {
+				throw new UnexpectedError('Node does not have a `supplyData` method defined', {
 					extra: { nodeName: connectedNode.name },
 				});
 			}
@@ -504,27 +539,35 @@ export async function getInputConnectionData(
 					});
 				}
 
-				let currentNodeRunIndex = 0;
-				if (runExecutionData.resultData.runData.hasOwnProperty(parentNode.name)) {
-					currentNodeRunIndex = runExecutionData.resultData.runData[parentNode.name].length;
-				}
-
-				// Display the error on the node which is causing it
+				// Display the error on the node which is causing it. The run goes after the runs
+				// this sub-node already recorded, not at the parent's run count.
+				const subNodeRunIndex = context.getNextRunIndex();
 				await context.addExecutionDataFunctions(
 					'input',
 					error,
 					connectionType,
-					parentNode.name,
-					currentNodeRunIndex,
+					undefined,
+					subNodeRunIndex,
 				);
 
 				await context.addExecutionDataFunctions(
 					'output',
 					error,
 					connectionType,
-					parentNode.name,
-					currentNodeRunIndex,
+					undefined,
+					subNodeRunIndex,
 				);
+
+				// The `subRun` entry is merged onto `runData[parent][parentRunCount]` at the end
+				// of the execution, so the parent must get a record there. A top-level parent gets
+				// one appended right after this failure; a sub-node parent never does.
+				if (!(this instanceof supplyDataContextClass)) {
+					let parentRunCount = 0;
+					if (runExecutionData.resultData.runData.hasOwnProperty(parentNode.name)) {
+						parentRunCount = runExecutionData.resultData.runData[parentNode.name].length;
+					}
+					context.stageSubRun(parentNode.name, parentRunCount, subNodeRunIndex);
+				}
 
 				// Display on the calling node which node has the error
 				throw new NodeOperationError(connectedNode, `Error in sub-node ${connectedNode.name}`, {

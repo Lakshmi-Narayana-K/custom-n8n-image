@@ -385,7 +385,7 @@ onBeforeMount(() => {
 						@click.stop="handleAttachClick"
 					/>
 					<div :class="$style.editActions">
-						<N8nButton variant="subtle" size="small" @click="handleCancelEdit">
+						<N8nButton variant="outline" size="small" @click="handleCancelEdit">
 							{{ i18n.baseText('chatHub.message.edit.cancel') }}
 						</N8nButton>
 						<N8nButton
@@ -401,7 +401,10 @@ onBeforeMount(() => {
 				</div>
 			</div>
 			<template v-else>
-				<div :class="[$style.chatMessage, { [$style.errorMessage]: message.status === 'error' }]">
+				<div
+					data-test-id="chat-message-content"
+					:class="[$style.chatMessage, { [$style.errorMessage]: message.status === 'error' }]"
+				>
 					<div v-if="attachments.length > 0" :class="$style.attachments">
 						<ChatFile
 							v-for="(attachment, index) in attachments"
@@ -467,7 +470,7 @@ onBeforeMount(() => {
 	}
 }
 
-.codeBlockActions > * {
+:global(.n8n-markdown-code-block-actions) > * {
 	margin-top: -2px;
 }
 

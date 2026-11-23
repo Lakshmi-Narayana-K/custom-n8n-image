@@ -18,16 +18,56 @@
  * @generated - This file generates code, but is itself manually maintained.
  */
 
+import { createHash } from 'crypto';
 import * as fs from 'fs';
 import { deepCopy } from 'n8n-workflow';
 import * as path from 'path';
 
-// eslint-disable-next-line import-x/no-cycle -- TODO: Refactor shared types/utils to break cycle
 import {
 	generateSingleVersionSchemaFile,
+	isPropertyOptional,
 	planSplitVersionSchemaFiles,
 } from './generate-zod-schemas';
+import {
+	buildDiscriminatorTree,
+	DISPLAY_ONLY_PROPERTY_TYPES,
+	extractAIInputTypesFromBuilderHint,
+	extractDiscriminatorCombinations,
+	filterPropertiesForVersion,
+	getPropertiesForCombination,
+	isCustomApiCall,
+	narrowDisplayOptionsByDisabled,
+	type AIInputTypeInfo,
+	type BuilderHintVariation,
+	type DiscriminatorCombination,
+	type DiscriminatorTree,
+	type NodeBuilderHint,
+	type NodeProperty,
+	type NodePropertyOption,
+	type NodeTypeDescription,
+} from './node-type-description';
+import { NODE_DEPRECATION_NOTICE } from '../node-deprecation';
 import { checkConditions } from '../validation/display-options';
+
+export {
+	buildDiscriminatorTree,
+	extractAIInputTypes,
+	extractAIInputTypesFromBuilderHint,
+	extractDiscriminatorCombinations,
+	filterPropertiesForVersion,
+	getPropertiesForCombination,
+	isCustomApiCall,
+	narrowDisplayOptionsByDisabled,
+	propertyAppliesToVersion,
+	type AIInputTypeInfo,
+	type BuilderHintVariation,
+	type DiscriminatorCombination,
+	type DiscriminatorTree,
+	type NodeProperty,
+	type NodePropertyOption,
+	type NodeTypeDescription,
+	type ParameterBuilderHint,
+} from './node-type-description';
 
 // =============================================================================
 // Configuration
@@ -36,7 +76,10 @@ import { checkConditions } from '../validation/display-options';
 /** Indentation string for generated code (2 spaces per level) */
 const INDENT = '  ';
 
-const NODES_BASE_TYPES = path.resolve(__dirname, '../../../../nodes-base/dist/types/nodes.json');
+export const NODES_BASE_TYPES = path.resolve(
+	__dirname,
+	'../../../../nodes-base/dist/types/nodes.json',
+);
 const NODES_LANGCHAIN_TYPES = path.resolve(
 	__dirname,
 	'../../../nodes-langchain/dist/types/nodes.json',
@@ -47,13 +90,41 @@ const DEV_OUTPUT_PATH = path.resolve(__dirname, '../../dist/node-definitions');
 // Path to nodes-base dist for finding output schemas
 const NODES_BASE_DIST = path.resolve(__dirname, '../../../../nodes-base/dist/nodes');
 
-// Discriminator fields that create operation-specific parameter sets
-// Only fields that truly benefit from splitting the type are included here
-// Other fields like authentication, trigger, agent, promptType are treated as regular properties
-const DISCRIMINATOR_FIELDS = ['resource', 'operation', 'mode'];
+function buildNodeConfigType(
+	paramsTypeName: string,
+	options: {
+		credentialsTypeName?: string;
+		subnodeConfigTypeName?: string;
+		subnodesRequired?: boolean;
+	} = {},
+): string {
+	const parts = [`NodeConfig<${paramsTypeName}>`];
 
-/** Custom API Call operations don't have fixed schemas - skip them */
-const CUSTOM_API_CALL_KEY = '__CUSTOM_API_CALL__';
+	if (options.credentialsTypeName) {
+		parts.push(`{ credentials?: ${options.credentialsTypeName} }`);
+	}
+
+	if (options.subnodeConfigTypeName) {
+		const optionalMark = options.subnodesRequired ? '' : '?';
+		parts.push(`{ subnodes${optionalMark}: ${options.subnodeConfigTypeName} }`);
+	}
+
+	return parts.join(' & ');
+}
+
+/**
+ * Runtime shape for `type: 'icon'` properties (see N8nIconPicker).
+ * Values are stored as `{ type: 'icon' | 'emoji'; value: string }`.
+ */
+const ICON_TS_TYPE = "{ type: 'icon' | 'emoji'; value: string }";
+
+/**
+ * Runtime shape for `type: 'workflowSelector'` and `type: 'agentSelector'` properties.
+ * Both hardcode two modes (`list` and `id`); see useResourceLocatorModes.ts.
+ * Stored as an INodeParameterResourceLocator, or as an Expression string.
+ */
+const WORKFLOW_SELECTOR_TS_TYPE =
+	"{ __rl: true; mode: 'list' | 'id'; value: string | number; cachedResultName?: string; cachedResultUrl?: string } | Expression<string>";
 
 const ASSIGNMENT_TYPE_JSDOC = `/**
  * Assignment type determines how the value is interpreted.
@@ -81,8 +152,11 @@ ${prefix} AssignmentType = 'string' | 'number' | 'boolean' | 'array' | 'object' 
 ${prefix} AssignmentCollectionValue = { assignments: Array<{ id: string; name: string; value: unknown; type: AssignmentType }> };`;
 }
 
-function isCustomApiCall(operation: string): boolean {
-	return operation === CUSTOM_API_CALL_KEY;
+function generateResourceMapperTypeDeclaration(exported: boolean): string {
+	const prefix = exported ? 'export type' : 'type';
+	return `${prefix} ResourceMapperField = { id?: string; displayName?: string; required?: boolean; defaultMatch?: boolean; display?: boolean; type?: string; canBeUsedToMatch?: boolean; [key: string]: unknown };
+${prefix} ResourceMapperCommon = { matchingColumns?: string[]; cachedResultName?: string; [key: string]: unknown };
+${prefix} ResourceMapperValue = ResourceMapperCommon & { mappingMode: string; value?: null | Record<string, unknown>; schema?: ResourceMapperField[] };`;
 }
 
 // TypeScript reserved words that need quoting
@@ -137,6 +211,7 @@ const GENERIC_AUTH_TYPE_VALUES = [
 	'httpHeaderAuth',
 	'httpQueryAuth',
 	'httpCustomAuth',
+	'httpTemplatedCustomAuth',
 	'oAuth1Api',
 	'oAuth2Api',
 ] as const;
@@ -219,68 +294,12 @@ const AI_TYPE_TO_SUBNODE_FIELD: Record<
 // Type Definitions
 // =============================================================================
 
-export interface ParameterBuilderHint {
-	message: string;
-	placeholderSupported?: boolean;
-}
-
-export interface NodeProperty {
-	name: string;
-	displayName: string;
-	type: string;
-	description?: string;
-	hint?: string;
-	builderHint?: ParameterBuilderHint;
-	default?: unknown;
-	required?: boolean;
-	options?: Array<{
-		name: string;
-		value?: string | number | boolean;
-		description?: string;
-		displayName?: string;
-		builderHint?: ParameterBuilderHint;
-		values?: NodeProperty[];
-	}>;
-	displayOptions?: {
-		show?: Record<string, unknown[]>;
-		hide?: Record<string, unknown[]>;
-	};
-	typeOptions?: Record<string, unknown>;
-	noDataExpression?: boolean;
-	modes?: Array<{
-		name: string;
-		displayName?: string;
-		type?: string;
-		typeOptions?: Record<string, unknown>;
-	}>;
-}
-
-export interface NodeTypeDescription {
-	name: string;
-	displayName: string;
-	description?: string;
-	group: string[];
-	version: number | number[];
-	defaultVersion?: number;
-	properties: NodeProperty[];
-	credentials?: Array<{ name: string; required?: boolean }>;
-	inputs: string[] | Array<{ type: string; displayName?: string }>;
-	outputs: string[] | Array<{ type: string; displayName?: string }>;
-	subtitle?: string;
-	usableAsTool?: boolean;
-	hidden?: boolean;
-	documentationUrl?: string;
-	/** Path to schema directory relative to nodes-base/dist/nodes/ (e.g., "Google/Drive") */
-	schemaPath?: string;
-}
-
-export interface DiscriminatorCombination {
-	resource?: string;
-	operation?: string;
-	mode?: string;
-	authentication?: string;
-	trigger?: string;
-	[key: string]: string | undefined;
+/**
+ * Collection options are nested properties. An options-type choice
+ * (`{ name, value }`) or a fixedCollection group (`{ name, values }`) is not.
+ */
+function isNodeProperty(option: NodePropertyOption | NodeProperty): option is NodeProperty {
+	return typeof option.type === 'string' && typeof option.displayName === 'string';
 }
 
 export interface VersionGroup {
@@ -295,6 +314,11 @@ export interface VersionGroup {
 export interface OutputSchema {
 	resource: string;
 	operation: string;
+	/**
+	 * `<param>-<value>` for a `<operation>.<param>-<value>.json` file: the shape
+	 * returned when the node parameter has that value. Absent for the plain file.
+	 */
+	variant?: string;
 	schema: JsonSchema;
 }
 
@@ -313,6 +337,117 @@ export interface JsonSchema {
 	enum?: unknown[];
 	const?: unknown;
 	$ref?: string;
+}
+
+// =============================================================================
+// JSDoc emission helpers
+// =============================================================================
+
+/**
+ * Emit `@builderHint` JSDoc plus optional multi-line `extraTypeDefContent` lines.
+ *
+ * `message` is HTML-escaped (`<` / `>` → entities) because it round-trips through
+ * the search engine's `<builder_hint>...</builder_hint>` XML envelope, where bare
+ * angle brackets would corrupt the wrapping tag.
+ *
+ * `extraTypeDefContent` does NOT escape angle brackets — author-written tags such
+ * as `<patterns>` must round-trip into the `.d.ts` verbatim so the LLM sees them
+ * as structural cues. Only `*\/` is escaped to keep the JSDoc block well-formed.
+ */
+/**
+ * Determines whether a variation should be emitted in the current scope.
+ *
+ * The two scopes are mutually exclusive so unconditional variations are
+ * NOT duplicated across narrowed types:
+ *
+ * - File-level header (no `combo`): emit ONLY unconditional variations
+ *   (those with no `displayOptions`). They appear once at the top of the
+ *   generated `.d.ts` and cover every narrowed type.
+ *
+ * - Narrowed config block (per `combo`): emit ONLY gated variations
+ *   whose `displayOptions` match the combo. Unconditional variations are
+ *   skipped here — they were already emitted at the file header.
+ */
+function variationApplies(
+	variation: BuilderHintVariation,
+	combo: DiscriminatorCombination | undefined,
+): boolean {
+	const opts = variation.displayOptions;
+
+	// File-level scope: only unconditional variations.
+	if (!combo) return !opts;
+
+	// Narrowed scope: only gated variations whose displayOptions match.
+	if (!opts) return false;
+
+	if (opts.show) {
+		for (const [key, conditions] of Object.entries(opts.show)) {
+			const value = combo[key];
+			if (value === undefined) return false;
+			if (!checkConditions(conditions, [value])) return false;
+		}
+	}
+	if (opts.hide) {
+		for (const [key, conditions] of Object.entries(opts.hide)) {
+			const value = combo[key];
+			if (value === undefined) continue;
+			if (checkConditions(conditions, [value])) return false;
+		}
+	}
+	return true;
+}
+
+function emitBuilderHint(
+	lines: string[],
+	indent: string,
+	hint: { propertyHint?: string; extraTypeDefContent?: BuilderHintVariation[] },
+	combo?: DiscriminatorCombination,
+): void {
+	if (hint.propertyHint) {
+		const safePropertyHint = hint.propertyHint
+			.replace(/\*\//g, '*\\/')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;');
+		lines.push(`${indent} * @builderHint ${safePropertyHint}`);
+	}
+
+	if (!hint.extraTypeDefContent) return;
+
+	for (const variation of hint.extraTypeDefContent) {
+		if (!variationApplies(variation, combo)) continue;
+		const safe = variation.content.replace(/\*\//g, '*\\/');
+		for (const line of safe.split('\n')) {
+			lines.push(`${indent} * ${line}`);
+		}
+	}
+}
+
+/**
+ * `builderHint` is an extended n8n property not part of the upstream
+ * `NodeTypeDescription`. Centralized cast keeps the rest of the file clean.
+ */
+function getNodeBuilderHint(node: NodeTypeDescription): NodeBuilderHint | undefined {
+	return (node as NodeTypeDescription & { builderHint?: NodeBuilderHint }).builderHint;
+}
+
+/**
+ * Emit a JSDoc block for the node-level builderHint scoped to a single
+ * discriminator combination — only variations whose `displayOptions` match the
+ * combo are rendered. The `propertyHint` is intentionally not re-emitted per combo
+ * (it already lands in the file-level node header).
+ */
+function emitNodeHintForCombo(
+	lines: string[],
+	node: NodeTypeDescription,
+	combo: DiscriminatorCombination,
+): void {
+	const hint = getNodeBuilderHint(node);
+	if (!hint?.extraTypeDefContent?.some((v) => variationApplies(v, combo))) return;
+
+	const hintLines: string[] = [`${INDENT}/**`];
+	emitBuilderHint(hintLines, INDENT, { extraTypeDefContent: hint.extraTypeDefContent }, combo);
+	hintLines.push(`${INDENT} */`);
+	lines.push(...hintLines);
 }
 
 // =============================================================================
@@ -339,13 +474,18 @@ function findNestedSchemaDir(dir: string, targetNames: string[]): string | undef
 		return undefined;
 	}
 
+	// Case-insensitive: node names don't round-trip folder casing reliably
+	// (chainLlm -> ChainLLM), and exact matching only appeared to work on
+	// macOS because APFS ignores case.
+	const targetsLower = targetNames.map((n) => n.toLowerCase());
+
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
 
 		const entryPath = path.join(dir, entry.name);
 
 		// Check if this directory matches our target and has __schema__
-		if (targetNames.includes(entry.name)) {
+		if (targetsLower.includes(entry.name.toLowerCase())) {
 			const schemaPath = path.join(entryPath, '__schema__');
 			if (fs.existsSync(schemaPath)) {
 				return schemaPath;
@@ -363,18 +503,130 @@ function findNestedSchemaDir(dir: string, targetNames: string[]): string | undef
 }
 
 /**
+ * Folder name (lowercased) to `__schema__` path for one schema root. It holds the
+ * same answers as the direct search in `findSchemaDirectory`, but it reads each
+ * directory once.
+ */
+interface SchemaRootIndex {
+	/** Direct children of the root. The flat search checks these first. */
+	flat: Map<string, string>;
+	/** First match in the pre-order walk that `findNestedSchemaDir` does. */
+	nested: Map<string, string>;
+}
+
+function buildSchemaRootIndex(root: string): SchemaRootIndex {
+	const index: SchemaRootIndex = { flat: new Map(), nested: new Map() };
+
+	const walk = (dir: string, depth: number) => {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+
+			const entryPath = path.join(dir, entry.name);
+			const key = entry.name.toLowerCase();
+			const schemaPath = path.join(entryPath, '__schema__');
+			if (fs.existsSync(schemaPath)) {
+				if (depth === 0 && !index.flat.has(key)) index.flat.set(key, schemaPath);
+				if (!index.nested.has(key)) index.nested.set(key, schemaPath);
+			}
+
+			if (entry.name !== '__schema__' && entry.name !== 'node_modules') {
+				walk(entryPath, depth + 1);
+			}
+		}
+	};
+
+	walk(root, 0);
+	return index;
+}
+
+/**
+ * Schema root indexes for the active generation run. A run looks up hundreds of
+ * node versions, and each miss used to walk the whole `dist/nodes` tree again.
+ * The indexes live only for one run, because other callers (and tests) can add
+ * schema directories between calls.
+ */
+let activeSchemaIndexes: Map<string, SchemaRootIndex> | undefined;
+
+/** Run `fn` with schema directory lookups served from a one-time index of each root. */
+export async function withSchemaDirIndex<T>(fn: () => Promise<T>): Promise<T> {
+	if (activeSchemaIndexes) return await fn();
+
+	activeSchemaIndexes = new Map();
+	try {
+		return await fn();
+	} finally {
+		activeSchemaIndexes = undefined;
+	}
+}
+
+function indexedSchemaDirectory(
+	indexes: Map<string, SchemaRootIndex>,
+	roots: string[],
+	baseName: string,
+): string | undefined {
+	const rootIndexes = roots.map((root) => {
+		let index = indexes.get(root);
+		if (!index) {
+			index = buildSchemaRootIndex(root);
+			indexes.set(root, index);
+		}
+		return index;
+	});
+
+	const key = baseName.toLowerCase();
+	for (const index of rootIndexes) {
+		const found = index.flat.get(key);
+		if (found) return found;
+	}
+	for (const index of rootIndexes) {
+		const found = index.nested.get(key);
+		if (found) return found;
+	}
+	return undefined;
+}
+
+/**
+ * Schema roots to search, in priority order: the package currently being
+ * generated (generate-node-defs-cli runs with CWD = that package, so e.g.
+ * nodes-langchain's own `__schema__` dirs resolve), then nodes-base as the
+ * shared fallback.
+ */
+export function schemaSearchRoots(): string[] {
+	const cwdRoot = path.resolve(process.cwd(), 'dist', 'nodes');
+	if (cwdRoot !== NODES_BASE_DIST && fs.existsSync(cwdRoot)) {
+		return [cwdRoot, NODES_BASE_DIST];
+	}
+	return [NODES_BASE_DIST];
+}
+
+/**
  * Find the schema directory for a node, searching both flat and nested paths
  *
  * @param baseName The base node name (e.g., 'gmail')
  * @returns Path to the __schema__ directory, or undefined if not found
  */
-function findSchemaDirectory(baseName: string, schemaPath?: string): string | undefined {
+export function findSchemaDirectory(baseName: string, schemaPath?: string): string | undefined {
+	const roots = schemaSearchRoots();
+
 	// If explicit schemaPath is provided, use it directly
 	if (schemaPath) {
-		const explicitPath = path.join(NODES_BASE_DIST, schemaPath, '__schema__');
-		if (fs.existsSync(explicitPath)) {
-			return explicitPath;
+		for (const root of roots) {
+			const explicitPath = path.join(root, schemaPath, '__schema__');
+			if (fs.existsSync(explicitPath)) {
+				return explicitPath;
+			}
 		}
+	}
+
+	if (activeSchemaIndexes) {
+		return indexedSchemaDirectory(activeSchemaIndexes, roots, baseName);
 	}
 
 	const possibleNames = [
@@ -383,16 +635,32 @@ function findSchemaDirectory(baseName: string, schemaPath?: string): string | un
 		baseName.toUpperCase(), // GMAIL
 	];
 
-	// Try flat paths first (most common case)
-	for (const folderName of possibleNames) {
-		const flatPath = path.join(NODES_BASE_DIST, folderName, '__schema__');
-		if (fs.existsSync(flatPath)) {
-			return flatPath;
+	// Try flat paths first (most common case). Match folder names
+	// case-insensitively — fs.existsSync with a guessed casing only works on
+	// case-insensitive filesystems (macOS), not on Linux CI.
+	const namesLower = possibleNames.map((n) => n.toLowerCase());
+	for (const root of roots) {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(root, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory() || !namesLower.includes(entry.name.toLowerCase())) continue;
+			const flatPath = path.join(root, entry.name, '__schema__');
+			if (fs.existsSync(flatPath)) {
+				return flatPath;
+			}
 		}
 	}
 
 	// Search recursively for nested paths (e.g., Google/Gmail/__schema__)
-	return findNestedSchemaDir(NODES_BASE_DIST, possibleNames);
+	for (const root of roots) {
+		const found = findNestedSchemaDir(root, possibleNames);
+		if (found) return found;
+	}
+	return undefined;
 }
 
 /**
@@ -428,14 +696,24 @@ export function discoverSchemasForNode(
 		return schemas;
 	}
 
-	// Try to find version directory - try exact match first, then closest lower version
-	const versionDir = findVersionDirectory(schemaDir, version);
-	if (!versionDir) {
-		schemaCache.set(cacheKey, schemas);
-		return schemas;
+	// Per-file fallback across version directories: the best-matching dir wins
+	// for every (resource, operation) it covers, and older dirs only fill the
+	// gaps. Without this, a sparse exact-version dir (e.g. Slack v2.7.0 holding
+	// only message/search.json) hides every schema a lower minor already has.
+	const seen = new Set<string>();
+	for (const versionDir of orderedVersionDirectories(schemaDir, version)) {
+		collectSchemasFromVersionDir(versionDir, schemas, seen);
 	}
 
-	// Scan version directory entries
+	schemaCache.set(cacheKey, schemas);
+	return schemas;
+}
+
+function collectSchemasFromVersionDir(
+	versionDir: string,
+	schemas: OutputSchema[],
+	seen: Set<string>,
+): void {
 	try {
 		const entries = fs.readdirSync(versionDir, { withFileTypes: true });
 
@@ -443,6 +721,10 @@ export function discoverSchemasForNode(
 			// JSON files directly in the version directory (nodes without resource/operation)
 			if (entry.isFile() && entry.name.endsWith('.json')) {
 				const operationName = entry.name.replace('.json', '');
+				// `output.<variant>.json` files are context-conditional layout
+				// variants (e.g. with-parser), not operations — skip them here.
+				if (operationName.includes('.')) continue;
+				if (seen.has(`/${operationName}`)) continue;
 				const filePath = path.join(versionDir, entry.name);
 
 				try {
@@ -453,6 +735,7 @@ export function discoverSchemasForNode(
 						operation: operationName,
 						schema,
 					});
+					seen.add(`/${operationName}`);
 				} catch {
 					// Skip invalid JSON files
 				}
@@ -468,8 +751,11 @@ export function discoverSchemasForNode(
 			for (const opEntry of operations) {
 				if (!opEntry.isFile() || !opEntry.name.endsWith('.json')) continue;
 
-				const operationName = opEntry.name.replace('.json', '');
+				const fileKey = opEntry.name.replace('.json', '');
+				if (seen.has(`${entry.name}/${fileKey}`)) continue;
 				const schemaPath = path.join(resourceDir, opEntry.name);
+				// `<operation>.<variant>.json` is a parameter-dependent shape of the operation.
+				const [operationName, variant] = splitOperationVariant(fileKey);
 
 				try {
 					const schemaContent = fs.readFileSync(schemaPath, 'utf-8');
@@ -477,8 +763,10 @@ export function discoverSchemasForNode(
 					schemas.push({
 						resource: entry.name,
 						operation: operationName,
+						...(variant ? { variant } : {}),
 						schema,
 					});
+					seen.add(`${entry.name}/${fileKey}`);
 				} catch {
 					// Skip invalid JSON files
 				}
@@ -487,49 +775,133 @@ export function discoverSchemasForNode(
 	} catch {
 		// Skip if directory can't be read
 	}
+}
 
-	schemaCache.set(cacheKey, schemas);
-	return schemas;
+/** Pad "1" / "2.3" to the on-disk "1.0.0" / "2.3.0" directory format. */
+export function padVersion(version: number): string {
+	return String(version).split('.').concat(['0', '0']).slice(0, 3).join('.');
 }
 
 /**
- * Find the best matching version directory for a given version
- * Tries exact match first (v{version}.0.0), then scans for closest lower version
- *
- * @param schemaDir Path to the __schema__ directory
- * @param version Target version number
- * @returns Path to version directory, or undefined if not found
+ * Hash every `__schema__/**\/*.json` file under the given roots (default: the
+ * same roots schema discovery searches). Schema content isn't part of
+ * `nodes.json`, so the build-time hash-skip in generate-node-defs-cli needs
+ * this to notice schema-only changes (e.g. a newly harvested output schema)
+ * and regenerate.
  */
-function findVersionDirectory(schemaDir: string, version: number): string | undefined {
-	// Try exact match first: v1.0.0, v2.0.0, etc.
-	const exactPath = path.join(schemaDir, `v${version}.0.0`);
-	if (fs.existsSync(exactPath)) {
-		return exactPath;
+export function computeSchemaCorpusHash(baseDirs: string[] = schemaSearchRoots()): string {
+	const hash = createHash('sha256');
+	for (const baseDir of baseDirs) {
+		const files: string[] = [];
+		collectSchemaDirs(baseDir, files);
+		files.sort();
+
+		for (const file of files) {
+			hash.update(path.relative(baseDir, file));
+			hash.update(fs.readFileSync(file));
+		}
+	}
+	return hash.digest('hex');
+}
+
+function collectSchemaDirs(dir: string, results: string[]): void {
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return;
 	}
 
-	// Scan for available versions and find closest lower
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		const entryPath = path.join(dir, entry.name);
+		if (entry.name === '__schema__') {
+			collectJsonFiles(entryPath, results);
+		} else {
+			collectSchemaDirs(entryPath, results);
+		}
+	}
+}
+
+function collectJsonFiles(dir: string, results: string[]): void {
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+
+	for (const entry of entries) {
+		const entryPath = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			collectJsonFiles(entryPath, results);
+		} else if (entry.name.endsWith('.json')) {
+			results.push(entryPath);
+		}
+	}
+}
+
+/** Parse a `vX.Y.Z` directory name into a comparable [X, Y, Z] tuple. */
+function parseVersionDir(name: string): number[] {
+	return name.slice(1).split('.').map(Number);
+}
+
+function compareVersionTuplesDesc(a: number[], b: number[]): number {
+	for (let i = 0; i < Math.max(a.length, b.length); i++) {
+		const diff = (b[i] ?? 0) - (a[i] ?? 0);
+		if (diff !== 0) return diff;
+	}
+	return 0;
+}
+
+/**
+ * Order version directories by how well they match the target version:
+ * exact/nearest same-major below first, then nearest same-major above (a v2.x
+ * node must not lose its schemas just because only a higher v2 minor was
+ * recorded), then lower majors newest-first. Schemas resolve per file across
+ * this list — the first directory covering a (resource, operation) wins.
+ *
+ * NOTE: unlike n8n-core's runtime resolver this never falls forward to a
+ * NEWER major — generated types should not describe a next-generation API
+ * shape; converging the two is tracked in the harmonization spec.
+ */
+function orderedVersionDirectories(schemaDir: string, version: number): string[] {
+	const target = padVersion(version).split('.').map(Number);
 	try {
 		const entries = fs.readdirSync(schemaDir, { withFileTypes: true });
 		const versionDirs = entries
 			.filter((e) => e.isDirectory() && /^v\d+(\.\d+)*$/.test(e.name))
-			.map((e) => {
-				const match = e.name.match(/^v(\d+)/);
-				return {
-					name: e.name,
-					majorVersion: match ? parseInt(match[1], 10) : 0,
-				};
-			})
-			.filter((v) => v.majorVersion <= version)
-			.sort((a, b) => b.majorVersion - a.majorVersion);
+			.map((e) => ({ name: e.name, tuple: parseVersionDir(e.name) }));
 
-		if (versionDirs.length > 0) {
-			return path.join(schemaDir, versionDirs[0].name);
-		}
+		const sameMajor = versionDirs.filter((v) => v.tuple[0] === target[0]);
+		const ordered = [
+			...sameMajor
+				.filter((v) => compareVersionTuplesDesc(v.tuple, target) >= 0)
+				.sort((a, b) => compareVersionTuplesDesc(a.tuple, b.tuple)),
+			...sameMajor
+				.filter((v) => compareVersionTuplesDesc(v.tuple, target) < 0)
+				.sort((a, b) => compareVersionTuplesDesc(b.tuple, a.tuple)),
+			...versionDirs
+				.filter((v) => v.tuple[0] < target[0])
+				.sort((a, b) => compareVersionTuplesDesc(a.tuple, b.tuple)),
+		];
+		return ordered.map((v) => path.join(schemaDir, v.name));
 	} catch {
-		// Ignore read errors
+		return [];
 	}
+}
 
-	return undefined;
+/**
+ * The type of an index signature that sits next to declared properties. It must
+ * accept the declared property types too, and `undefined` for optional ones.
+ */
+function indexSignatureType(
+	additionalType: string,
+	declaredTypes: string[],
+	hasOptional: boolean,
+): string {
+	const members = [additionalType, ...declaredTypes, ...(hasOptional ? ['undefined'] : [])];
+	return [...new Set(members)].join(' | ');
 }
 
 /**
@@ -601,12 +973,21 @@ export function jsonSchemaToTypeScript(schema: JsonSchema, indent = 0): string {
 		case 'object':
 			if (schema.properties && Object.keys(schema.properties).length > 0) {
 				const required = new Set(schema.required ?? []);
+				const declaredTypes: string[] = [];
 				const props = Object.entries(schema.properties).map(([key, propSchema]) => {
 					const optional = required.has(key) ? '' : '?';
 					const quotedKey = needsQuoting(key) ? `'${key}'` : key;
 					const propType = jsonSchemaToTypeScript(propSchema, indent + 1);
+					declaredTypes.push(propType);
 					return `${nextIndent}${quotedKey}${optional}: ${propType};`;
 				});
+				if (typeof schema.additionalProperties === 'object') {
+					const additionalType = jsonSchemaToTypeScript(schema.additionalProperties, indent + 1);
+					const hasOptional = Object.keys(schema.properties).some((key) => !required.has(key));
+					props.push(
+						`${nextIndent}[key: string]: ${indexSignatureType(additionalType, declaredTypes, hasOptional)};`,
+					);
+				}
 				return `{\n${props.join('\n')}\n${indentStr}}`;
 			}
 			if (schema.additionalProperties) {
@@ -635,7 +1016,31 @@ export function findSchemaForOperation(
 	operation: string,
 ): OutputSchema | undefined {
 	return schemas.find(
-		(s) => s.resource.toLowerCase() === resource.toLowerCase() && s.operation === operation,
+		(s) =>
+			!s.variant &&
+			s.resource.toLowerCase() === resource.toLowerCase() &&
+			s.operation === operation,
+	);
+}
+
+/** `get.simple-false` → `['get', 'simple-false']`; a name without a dot has no variant. */
+function splitOperationVariant(fileKey: string): [string, string | undefined] {
+	const dot = fileKey.indexOf('.');
+	if (dot <= 0) return [fileKey, undefined];
+	return [fileKey.slice(0, dot), fileKey.slice(dot + 1)];
+}
+
+/** The parameter-dependent shapes of one operation (`<operation>.<param>-<value>.json`). */
+export function findVariantSchemasForOperation(
+	schemas: OutputSchema[],
+	resource: string,
+	operation: string,
+): OutputSchema[] {
+	return schemas.filter(
+		(s) =>
+			s.variant !== undefined &&
+			s.resource.toLowerCase() === resource.toLowerCase() &&
+			s.operation === operation,
 	);
 }
 
@@ -687,10 +1092,8 @@ function mapNestedPropertyType(
 	discriminatorContext?: DiscriminatorCombination,
 ): string {
 	const result = mapNestedPropertyTypeInner(prop, discriminatorContext);
-	if (prop.noDataExpression) {
-		return stripExpressionFromType(result);
-	}
-	return result;
+	const expressionAwareResult = prop.noDataExpression ? stripExpressionFromType(result) : result;
+	return wrapMultipleValuesType(prop, expressionAwareResult);
 }
 
 function mapNestedPropertyTypeInner(
@@ -707,6 +1110,8 @@ function mapNestedPropertyTypeInner(
 				return 'string[]';
 			case 'resourceLocator':
 				return generateResourceLocatorType(prop);
+			case 'resourceMapper':
+				return 'ResourceMapperValue | Expression<string>';
 			case 'filter':
 				return 'FilterValue';
 			case 'assignmentCollection':
@@ -717,11 +1122,9 @@ function mapNestedPropertyTypeInner(
 	}
 
 	switch (prop.type) {
-		case 'string':
-			if (prop.builderHint?.placeholderSupported === false) {
-				return 'string | Expression<string>';
-			}
-			return 'string | Expression<string> | PlaceholderValue';
+		case 'string': {
+			return 'string | Expression<string>';
+		}
 		case 'number':
 			return 'number | Expression<number>';
 		case 'boolean':
@@ -765,6 +1168,8 @@ function mapNestedPropertyTypeInner(
 			return 'IDataObject | string | Expression<string>';
 		case 'resourceLocator':
 			return generateResourceLocatorType(prop);
+		case 'resourceMapper':
+			return 'ResourceMapperValue | Expression<string>';
 		case 'filter':
 			return 'FilterValue';
 		case 'assignmentCollection':
@@ -782,7 +1187,17 @@ function mapNestedPropertyTypeInner(
 		case 'notice':
 		case 'curlImport':
 		case 'credentials':
+		case 'callout':
 			return '';
+		case 'button':
+			// Buttons with `hasInputField: true` (e.g. AiTransform's instructions)
+			// store the user-typed text; pure-action buttons store the default ''.
+			return 'string | Expression<string>';
+		case 'icon':
+			return ICON_TS_TYPE;
+		case 'workflowSelector':
+		case 'agentSelector':
+			return WORKFLOW_SELECTOR_TS_TYPE;
 		case 'credentialsSelect':
 			// credentialsSelect is a string value (credential type name)
 			return 'string | Expression<string>';
@@ -809,16 +1224,6 @@ function quotePropertyName(name: string): string {
 }
 
 /**
- * Determine if a property should be optional in the generated type.
- * A property is optional if it's not required OR if it has a default value.
- * Properties with defaults can be omitted - the default will be used at runtime.
- */
-function isPropertyOptional(prop: NodeProperty): boolean {
-	const hasDefault = 'default' in prop && prop.default !== undefined;
-	return !prop.required || hasDefault;
-}
-
-/**
  * Generate a compact JSDoc comment for a nested property (used in fixedCollections)
  * Returns a multi-line JSDoc that can be placed before property definitions
  */
@@ -826,6 +1231,7 @@ function generateNestedPropertyJSDoc(
 	prop: NodeProperty,
 	indent: string,
 	discriminatorContext?: DiscriminatorCombination,
+	displayOptionsVariants?: Array<NodeProperty['displayOptions']>,
 ): string {
 	const lines: string[] = [];
 
@@ -849,11 +1255,13 @@ function generateNestedPropertyJSDoc(
 
 	// Builder hint - guidance for AI/workflow builders
 	if (prop.builderHint) {
-		const safeBuilderHint = prop.builderHint.message
-			.replace(/\*\//g, '*\\/')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;');
-		lines.push(`${indent} * @builderHint ${safeBuilderHint}`);
+		emitBuilderHint(lines, indent, prop.builderHint);
+	}
+
+	// Placeholder support flag — signals to the builder agent (and the runtime
+	// guard) that placeholder() is rejected for this parameter.
+	if (prop.builderHint?.placeholderSupported === false) {
+		lines.push(`${indent} * @placeholderSupported false`);
 	}
 
 	// Search/load method annotations — signals to the builder agent that
@@ -870,51 +1278,11 @@ function generateNestedPropertyJSDoc(
 		lines.push(`${indent} * @loadOptionsMethod ${prop.typeOptions.loadOptionsMethod}`);
 	}
 
-	// Display options - filter out @version since version is implicit from the file
-	// Also filter out conditions that match the current discriminator context (redundant)
-	if (prop.displayOptions) {
-		if (prop.displayOptions.show && Object.keys(prop.displayOptions.show).length > 0) {
-			const filteredShow = Object.entries(prop.displayOptions.show).filter(([key, values]) => {
-				// Filter out @version (existing behavior)
-				if (key === '@version') return false;
-				// Filter out conditions that match current discriminator context
-				// Strip leading '/' from key for root-level property references
-				const normalizedKey = key.startsWith('/') ? key.slice(1) : key;
-				if (discriminatorContext?.[normalizedKey] !== undefined) {
-					const showValues = values;
-					// If the discriminator value is in the show list, this is redundant
-					if (showValues.includes(discriminatorContext[normalizedKey])) return false;
-				}
-				return true;
-			});
-			if (filteredShow.length > 0) {
-				const showConditions = filteredShow
-					.map(([key, values]) => `${key}: [${values.map((v) => JSON.stringify(v)).join(', ')}]`)
-					.join(', ');
-				lines.push(`${indent} * @displayOptions.show { ${showConditions} }`);
-			}
-		}
-		if (prop.displayOptions.hide && Object.keys(prop.displayOptions.hide).length > 0) {
-			const filteredHide = Object.entries(prop.displayOptions.hide).filter(([key, values]) => {
-				// Filter out @version (existing behavior)
-				if (key === '@version') return false;
-				// Filter out conditions that match current discriminator context
-				// Strip leading '/' from key for root-level property references
-				const normalizedKey = key.startsWith('/') ? key.slice(1) : key;
-				if (discriminatorContext?.[normalizedKey] !== undefined) {
-					const hideValues = values;
-					// If the discriminator value is in the hide list, this is redundant
-					if (hideValues.includes(discriminatorContext[normalizedKey])) return false;
-				}
-				return true;
-			});
-			if (filteredHide.length > 0) {
-				const hideConditions = filteredHide
-					.map(([key, values]) => `${key}: [${values.map((v) => JSON.stringify(v)).join(', ')}]`)
-					.join(', ');
-				lines.push(`${indent} * @displayOptions.hide { ${hideConditions} }`);
-			}
-		}
+	// Display options. When the same key is declared several times with the
+	// same type, every variant's condition is listed.
+	const variants = displayOptionsVariants ?? [prop.displayOptions];
+	for (const displayOptions of mergeDisplayOptionsVariants(variants, discriminatorContext)) {
+		lines.push(...formatDisplayOptionsJSDocLines(displayOptions, indent, discriminatorContext));
 	}
 
 	// Default value - skip multi-line strings to avoid breaking JSDoc comments
@@ -933,6 +1301,209 @@ function generateNestedPropertyJSDoc(
 
 	lines.push(`${indent} */`);
 	return lines.join('\n');
+}
+
+type PropertyDisplayOptions = NonNullable<NodeProperty['displayOptions']>;
+
+/**
+ * Remove the conditions that the generated file already implies: `@version`
+ * is implicit from the file path, and every key the current combination
+ * defines is already decided. A property only reaches a combination's file
+ * when its show and hide conditions on those keys hold (see
+ * `getPropertiesForCombination` and `appliesToCombination`), so a remaining
+ * `hide: { operation: ['execute'] }` in the insert file is not a condition.
+ * What remains is the condition the builder still has to meet at run time.
+ */
+function getResidualDisplayOptions(
+	displayOptions: NodeProperty['displayOptions'],
+	discriminatorContext?: DiscriminatorCombination,
+): PropertyDisplayOptions {
+	const residual: PropertyDisplayOptions = {};
+	if (!displayOptions) return residual;
+
+	const keep = ([key]: [string, unknown[]]): boolean => {
+		if (key === '@version') return false;
+		// Strip leading '/' from key for root-level property references
+		const normalizedKey = key.startsWith('/') ? key.slice(1) : key;
+		return discriminatorContext?.[normalizedKey] === undefined;
+	};
+
+	const show = Object.entries(displayOptions.show ?? {}).filter(keep);
+	if (show.length > 0) residual.show = Object.fromEntries(show);
+	const hide = Object.entries(displayOptions.hide ?? {}).filter(keep);
+	if (hide.length > 0) residual.hide = Object.fromEntries(hide);
+	return residual;
+}
+
+function hasResidualDisplayOptions(
+	displayOptions: NodeProperty['displayOptions'],
+	discriminatorContext?: DiscriminatorCombination,
+): boolean {
+	const residual = getResidualDisplayOptions(displayOptions, discriminatorContext);
+	return residual.show !== undefined || residual.hide !== undefined;
+}
+
+function formatDisplayOptionsJSDocLines(
+	displayOptions: NodeProperty['displayOptions'],
+	indent: string,
+	discriminatorContext?: DiscriminatorCombination,
+): string[] {
+	const residual = getResidualDisplayOptions(displayOptions, discriminatorContext);
+	const format = (conditions: Record<string, unknown[]>): string =>
+		Object.entries(conditions)
+			.map(([key, values]) => `${key}: [${values.map((v) => JSON.stringify(v)).join(', ')}]`)
+			.join(', ');
+
+	const lines: string[] = [];
+	if (residual.show) lines.push(`${indent} * @displayOptions.show { ${format(residual.show)} }`);
+	if (residual.hide) lines.push(`${indent} * @displayOptions.hide { ${format(residual.hide)} }`);
+	return lines;
+}
+
+/**
+ * Reduce the displayOptions of same-named declarations to the list of
+ * conditions to document. An unconditional variant makes the key
+ * unconditional. A two-variant UX fork collapses into one condition.
+ */
+function mergeDisplayOptionsVariants(
+	variants: Array<NodeProperty['displayOptions']>,
+	discriminatorContext?: DiscriminatorCombination,
+): PropertyDisplayOptions[] {
+	const residuals = new Map<string, PropertyDisplayOptions>();
+	for (const variant of variants) {
+		const residual = getResidualDisplayOptions(variant, discriminatorContext);
+		if (residual.show === undefined && residual.hide === undefined) return [];
+		residuals.set(JSON.stringify(residual), residual);
+	}
+
+	const merged: PropertyDisplayOptions[] = [];
+	for (const residual of residuals.values()) {
+		const last = merged[merged.length - 1];
+		const combined = last
+			? (tryMergeUxForkVariants(last, residual) ?? tryMergeShowValueVariants(last, residual))
+			: null;
+		if (combined) {
+			merged[merged.length - 1] = combined;
+		} else {
+			merged.push(residual);
+		}
+	}
+	return merged;
+}
+
+/**
+ * Merge two show-only conditions that differ in the values of one key, e.g.
+ * `show: { type: ['text'] }` and `show: { type: ['number'] }` become
+ * `show: { type: ['text', 'number'] }`. Returns null for every other shape.
+ */
+function tryMergeShowValueVariants(
+	a: PropertyDisplayOptions,
+	b: PropertyDisplayOptions,
+): PropertyDisplayOptions | null {
+	if (a.hide !== undefined || b.hide !== undefined) return null;
+	if (a.show === undefined || b.show === undefined) return null;
+	const aShow = a.show;
+	const bShow = b.show;
+	const keys = Object.keys(aShow);
+	if (keys.length !== Object.keys(bShow).length || keys.some((key) => !(key in bShow))) {
+		return null;
+	}
+
+	const differing = keys.filter((key) => JSON.stringify(aShow[key]) !== JSON.stringify(bShow[key]));
+	if (differing.length !== 1) return null;
+
+	const [key] = differing;
+	const seen = new Set(aShow[key].map((value) => JSON.stringify(value)));
+	const values = [...aShow[key], ...bShow[key].filter((v) => !seen.has(JSON.stringify(v)))];
+	return { show: { ...aShow, [key]: values } };
+}
+
+/**
+ * Whether a nested property can display in the file of a combination.
+ * `getPropertiesForCombination` applies this rule to top-level properties
+ * only, so nested values need it here. Otherwise a value that the
+ * combination can never show would be documented as available, and
+ * `getResidualDisplayOptions` would then drop its condition. Root references
+ * (`/operation`) and bare keys both resolve against the combination.
+ */
+function appliesToCombination(
+	displayOptions: NodeProperty['displayOptions'],
+	combination?: DiscriminatorCombination,
+): boolean {
+	if (!displayOptions || !combination) return true;
+	const valueFor = (key: string): string | undefined =>
+		combination[key.startsWith('/') ? key.slice(1) : key];
+
+	for (const [key, conditions] of Object.entries(displayOptions.show ?? {})) {
+		const value = valueFor(key);
+		if (value !== undefined && !checkConditions(conditions, [value])) return false;
+	}
+	for (const [key, conditions] of Object.entries(displayOptions.hide ?? {})) {
+		const value = valueFor(key);
+		if (value !== undefined && checkConditions(conditions, [value])) return false;
+	}
+	return true;
+}
+
+/**
+ * Emit one type member per nested property name. Collection options and
+ * fixedCollection values often declare the same name several times with
+ * different displayOptions. One key per name keeps the type valid: identical
+ * types share one member, different types become a union whose members carry
+ * their own JSDoc.
+ */
+function emitNestedPropertyLines(
+	properties: NodeProperty[],
+	indent: string,
+	discriminatorContext?: DiscriminatorCombination,
+): string[] {
+	const variantsByName = new Map<string, Array<{ prop: NodeProperty; type: string }>>();
+	for (const prop of properties) {
+		// Skip notice and other display-only types
+		if (DISPLAY_ONLY_PROPERTY_TYPES.has(prop.type)) continue;
+		if (!appliesToCombination(prop.displayOptions, discriminatorContext)) continue;
+		const type = mapNestedPropertyType(prop, discriminatorContext);
+		if (!type) continue;
+		const variants = variantsByName.get(prop.name) ?? [];
+		variants.push({ prop, type });
+		variantsByName.set(prop.name, variants);
+	}
+
+	const lines: string[] = [];
+	for (const [name, variants] of variantsByName) {
+		const quotedName = quotePropertyName(name);
+		const variantsByType = new Map<string, NodeProperty[]>();
+		for (const { prop, type } of variants) {
+			const props = variantsByType.get(type) ?? [];
+			props.push(prop);
+			variantsByType.set(type, props);
+		}
+
+		if (variantsByType.size === 1) {
+			const [type, props] = Array.from(variantsByType.entries())[0];
+			const jsDoc = generateNestedPropertyJSDoc(
+				props[0],
+				indent,
+				discriminatorContext,
+				props.map((p) => p.displayOptions),
+			);
+			lines.push(`${jsDoc}\n${indent}${quotedName}?: ${type}`);
+			continue;
+		}
+
+		const memberIndent = indent + INDENT;
+		const members = Array.from(variantsByType.entries()).map(([type, props]) => {
+			const jsDoc = generateNestedPropertyJSDoc(
+				props[0],
+				memberIndent,
+				discriminatorContext,
+				props.map((p) => p.displayOptions),
+			);
+			return `${jsDoc}\n${memberIndent}| ${type}`;
+		});
+		lines.push(`${indent}${quotedName}?:\n${members.join('\n')}`);
+	}
+	return lines;
 }
 
 /**
@@ -957,32 +1528,40 @@ function generateFixedCollectionType(
 		}
 
 		const groupName = quotePropertyName(group.name);
-		const nestedProps: string[] = [];
-
-		for (const nestedProp of group.values) {
-			// Skip notice and other display-only types
-			if (['notice', 'curlImport', 'credentials'].includes(nestedProp.type)) {
-				continue;
-			}
-
-			const nestedType = mapNestedPropertyType(nestedProp, discriminatorContext);
-			if (nestedType) {
-				const quotedName = quotePropertyName(nestedProp.name);
-				// Generate JSDoc for the nested property
-				const jsDoc = generateNestedPropertyJSDoc(
-					nestedProp,
-					INDENT.repeat(3),
-					discriminatorContext,
-				);
-				nestedProps.push(`${jsDoc}\n${INDENT.repeat(3)}${quotedName}?: ${nestedType}`);
-			}
-		}
+		const nestedProps = emitNestedPropertyLines(
+			group.values,
+			INDENT.repeat(3),
+			discriminatorContext,
+		);
 
 		if (nestedProps.length > 0) {
 			const innerType = `{\n${nestedProps.join(';\n')};\n${INDENT.repeat(2)}}`;
-			const groupType = isMultipleValues ? `Array<${innerType}>` : innerType;
 
-			// Generate JSDoc for the group if it has builderHint or description
+			const minRequired = prop.typeOptions?.minRequiredFields;
+			const maxAllowed = prop.typeOptions?.maxAllowedFields;
+			const hasMinRequired = typeof minRequired === 'number' && minRequired > 0;
+
+			let groupType: string;
+			if (isMultipleValues) {
+				if (hasMinRequired) {
+					// Express the min-length constraint at the type level so the
+					// generated reference tells the builder the array must have
+					// at least N items (not just optional).
+					const requiredHead = Array(minRequired).fill(innerType).join(', ');
+					groupType = `[${requiredHead}, ...Array<${innerType}>]`;
+				} else {
+					groupType = `Array<${innerType}>`;
+				}
+			} else {
+				groupType = innerType;
+			}
+
+			// When minRequiredFields > 0, the group key itself is required —
+			// omitting it produces 0 entries and violates the constraint.
+			const groupOptional = hasMinRequired ? '' : '?';
+
+			// Generate JSDoc for the group if it has builderHint, description,
+			// or field-count constraints.
 			const groupJsDocLines: string[] = [];
 			if (group.displayName || group.description) {
 				const desc = (group.description ?? group.displayName ?? '')
@@ -992,23 +1571,31 @@ function generateFixedCollectionType(
 				groupJsDocLines.push(`${INDENT.repeat(2)}/** ${desc}`);
 			}
 			if (group.builderHint) {
-				const safeBuilderHint = group.builderHint.message
-					.replace(/\*\//g, '*\\/')
-					.replace(/</g, '&lt;')
-					.replace(/>/g, '&gt;');
 				if (groupJsDocLines.length === 0) {
 					groupJsDocLines.push(`${INDENT.repeat(2)}/**`);
 				}
-				groupJsDocLines.push(`${INDENT.repeat(2)} * @builderHint ${safeBuilderHint}`);
+				emitBuilderHint(groupJsDocLines, INDENT.repeat(2), group.builderHint);
+			}
+			if (isMultipleValues && hasMinRequired) {
+				if (groupJsDocLines.length === 0) {
+					groupJsDocLines.push(`${INDENT.repeat(2)}/**`);
+				}
+				groupJsDocLines.push(`${INDENT.repeat(2)} * @minItems ${minRequired}`);
+			}
+			if (isMultipleValues && typeof maxAllowed === 'number' && maxAllowed > 0) {
+				if (groupJsDocLines.length === 0) {
+					groupJsDocLines.push(`${INDENT.repeat(2)}/**`);
+				}
+				groupJsDocLines.push(`${INDENT.repeat(2)} * @maxItems ${maxAllowed}`);
 			}
 
 			if (groupJsDocLines.length > 0) {
 				groupJsDocLines.push(`${INDENT.repeat(2)} */`);
 				groups.push(
-					`${groupJsDocLines.join('\n')}\n${INDENT.repeat(2)}${groupName}?: ${groupType}`,
+					`${groupJsDocLines.join('\n')}\n${INDENT.repeat(2)}${groupName}${groupOptional}: ${groupType}`,
 				);
 			} else {
-				groups.push(`${groupName}?: ${groupType}`);
+				groups.push(`${groupName}${groupOptional}: ${groupType}`);
 			}
 		}
 	}
@@ -1021,9 +1608,116 @@ function generateFixedCollectionType(
 }
 
 /**
+ * Collapse a two-variant UX fork into a single displayOptions. Returns null if
+ * the two variants don't form a clean single-key partition.
+ *
+ * A fork qualifies when:
+ *  - all show/hide entries are equal across `a` and `b` except for exactly one
+ *    key K, and
+ *  - one variant has `hide: { K: H }` (with K absent from its `show`) while the
+ *    other has `show: { K: S }` (with K absent from its `hide`).
+ *
+ * The collapsed result is `hide: { K: H \ S }` plus the shared entries; if
+ * `H \ S` is empty the K constraint is dropped entirely (fully partitioned).
+ *
+ * Example — BigQuery `sqlQuery`:
+ *   variant a: `{ hide: { useLegacySql: [true] } }`
+ *   variant b: `{ show: { useLegacySql: [true] } }`
+ *   collapse → `{}` (no constraint — sqlQuery is settable in either mode)
+ *
+ * Multi-key forks (e.g. Cortex's 5-way `parameters`) return null and the caller
+ * keeps the first variant's displayOptions; the runtime path uses
+ * resolveOneOfSchemas so validation stays correct, only the .d.ts shows
+ * variant-1 only as a documented limitation.
+ */
+export function tryMergeUxForkVariants(
+	a: NodeProperty['displayOptions'] | undefined,
+	b: NodeProperty['displayOptions'] | undefined,
+): NodeProperty['displayOptions'] | null {
+	if (!a || !b) return null;
+
+	const aShow = a.show ?? {};
+	const aHide = a.hide ?? {};
+	const bShow = b.show ?? {};
+	const bHide = b.hide ?? {};
+
+	const allKeys = new Set<string>([
+		...Object.keys(aShow),
+		...Object.keys(aHide),
+		...Object.keys(bShow),
+		...Object.keys(bHide),
+	]);
+
+	const sharedShow: Record<string, unknown[]> = {};
+	const sharedHide: Record<string, unknown[]> = {};
+	let forkKey: string | null = null;
+	let hideValues: unknown[] | null = null;
+	let showValues: unknown[] | null = null;
+
+	for (const key of allKeys) {
+		const aS = aShow[key];
+		const bS = bShow[key];
+		const aH = aHide[key];
+		const bH = bHide[key];
+
+		const showEqual = JSON.stringify(aS ?? null) === JSON.stringify(bS ?? null);
+		const hideEqual = JSON.stringify(aH ?? null) === JSON.stringify(bH ?? null);
+
+		if (showEqual && hideEqual) {
+			if (aS !== undefined) sharedShow[key] = aS;
+			if (aH !== undefined) sharedHide[key] = aH;
+			continue;
+		}
+
+		if (forkKey !== null) return null; // more than one differing key
+		forkKey = key;
+
+		// Clean partition: K appears in hide of one variant and show of the other,
+		// with K absent from the opposite clause on each side.
+		if (aH !== undefined && aS === undefined && bS !== undefined && bH === undefined) {
+			hideValues = aH;
+			showValues = bS;
+		} else if (bH !== undefined && bS === undefined && aS !== undefined && aH === undefined) {
+			hideValues = bH;
+			showValues = aS;
+		} else {
+			return null;
+		}
+	}
+
+	const result: { show?: Record<string, unknown[]>; hide?: Record<string, unknown[]> } = {};
+	if (Object.keys(sharedShow).length > 0) result.show = sharedShow;
+
+	if (forkKey === null) {
+		if (Object.keys(sharedHide).length > 0) result.hide = sharedHide;
+		return result;
+	}
+
+	const showSerialized = (showValues ?? []).map((s) => JSON.stringify(s));
+	const remainingHide = (hideValues ?? []).filter(
+		(h) => !showSerialized.includes(JSON.stringify(h)),
+	);
+
+	if (remainingHide.length > 0) {
+		result.hide = { ...sharedHide, [forkKey]: remainingHide };
+	} else if (Object.keys(sharedHide).length > 0) {
+		result.hide = sharedHide;
+	}
+
+	return result;
+}
+
+/**
  * Merge properties with the same name for collection/fixedCollection types.
  * When multiple properties have the same name (e.g., multiple 'options' collections
  * with different displayOptions), their nested options should be merged.
+ *
+ * For same-named declarations whose displayOptions form a two-variant UX fork
+ * (e.g. BigQuery's `sqlQuery` `hide: { useLegacySql: [true] }` paired with
+ * `show: { useLegacySql: [true] }`), the displayOptions are collapsed to a
+ * single accurate representation via `tryMergeUxForkVariants`. Multi-key forks
+ * fall through and keep the first variant — the runtime path uses
+ * `resolveOneOfSchemas` so validation stays correct.
  *
  * @param properties - Array of node properties, possibly with duplicates
  * @returns Array of properties with duplicates merged
@@ -1033,22 +1727,45 @@ function mergeCollectionProperties(properties: NodeProperty[]): NodeProperty[] {
 
 	for (const prop of properties) {
 		// Skip display-only types
-		if (['notice', 'curlImport', 'credentials'].includes(prop.type)) {
+		if (DISPLAY_ONLY_PROPERTY_TYPES.has(prop.type)) {
 			continue;
 		}
 
-		if (seenProps.has(prop.name)) {
-			const existingProp = seenProps.get(prop.name)!;
+		// Narrow displayOptions so the emitted type reflects the actually-settable
+		// states: drop the property entirely if every visible state is read-only
+		// (e.g. the expression-prefilled sessionKey variant of the memory nodes,
+		// which lives only to render a disabled UI field in 'fromInput' mode).
+		const { displayOptions: narrowedDisplayOptions, fullyDisabled } =
+			narrowDisplayOptionsByDisabled(prop);
+		if (fullyDisabled) {
+			continue;
+		}
+		const normalizedProp: NodeProperty = { ...prop, displayOptions: narrowedDisplayOptions };
+
+		if (seenProps.has(normalizedProp.name)) {
+			const existingProp = seenProps.get(normalizedProp.name)!;
+
+			// Collapse a UX fork (e.g. hide+show partition of one key) into a
+			// single accurate displayOptions for the emitted type def.
+			if (existingProp.displayOptions && normalizedProp.displayOptions) {
+				const mergedDisplayOptions = tryMergeUxForkVariants(
+					existingProp.displayOptions,
+					normalizedProp.displayOptions,
+				);
+				if (mergedDisplayOptions !== null) {
+					existingProp.displayOptions = mergedDisplayOptions;
+				}
+			}
 
 			// For collection/fixedCollection types, merge nested options
 			if (
-				(prop.type === 'collection' || prop.type === 'fixedCollection') &&
-				prop.options &&
+				(normalizedProp.type === 'collection' || normalizedProp.type === 'fixedCollection') &&
+				normalizedProp.options &&
 				existingProp.options
 			) {
 				// Merge options, avoiding duplicates by name
 				const existingOptionNames = new Set(existingProp.options.map((o) => o.name));
-				for (const opt of prop.options) {
+				for (const opt of normalizedProp.options) {
 					if (!existingOptionNames.has(opt.name)) {
 						existingProp.options.push(opt);
 					}
@@ -1059,9 +1776,9 @@ function mergeCollectionProperties(properties: NodeProperty[]): NodeProperty[] {
 		}
 
 		// Create a shallow copy to avoid mutating the original when merging
-		seenProps.set(prop.name, {
-			...prop,
-			options: prop.options ? [...prop.options] : undefined,
+		seenProps.set(normalizedProp.name, {
+			...normalizedProp,
+			options: normalizedProp.options ? [...normalizedProp.options] : undefined,
 		});
 	}
 
@@ -1080,32 +1797,15 @@ function generateCollectionType(
 		return 'Record<string, unknown>';
 	}
 
-	const nestedProps: string[] = [];
-
-	for (const nestedProp of prop.options) {
-		// Skip if this is a group (has values array) - those are for fixedCollection
-		if (nestedProp.values !== undefined) {
-			continue;
-		}
-
-		// Skip notice and other display-only types
-		const nestedType = (nestedProp as NodeProperty).type;
-		if (['notice', 'curlImport', 'credentials'].includes(nestedType)) {
-			continue;
-		}
-
-		const propType = mapNestedPropertyType(nestedProp as NodeProperty, discriminatorContext);
-		if (propType) {
-			const quotedName = quotePropertyName(nestedProp.name);
-			// Generate JSDoc for the nested property
-			const jsDoc = generateNestedPropertyJSDoc(
-				nestedProp as NodeProperty,
-				INDENT.repeat(2),
-				discriminatorContext,
-			);
-			nestedProps.push(`${jsDoc}\n${INDENT.repeat(2)}${quotedName}?: ${propType}`);
-		}
-	}
+	// Groups (options with a values array) belong to fixedCollection, not here.
+	const nestedProperties = prop.options
+		.filter((option) => option.values === undefined)
+		.filter(isNodeProperty);
+	const nestedProps = emitNestedPropertyLines(
+		nestedProperties,
+		INDENT.repeat(2),
+		discriminatorContext,
+	);
 
 	if (nestedProps.length === 0) {
 		return 'Record<string, unknown>';
@@ -1115,14 +1815,11 @@ function generateCollectionType(
 }
 
 /**
- * Strip Expression<...> and PlaceholderValue from a type string.
+ * Strip Expression<...> from a type string.
  * Used when noDataExpression is true to produce plain types.
  */
 function stripExpressionFromType(typeStr: string): string {
-	return typeStr
-		.replace(/\s*\|\s*Expression<[^>]+>/g, '')
-		.replace(/\s*\|\s*PlaceholderValue/g, '')
-		.trim();
+	return typeStr.replace(/\s*\|\s*Expression<[^>]+>/g, '').trim();
 }
 
 /**
@@ -1133,10 +1830,16 @@ export function mapPropertyType(
 	discriminatorContext?: DiscriminatorCombination,
 ): string {
 	const result = mapPropertyTypeInner(prop, discriminatorContext);
-	if (prop.noDataExpression) {
-		return stripExpressionFromType(result);
+	const expressionAwareResult = prop.noDataExpression ? stripExpressionFromType(result) : result;
+	return wrapMultipleValuesType(prop, expressionAwareResult);
+}
+
+function wrapMultipleValuesType(prop: NodeProperty, typeStr: string): string {
+	if (!typeStr || prop.type === 'fixedCollection' || prop.type === 'multiOptions') {
+		return typeStr;
 	}
-	return result;
+
+	return prop.typeOptions?.multipleValues === true ? `Array<${typeStr}>` : typeStr;
 }
 
 function mapPropertyTypeInner(
@@ -1159,6 +1862,8 @@ function mapPropertyTypeInner(
 				return 'string[]';
 			case 'resourceLocator':
 				return generateResourceLocatorType(prop);
+			case 'resourceMapper':
+				return 'ResourceMapperValue | Expression<string>';
 			case 'filter':
 				return 'FilterValue';
 			case 'assignmentCollection':
@@ -1169,11 +1874,9 @@ function mapPropertyTypeInner(
 	}
 
 	switch (prop.type) {
-		case 'string':
-			if (prop.builderHint?.placeholderSupported === false) {
-				return 'string | Expression<string>';
-			}
-			return 'string | Expression<string> | PlaceholderValue';
+		case 'string': {
+			return 'string | Expression<string>';
+		}
 
 		case 'number':
 			return 'number | Expression<number>';
@@ -1225,6 +1928,9 @@ function mapPropertyTypeInner(
 		case 'resourceLocator':
 			return generateResourceLocatorType(prop);
 
+		case 'resourceMapper':
+			return 'ResourceMapperValue | Expression<string>';
+
 		case 'filter':
 			return 'FilterValue';
 
@@ -1249,7 +1955,20 @@ function mapPropertyTypeInner(
 		case 'notice':
 		case 'curlImport':
 		case 'credentials':
-			return ''; // Skip these types
+		case 'callout':
+			return ''; // Skip display-only types
+
+		case 'button':
+			// Buttons with `hasInputField: true` (e.g. AiTransform's instructions)
+			// store the user-typed text; pure-action buttons store the default ''.
+			return 'string | Expression<string>';
+
+		case 'icon':
+			return ICON_TS_TYPE;
+
+		case 'workflowSelector':
+		case 'agentSelector':
+			return WORKFLOW_SELECTOR_TS_TYPE;
 
 		case 'credentialsSelect':
 			// credentialsSelect is a string value (credential type name)
@@ -1263,247 +1982,6 @@ function mapPropertyTypeInner(
 // =============================================================================
 // Discriminated Union Generation
 // =============================================================================
-
-/**
- * Extract all discriminator combinations from a node's properties
- * Handles resource/operation, agent, promptType, mode, authentication patterns
- */
-export function extractDiscriminatorCombinations(
-	node: NodeTypeDescription,
-): DiscriminatorCombination[] {
-	const combinations: DiscriminatorCombination[] = [];
-
-	// Find discriminator properties
-	const resourceProp = node.properties.find((p) => p.name === 'resource' && p.type === 'options');
-	const operationProps = node.properties.filter(
-		(p) => p.name === 'operation' && p.type === 'options',
-	);
-
-	// Check for resource/operation pattern (most common)
-	if (resourceProp && operationProps.length > 0) {
-		// Extract resource values
-		const resources = resourceProp.options?.map((o) => String(o.value)) ?? [];
-
-		// For each resource, find its operations
-		for (const resource of resources) {
-			// Find operation prop that shows for this resource
-			const opProp = operationProps.find((op) => {
-				const showResource = op.displayOptions?.show?.resource;
-				return showResource?.includes(resource);
-			});
-
-			if (opProp?.options) {
-				for (const opOption of opProp.options) {
-					combinations.push({
-						resource,
-						operation: String(opOption.value),
-					});
-				}
-			}
-		}
-
-		return combinations;
-	}
-
-	// Check for other single-discriminator patterns
-	// Only 'mode' benefits from splitting - other fields like 'authentication', 'promptType', 'agent'
-	// should be treated as regular properties with union types, not as discriminators
-	const otherDiscriminators = ['mode'];
-	for (const discName of otherDiscriminators) {
-		const discProp = node.properties.find(
-			(p) => p.name === discName && p.type === 'options' && p.options && p.options.length > 1,
-		);
-
-		// Skip if this discriminator has displayOptions (it's conditionally shown)
-		// Exception: @version displayOptions are fine since version filtering is handled separately
-		if (discProp?.displayOptions) {
-			/* eslint-disable @typescript-eslint/prefer-nullish-coalescing -- Logical OR for boolean combination */
-			const hasNonVersionDisplayOptions =
-				(discProp.displayOptions.show &&
-					Object.keys(discProp.displayOptions.show).some((k) => k !== '@version')) ||
-				(discProp.displayOptions.hide &&
-					Object.keys(discProp.displayOptions.hide).some((k) => k !== '@version'));
-			/* eslint-enable @typescript-eslint/prefer-nullish-coalescing */
-			if (hasNonVersionDisplayOptions) {
-				continue;
-			}
-		}
-
-		if (discProp?.options) {
-			// Check if any properties depend on this discriminator
-			const hasDependentProps = node.properties.some(
-				(p) =>
-					p.displayOptions?.show?.[discName] !== undefined ||
-					p.displayOptions?.hide?.[discName] !== undefined,
-			);
-
-			if (hasDependentProps) {
-				for (const opt of discProp.options) {
-					combinations.push({
-						[discName]: String(opt.value),
-					});
-				}
-				return combinations;
-			}
-		}
-	}
-
-	return [];
-}
-
-/**
- * Get properties applicable to a specific discriminator combination.
- *
- * This function filters properties for code generation purposes.
- * It checks if a property "potentially applies" to a given discriminator combination
- * (resource, operation, mode) by evaluating show/hide conditions.
- *
- * Uses the centralized checkConditions function to support _cnd operators.
- */
-export function getPropertiesForCombination(
-	node: NodeTypeDescription,
-	combination: DiscriminatorCombination,
-): NodeProperty[] {
-	const result: NodeProperty[] = [];
-
-	for (const prop of node.properties) {
-		// Skip discriminator fields themselves
-		if (DISCRIMINATOR_FIELDS.includes(prop.name)) {
-			continue;
-		}
-
-		// Skip display-only types
-		if (['notice', 'curlImport', 'credentials'].includes(prop.type)) {
-			continue;
-		}
-
-		// Check if this property applies to the combination
-		if (prop.displayOptions?.show) {
-			let matches = true;
-
-			// Check each discriminator in the show condition
-			for (const [key, conditions] of Object.entries(prop.displayOptions.show)) {
-				if (combination[key] !== undefined) {
-					// This property has a condition on this discriminator
-					// Use checkConditions to support _cnd operators
-					if (!checkConditions(conditions, [combination[key]])) {
-						matches = false;
-						break;
-					}
-				}
-			}
-
-			if (matches) {
-				result.push(prop);
-			}
-		} else if (prop.displayOptions?.hide) {
-			// Check hide conditions - only exclude if combination explicitly matches hide
-			let excluded = false;
-
-			for (const [key, conditions] of Object.entries(prop.displayOptions.hide)) {
-				if (combination[key] !== undefined) {
-					if (checkConditions(conditions, [combination[key]])) {
-						excluded = true;
-						break;
-					}
-				}
-			}
-
-			if (!excluded) {
-				result.push(prop);
-			}
-		} else {
-			// Property has no conditions - include it (global property)
-			result.push(prop);
-		}
-	}
-
-	return result;
-}
-
-/**
- * Represents a conditional version check (e.g., { _cnd: { gte: 3.1 } })
- */
-interface VersionCondition {
-	_cnd: {
-		gt?: number;
-		gte?: number;
-		lt?: number;
-		lte?: number;
-	};
-}
-
-/**
- * Check if a version matches a single condition item (number or VersionCondition)
- */
-function versionMatchesCondition(version: number, condition: number | VersionCondition): boolean {
-	// If it's a simple number, check for equality
-	if (typeof condition === 'number') {
-		return version === condition;
-	}
-
-	// It's a conditional expression like { _cnd: { gte: 3.1 } }
-	if (condition._cnd) {
-		const { gt, gte, lt, lte } = condition._cnd;
-		if (gt !== undefined && !(version > gt)) return false;
-		if (gte !== undefined && !(version >= gte)) return false;
-		if (lt !== undefined && !(version < lt)) return false;
-		if (lte !== undefined && !(version <= lte)) return false;
-		return true;
-	}
-
-	return false;
-}
-
-/**
- * Check if a property applies to a specific version based on displayOptions
- * @param prop The property to check
- * @param version The specific version number to check for
- * @returns true if the property applies to this version
- */
-export function propertyAppliesToVersion(prop: NodeProperty, version: number): boolean {
-	// If no displayOptions, property applies to all versions
-	if (!prop.displayOptions) {
-		return true;
-	}
-
-	// Check show conditions for @version
-	if (prop.displayOptions.show?.['@version']) {
-		const allowedVersions = prop.displayOptions.show['@version'] as Array<
-			number | VersionCondition
-		>;
-		// Property should show if ANY version condition matches
-		const anyMatches = allowedVersions.some((cond) => versionMatchesCondition(version, cond));
-		if (!anyMatches) {
-			return false;
-		}
-	}
-
-	// Check hide conditions for @version
-	if (prop.displayOptions.hide?.['@version']) {
-		const hiddenVersions = prop.displayOptions.hide['@version'] as Array<number | VersionCondition>;
-		// Property should hide if ANY version condition matches
-		const anyMatches = hiddenVersions.some((cond) => versionMatchesCondition(version, cond));
-		if (anyMatches) {
-			return false;
-		}
-	}
-
-	return true;
-}
-
-/**
- * Filter node properties to only include those that apply to a specific version
- * @param properties The full list of node properties
- * @param version The specific version to filter for
- * @returns Properties that apply to the given version
- */
-export function filterPropertiesForVersion(
-	properties: NodeProperty[],
-	version: number,
-): NodeProperty[] {
-	return properties.filter((prop) => propertyAppliesToVersion(prop, version));
-}
 
 /**
  * Generate discriminated union types for a node
@@ -1567,20 +2045,19 @@ export function generateDiscriminatedUnion(node: NodeTypeDescription): string {
 
 		lines.push(`export type ${configName} = {`);
 
-		// Add discriminator fields
+		emitNodeHintForCombo(lines, node, combo);
+
+		// Discriminator literal fields for this combo.
 		for (const [key, value] of Object.entries(combo)) {
 			if (value !== undefined) {
 				lines.push(`${INDENT}${key}: '${value}';`);
 			}
 		}
 
-		// Track seen property names to avoid duplicates
-		const seenNames = new Set<string>();
-		for (const prop of props) {
-			if (seenNames.has(prop.name)) {
-				continue; // Skip duplicate property names
-			}
-			seenNames.add(prop.name);
+		// Merge same-named declarations (e.g. UX forks like BigQuery's sqlQuery)
+		// so the emitted type def reflects the OR of variants accurately.
+		const mergedProps = mergeCollectionProperties(props);
+		for (const prop of mergedProps) {
 			// Pass combo as discriminator context to filter redundant displayOptions
 			const propLine = generatePropertyLine(prop, isPropertyOptional(prop), combo);
 			if (propLine) {
@@ -1605,6 +2082,7 @@ export function generateDiscriminatedUnion(node: NodeTypeDescription): string {
 export function generatePropertyJSDoc(
 	prop: NodeProperty,
 	discriminatorContext?: DiscriminatorCombination,
+	options?: { conditionallyRequired?: boolean },
 ): string {
 	const lines: string[] = ['/**'];
 
@@ -1625,11 +2103,13 @@ export function generatePropertyJSDoc(
 
 	// Builder hint - guidance for AI/workflow builders
 	if (prop.builderHint) {
-		const safeBuilderHint = prop.builderHint.message
-			.replace(/\*\//g, '*\\/')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;');
-		lines.push(` * @builderHint ${safeBuilderHint}`);
+		emitBuilderHint(lines, '', prop.builderHint);
+	}
+
+	// Placeholder support flag — signals to the builder agent (and the runtime
+	// guard) that placeholder() is rejected for this parameter.
+	if (prop.builderHint?.placeholderSupported === false) {
+		lines.push(' * @placeholderSupported false');
 	}
 
 	// Search/load method annotations — signals to the builder agent that
@@ -1646,52 +2126,14 @@ export function generatePropertyJSDoc(
 		lines.push(` * @loadOptionsMethod ${prop.typeOptions.loadOptionsMethod}`);
 	}
 
-	// Display options - conditions for when this property is shown/hidden
-	// Filter out @version since version is implicit from the file
-	// Filter out conditions that match the current discriminator context (redundant)
-	if (prop.displayOptions) {
-		if (prop.displayOptions.show && Object.keys(prop.displayOptions.show).length > 0) {
-			const filteredShow = Object.entries(prop.displayOptions.show).filter(([key, values]) => {
-				// Filter out @version (existing behavior)
-				if (key === '@version') return false;
-				// Filter out conditions that match current discriminator context
-				// Strip leading '/' from key for root-level property references
-				const normalizedKey = key.startsWith('/') ? key.slice(1) : key;
-				if (discriminatorContext?.[normalizedKey] !== undefined) {
-					const showValues = values;
-					// If the discriminator value is in the show list, this is redundant
-					if (showValues.includes(discriminatorContext[normalizedKey])) return false;
-				}
-				return true;
-			});
-			if (filteredShow.length > 0) {
-				const showConditions = filteredShow
-					.map(([key, values]) => `${key}: [${values.map((v) => JSON.stringify(v)).join(', ')}]`)
-					.join(', ');
-				lines.push(` * @displayOptions.show { ${showConditions} }`);
-			}
-		}
-		if (prop.displayOptions.hide && Object.keys(prop.displayOptions.hide).length > 0) {
-			const filteredHide = Object.entries(prop.displayOptions.hide).filter(([key, values]) => {
-				// Filter out @version (existing behavior)
-				if (key === '@version') return false;
-				// Filter out conditions that match current discriminator context
-				// Strip leading '/' from key for root-level property references
-				const normalizedKey = key.startsWith('/') ? key.slice(1) : key;
-				if (discriminatorContext?.[normalizedKey] !== undefined) {
-					const hideValues = values;
-					// If the discriminator value is in the hide list, this is redundant
-					if (hideValues.includes(discriminatorContext[normalizedKey])) return false;
-				}
-				return true;
-			});
-			if (filteredHide.length > 0) {
-				const hideConditions = filteredHide
-					.map(([key, values]) => `${key}: [${values.map((v) => JSON.stringify(v)).join(', ')}]`)
-					.join(', ');
-				lines.push(` * @displayOptions.hide { ${hideConditions} }`);
-			}
-		}
+	// Display options - conditions for when this property is shown/hidden.
+	// @version and satisfied discriminators are implicit from the file.
+	lines.push(...formatDisplayOptionsJSDocLines(prop.displayOptions, '', discriminatorContext));
+
+	// The type marks a conditionally shown property as optional, so state the
+	// requirement here where the condition is visible.
+	if (options?.conditionallyRequired) {
+		lines.push(' * @required when the displayOptions conditions above match');
 	}
 
 	// Default value - skip multi-line strings to avoid breaking JSDoc comments
@@ -1720,6 +2162,15 @@ export function generateNodeJSDoc(node: NodeTypeDescription): string {
 	lines.push(` * ${node.displayName} Node Types`);
 	lines.push(' *');
 
+	// A hidden node is retired. On-disk generation skips it, so this only lands
+	// on a definition synthesized at run time — the one path that still hands a
+	// retired built-in to a builder. Keep it above the description: the reader
+	// must see it before it reads the parameters.
+	if (node.hidden) {
+		lines.push(` * @deprecated ${NODE_DEPRECATION_NOTICE}`);
+		lines.push(' *');
+	}
+
 	if (node.description) {
 		lines.push(` * ${node.description}`);
 	}
@@ -1728,6 +2179,18 @@ export function generateNodeJSDoc(node: NodeTypeDescription): string {
 	const subnodeType = getSubnodeOutputType(node);
 	if (subnodeType) {
 		lines.push(` * @subnodeType ${subnodeType}`);
+	}
+
+	// Node-level builder hint — searchHint and unconditional extraTypeDefContent.
+	// `relatedNodes` and `inputs` are consumed elsewhere (search engine, subnode
+	// extraction). Variations with `displayOptions` are skipped here — they're
+	// emitted per-combo in narrowed config types via `emitNodeHintForCombo`.
+	const nodeHint = getNodeBuilderHint(node);
+	if (nodeHint && (nodeHint.searchHint || nodeHint.extraTypeDefContent?.length)) {
+		emitBuilderHint(lines, '', {
+			propertyHint: nodeHint.searchHint,
+			extraTypeDefContent: nodeHint.extraTypeDefContent,
+		});
 	}
 
 	lines.push(' */');
@@ -1743,12 +2206,29 @@ export function generatePropertyLine(
 	optional: boolean,
 	discriminatorContext?: DiscriminatorCombination,
 ): string {
+	// Steer generic-auth selection at the moment the model reads this type: a
+	// bare union invites httpBearerAuth for any provider documenting
+	// `Authorization: Bearer <token>`.
+	if (prop.type === 'credentialsSelect' && prop.name === 'genericAuthType' && !prop.description) {
+		prop = {
+			...prop,
+			description:
+				'For NEW credentials prefer \'httpTemplatedCustomAuth\' whenever the auth fits header/query/body values — `Authorization: Bearer <token>` becomes the template {"headers":{"Authorization":"Bearer {{api_key}}"}}; do NOT use httpBearerAuth for it. Plain generic types are only for reusing an existing credential or for what a template cannot express (basic, digest, OAuth).',
+		};
+	}
+
 	const tsType = mapPropertyType(prop, discriminatorContext);
 	if (!tsType) {
 		return ''; // Skip this property
 	}
 
 	const lines: string[] = [];
+
+	// A property that is required only while a displayOptions condition holds
+	// cannot be required in the type: the other branch must omit it. The Zod
+	// schema enforces the condition at run time; the JSDoc documents it.
+	const conditionallyRequired =
+		!optional && hasResidualDisplayOptions(prop.displayOptions, discriminatorContext);
 
 	// JSDoc - generate if description, displayOptions, hint, builderHint, or non-trivial default exists
 	// This ensures LLMs can see dependency information even for properties without descriptions
@@ -1759,7 +2239,7 @@ export function generatePropertyLine(
 			(prop.displayOptions.hide && Object.keys(prop.displayOptions.hide).length > 0));
 	/* eslint-enable @typescript-eslint/prefer-nullish-coalescing */
 	if (prop.description || hasDisplayOptions || prop.hint || prop.builderHint) {
-		lines.push(generatePropertyJSDoc(prop, discriminatorContext));
+		lines.push(generatePropertyJSDoc(prop, discriminatorContext, { conditionallyRequired }));
 	}
 
 	// Property name (quote if reserved word, has spaces, or other invalid chars)
@@ -1770,7 +2250,7 @@ export function generatePropertyLine(
 		propName = `'${propName.replace(/'/g, "\\'")}'`;
 	}
 
-	const optionalMarker = optional ? '?' : '';
+	const optionalMarker = optional || conditionallyRequired ? '?' : '';
 	lines.push(`${INDENT}${propName}${optionalMarker}: ${tsType};`);
 
 	return lines.join(`\n${INDENT}`);
@@ -1959,60 +2439,6 @@ export function hasDiscriminatorPattern(node: NodeTypeDescription): boolean {
 }
 
 /**
- * Represents the discriminator tree structure for a node version
- * Used for generating index files at different levels
- */
-export interface DiscriminatorTree {
-	/** Type of discriminator pattern: 'resource_operation' or 'single' (mode, auth, etc.) */
-	type: 'resource_operation' | 'single';
-	/** For resource_operation: map of resource -> operations */
-	resources?: Map<string, string[]>;
-	/** For single discriminators: discriminator name and its values */
-	discriminatorName?: string;
-	discriminatorValues?: string[];
-}
-
-/**
- * Build a discriminator tree from combinations
- */
-export function buildDiscriminatorTree(
-	combinations: DiscriminatorCombination[],
-): DiscriminatorTree {
-	if (combinations.length === 0) {
-		return { type: 'single' };
-	}
-
-	const first = combinations[0];
-
-	// Resource/operation pattern
-	if (first.resource !== undefined && first.operation !== undefined) {
-		const resources = new Map<string, string[]>();
-		for (const combo of combinations) {
-			if (combo.resource && combo.operation) {
-				if (!resources.has(combo.resource)) {
-					resources.set(combo.resource, []);
-				}
-				resources.get(combo.resource)!.push(combo.operation);
-			}
-		}
-		return { type: 'resource_operation', resources };
-	}
-
-	// Single discriminator pattern
-	const discName = Object.keys(first).find((k) => first[k] !== undefined);
-	if (discName) {
-		const values = combinations.map((c) => c[discName]!).filter(Boolean);
-		return {
-			type: 'single',
-			discriminatorName: discName,
-			discriminatorValues: [...new Set(values)],
-		};
-	}
-
-	return { type: 'single' };
-}
-
-/**
  * Generate the _shared.ts file for a split version directory
  * Contains credentials, base type, and helper types shared across all discriminator files
  *
@@ -2046,21 +2472,23 @@ export function generateSharedFile(
 	lines.push('');
 
 	// Check properties
-	const outputProps = filteredProperties.filter(
-		(p) => !['notice', 'curlImport', 'credentials'].includes(p.type),
-	);
+	const outputProps = filteredProperties.filter((p) => !DISPLAY_ONLY_PROPERTY_TYPES.has(p.type));
 
 	// Helper types
 	const needsFilter = outputProps.some((p) => p.type === 'filter');
 	const needsAssignment = outputProps.some((p) => p.type === 'assignmentCollection');
+	const needsResourceMapper = outputProps.some((p) => p.type === 'resourceMapper');
 
-	if (needsFilter || needsAssignment) {
+	if (needsFilter || needsAssignment || needsResourceMapper) {
 		lines.push('// Helper types for special n8n fields');
 		if (needsFilter) {
 			lines.push(generateFilterTypeDeclaration(true));
 		}
 		if (needsAssignment) {
 			lines.push(generateAssignmentTypeDeclarations(true));
+		}
+		if (needsResourceMapper) {
+			lines.push(generateResourceMapperTypeDeclaration(true));
 		}
 		lines.push('');
 	}
@@ -2104,15 +2532,162 @@ export function generateSharedFile(
 	lines.push(`export interface ${baseTypeName} {`);
 	lines.push(`${INDENT}type: '${node.name}';`);
 	lines.push(`${INDENT}version: ${version};`);
-	if (credTypeName) {
-		lines.push(`${INDENT}credentials?: ${credTypeName};`);
-	}
 	if (isTrigger) {
 		lines.push(`${INDENT}isTrigger: true;`);
 	}
 	lines.push('}');
 
 	return lines.join('\n');
+}
+
+/**
+ * The parameter that selects between several output shapes of one operation,
+ * with the shape for each of its values.
+ */
+type ParameterValueType = 'boolean' | 'number' | 'string';
+
+interface ParameterVariants {
+	param: string;
+	/** Primitive type of the parameter values: it decides the literal and expression types. */
+	valueType: ParameterValueType;
+	/** The value used when the parameter is absent. The plain schema describes it. */
+	defaultValue: string;
+	others: Array<{ value: string; schema: JsonSchema }>;
+}
+
+/** `simple-false` → parameter `simple`, value `false`. */
+function parseParameterVariant(variant: string): { param: string; value: string } | undefined {
+	const separator = variant.indexOf('-');
+	if (separator <= 0) return undefined;
+	return { param: variant.slice(0, separator), value: variant.slice(separator + 1) };
+}
+
+/**
+ * Turn the variant schemas of an operation into one `ParameterVariants`, or
+ * undefined when they cannot be typed: no plain schema, several parameters,
+ * a parameter the node does not have, or no default to attach the plain schema to.
+ */
+function resolveParameterVariants(
+	props: NodeProperty[],
+	variantSchemas: OutputSchema[],
+): ParameterVariants | undefined {
+	const parsed = variantSchemas.map((s) => ({
+		...parseParameterVariant(s.variant ?? ''),
+		schema: s.schema,
+	}));
+	const param = parsed[0]?.param;
+	if (!param || parsed.some((entry) => entry.param !== param || entry.value === undefined)) {
+		return undefined;
+	}
+
+	const property = props.find((p) => p.name === param);
+	const valueType = property ? getParameterValueType(property) : undefined;
+	if (!property || !valueType) return undefined;
+
+	const defaultValue = String(property.default);
+	const others = parsed.map((entry) => ({ value: entry.value!, schema: entry.schema }));
+	if (
+		others.some((entry) => entry.value === defaultValue || !isTypeSafeValue(valueType, entry.value))
+	) {
+		return undefined;
+	}
+
+	const suffixes = [defaultValue, ...others.map((entry) => entry.value)].map((value) =>
+		parameterValueSuffix(valueType, value),
+	);
+	if (new Set(suffixes).size !== suffixes.length) return undefined;
+
+	return {
+		param,
+		valueType,
+		defaultValue,
+		others: others.sort((a, b) => a.value.localeCompare(b.value)),
+	};
+}
+
+/** The value type of a boolean parameter, or of an options parameter whose default is a string, number or boolean. */
+function getParameterValueType(property: NodeProperty): ParameterValueType | undefined {
+	if (property.type === 'boolean') {
+		return typeof property.default === 'boolean' ? 'boolean' : undefined;
+	}
+	if (property.type !== 'options') return undefined;
+	if (typeof property.default === 'number') return 'number';
+	if (typeof property.default === 'boolean') return 'boolean';
+	return typeof property.default === 'string' ? 'string' : undefined;
+}
+
+/**
+ * The part of a type name that stands for a parameter value. Signs and decimal
+ * points get words, because `toPascalCase` drops them and `-1` and `1` would
+ * share a name.
+ */
+function parameterValueSuffix(valueType: ParameterValueType, value: string): string {
+	if (valueType === 'number') return value.replace('-', 'Minus').replace('.', 'Point');
+	return toPascalCase(value);
+}
+
+/** A value comes from a file name, so it must be a valid literal of its type and safe to emit. */
+function isTypeSafeValue(valueType: ParameterValueType, value: string): boolean {
+	if (valueType === 'boolean') return value === 'true' || value === 'false';
+	if (valueType === 'number')
+		return Number.isFinite(Number(value)) && String(Number(value)) === value;
+	return /^[\w-]+$/.test(value);
+}
+
+/** `true` / `'raw'` — the TypeScript literal for a parameter value. */
+function parameterValueLiteral(variants: ParameterVariants, value: string): string {
+	return variants.valueType === 'string' ? `'${value}'` : value;
+}
+
+/**
+ * Emit the output types and node types of an operation whose output shape
+ * depends on one parameter: a node type for each value, plus one for an
+ * expression (which can be either), and a union of them under `nodeTypeName`.
+ */
+function generateParameterVariantTypes(
+	variants: ParameterVariants,
+	names: { base: string; output: string; node: string },
+	nodeBody: (typeName: string, paramsConstraint: string, outputType: string) => string[],
+): string[] {
+	const { param, defaultValue, others } = variants;
+	const suffixOf = (value: string) =>
+		`${toPascalCase(param)}${parameterValueSuffix(variants.valueType, value)}`;
+	const outputOf = (value: string) => `${names.base}${suffixOf(value)}Output`;
+	const nodeOf = (value: string) => `${names.base}${suffixOf(value)}Node`;
+	const lines: string[] = [];
+
+	for (const { value, schema: variantSchema } of others) {
+		lines.push(`export type ${outputOf(value)} = ${jsonSchemaToTypeScript(variantSchema)};`, '');
+	}
+
+	const members = [
+		{
+			node: nodeOf(defaultValue),
+			constraint: `${param}?: ${parameterValueLiteral(variants, defaultValue)}`,
+			output: names.output,
+		},
+		...others.map(({ value }) => ({
+			node: nodeOf(value),
+			constraint: `${param}: ${parameterValueLiteral(variants, value)}`,
+			output: outputOf(value),
+		})),
+	];
+	const allOutputs = members.map((member) => member.output).join(' | ');
+	members.push({
+		node: `${names.base}${toPascalCase(param)}ExpressionNode`,
+		constraint: `${param}: Expression<${variants.valueType}>`,
+		output: allOutputs,
+	});
+
+	for (const member of members) {
+		lines.push(...nodeBody(member.node, `{ ${member.constraint} }`, member.output), '');
+	}
+	lines.push(`export type ${names.node} =`);
+	members.forEach((member, index) => {
+		lines.push(`${INDENT}| ${member.node}${index === members.length - 1 ? ';' : ''}`);
+	});
+
+	return lines;
 }
 
 /**
@@ -2132,6 +2707,7 @@ export function generateDiscriminatorFile(
 	props: NodeProperty[],
 	schema?: JsonSchema,
 	_importDepth: number = 5,
+	variantSchemas: OutputSchema[] = [],
 ): string {
 	const prefix = getPackagePrefix(node.name);
 	const nodeName = prefix + toPascalCase(getNodeBaseName(node.name));
@@ -2171,15 +2747,19 @@ export function generateDiscriminatorFile(
 	// Check what helper types we need
 	const needsFilter = props.some((p) => p.type === 'filter');
 	const needsAssignment = props.some((p) => p.type === 'assignmentCollection');
+	const needsResourceMapper = props.some((p) => p.type === 'resourceMapper');
 
 	// Inline helper types (only the ones needed)
-	if (needsFilter || needsAssignment) {
+	if (needsFilter || needsAssignment || needsResourceMapper) {
 		lines.push('// Helper types for special n8n fields');
 		if (needsFilter) {
 			lines.push(generateFilterTypeDeclaration(false));
 		}
 		if (needsAssignment) {
 			lines.push(generateAssignmentTypeDeclarations(false));
+		}
+		if (needsResourceMapper) {
+			lines.push(generateResourceMapperTypeDeclaration(false));
 		}
 		lines.push('');
 	}
@@ -2232,18 +2812,19 @@ export function generateDiscriminatorFile(
 	}
 	lines.push(`export type ${configName} = {`);
 
-	// Add discriminator fields
+	emitNodeHintForCombo(lines, node, combo);
+
+	// Discriminator literal fields for this combo.
 	for (const [key, value] of Object.entries(combo)) {
 		if (value !== undefined) {
 			lines.push(`${INDENT}${key}: '${value}';`);
 		}
 	}
 
-	// Add properties
-	const seenNames = new Set<string>();
-	for (const prop of props) {
-		if (seenNames.has(prop.name)) continue;
-		seenNames.add(prop.name);
+	// Merge same-named declarations (e.g. UX forks like BigQuery's sqlQuery)
+	// so the emitted type def reflects the OR of variants accurately.
+	const mergedProps = mergeCollectionProperties(props);
+	for (const prop of mergedProps) {
 		// Pass combo as discriminator context to filter redundant displayOptions
 		const propLine = generatePropertyLine(prop, isPropertyOptional(prop), combo);
 		if (propLine) {
@@ -2274,27 +2855,44 @@ export function generateDiscriminatorFile(
 		}
 	}
 
-	lines.push(`export type ${nodeTypeName} = {`);
-	lines.push(`${INDENT}type: '${node.name}';`);
-	lines.push(`${INDENT}version: ${version};`);
-	if (node.credentials && node.credentials.length > 0) {
-		lines.push(`${INDENT}credentials?: Credentials;`);
-	}
-	if (isTrigger) {
-		lines.push(`${INDENT}isTrigger: true;`);
-	}
 	// Include subnodes in config if AI inputs exist
 	// subnodes field is required if any AI input type is required
 	const hasRequiredSubnodes = aiInputTypes.some((input) => input.required);
-	const subnodeOptionalMark = hasRequiredSubnodes ? '' : '?';
-	const configType = subnodeConfigTypeName
-		? `NodeConfig<${configName}> & { subnodes${subnodeOptionalMark}: ${subnodeConfigTypeName} }`
-		: `NodeConfig<${configName}>`;
-	lines.push(`${INDENT}config: ${configType};`);
-	if (schema) {
-		lines.push(`${INDENT}output?: Items<${outputTypeName}>;`);
+	const nodeBody = (typeName: string, paramsConstraint?: string, outputType?: string) => {
+		const paramsType = paramsConstraint ? `${configName} & ${paramsConstraint}` : configName;
+		const configType = buildNodeConfigType(paramsType, {
+			credentialsTypeName:
+				node.credentials && node.credentials.length > 0 ? 'Credentials' : undefined,
+			subnodeConfigTypeName: subnodeConfigTypeName ?? undefined,
+			subnodesRequired: hasRequiredSubnodes,
+		});
+		return [
+			`export type ${typeName} = {`,
+			`${INDENT}type: '${node.name}';`,
+			`${INDENT}version: ${version};`,
+			...(isTrigger ? [`${INDENT}isTrigger: true;`] : []),
+			`${INDENT}config: ${configType};`,
+			...(outputType ? [`${INDENT}output?: Items<${outputType}>;`] : []),
+			'};',
+		];
+	};
+
+	const variants = schema ? resolveParameterVariants(props, variantSchemas) : undefined;
+	if (variants) {
+		lines.push(
+			...generateParameterVariantTypes(
+				variants,
+				{
+					base: `${nodeName}${versionSuffix}${comboSuffix}`,
+					output: outputTypeName,
+					node: nodeTypeName,
+				},
+				nodeBody,
+			),
+		);
+	} else {
+		lines.push(...nodeBody(nodeTypeName, undefined, schema ? outputTypeName : undefined));
 	}
-	lines.push('};');
 
 	return lines.join('\n');
 }
@@ -2491,6 +3089,7 @@ export function planSplitVersionFiles(
 					props,
 					matchingSchema?.schema,
 					6,
+					findVariantSchemasForOperation(outputSchemas, resource, operation),
 				);
 				files.set(filePath, content);
 			}
@@ -2536,18 +3135,23 @@ export function planSplitVersionFiles(
 }
 
 /**
- * Check if node is a trigger (no main input)
+ * Check if node is a trigger.
+ *
+ * Triggers produce main data without consuming any: they emit on the `main`
+ * output and have no `main` input. AI sub-tool nodes (mcpClientTool,
+ * `*Tool` variants, etc.) also have no `main` input, but they emit on
+ * `ai_tool` rather than `main` — so a heuristic that only inspects inputs
+ * misclassifies them. Check outputs explicitly.
  */
 function isTriggerNode(node: NodeTypeDescription): boolean {
-	const inputs = node.inputs;
-	if (Array.isArray(inputs)) {
-		if (inputs.length === 0) return true;
-		if (typeof inputs[0] === 'string') {
-			return !(inputs as string[]).includes('main');
-		}
-		return !inputs.some((i) => typeof i === 'object' && i.type === 'main');
-	}
-	return false;
+	return hasMainConnection(node.outputs) && !hasMainConnection(node.inputs);
+}
+
+function hasMainConnection(connections: NodeTypeDescription['inputs']): boolean {
+	if (!Array.isArray(connections)) return false;
+	return connections.some((connection) =>
+		typeof connection === 'string' ? connection === 'main' : connection.type === 'main',
+	);
 }
 
 /**
@@ -2611,21 +3215,23 @@ export function generateSingleVersionTypeFile(
 		aiInputTypes.length > 0 ? `${nodeName}${versionSuffix}SubnodeConfig` : undefined;
 
 	// Check filtered properties that will actually be output
-	const outputProps = filteredProperties.filter(
-		(p) => !['notice', 'curlImport', 'credentials'].includes(p.type),
-	);
+	const outputProps = filteredProperties.filter((p) => !DISPLAY_ONLY_PROPERTY_TYPES.has(p.type));
 
 	// Helper types (if needed) based on filtered properties
 	const needsFilter = outputProps.some((p) => p.type === 'filter');
 	const needsAssignment = outputProps.some((p) => p.type === 'assignmentCollection');
+	const needsResourceMapper = outputProps.some((p) => p.type === 'resourceMapper');
 
-	if (needsFilter || needsAssignment) {
+	if (needsFilter || needsAssignment || needsResourceMapper) {
 		lines.push('// Helper types for special n8n fields');
 		if (needsFilter) {
 			lines.push(generateFilterTypeDeclaration(false));
 		}
 		if (needsAssignment) {
 			lines.push(generateAssignmentTypeDeclarations(false));
+		}
+		if (needsResourceMapper) {
+			lines.push(generateResourceMapperTypeDeclaration(false));
 		}
 		lines.push('');
 	}
@@ -2725,9 +3331,6 @@ export function generateSingleVersionTypeFile(
 	lines.push(`interface ${baseTypeName} {`);
 	lines.push(`${INDENT}type: '${node.name}';`);
 	lines.push(`${INDENT}version: ${specificVersion};`);
-	if (credTypeName) {
-		lines.push(`${INDENT}credentials?: ${credTypeName};`);
-	}
 	if (isTrigger) {
 		lines.push(`${INDENT}isTrigger: true;`);
 	}
@@ -2753,15 +3356,13 @@ export function generateSingleVersionTypeFile(
 		lines.push(`export type ${finalTypeName} = ${baseTypeName} & {`);
 		// Include narrowed subnode config in the NodeConfig if available
 		// subnodes field is required if any AI input type is required
-		if (subnodeConfigTypeName) {
-			const hasRequiredSubnodes = aiInputTypes.some((input) => input.required);
-			const subnodeOptionalMark = hasRequiredSubnodes ? '' : '?';
-			lines.push(
-				`${INDENT}config: NodeConfig<${configInfo.typeName}> & { subnodes${subnodeOptionalMark}: ${subnodeConfigTypeName} };`,
-			);
-		} else {
-			lines.push(`${INDENT}config: NodeConfig<${configInfo.typeName}>;`);
-		}
+		const hasRequiredSubnodes = aiInputTypes.some((input) => input.required);
+		const configType = buildNodeConfigType(configInfo.typeName, {
+			credentialsTypeName: credTypeName,
+			subnodeConfigTypeName: subnodeConfigTypeName ?? undefined,
+			subnodesRequired: hasRequiredSubnodes,
+		});
+		lines.push(`${INDENT}config: ${configType};`);
 		if (outputTypeName) {
 			lines.push(`${INDENT}output?: Items<${outputTypeName}>;`);
 		}
@@ -2785,7 +3386,9 @@ export function generateSingleVersionTypeFile(
 	} else {
 		// No config types - shouldn't happen, but handle gracefully
 		lines.push(`export type ${nodeTypeName} = ${baseTypeName} & {`);
-		lines.push(`${INDENT}config: NodeConfig<Record<string, unknown>>;`);
+		lines.push(
+			`${INDENT}config: ${buildNodeConfigType('Record<string, unknown>', { credentialsTypeName: credTypeName })};`,
+		);
 		lines.push('};');
 	}
 
@@ -2876,22 +3479,26 @@ export function generateNodeTypeFile(nodes: NodeTypeDescription | NodeTypeDescri
 	lines.push('');
 	lines.push('');
 
-	// Check properties that will actually be output (skip notice, curlImport, etc.) across all node entries
+	// Check properties that will actually be output across all node entries
 	const outputProps = nodeArray.flatMap((n) =>
-		n.properties.filter((p) => !['notice', 'curlImport', 'credentials'].includes(p.type)),
+		n.properties.filter((p) => !DISPLAY_ONLY_PROPERTY_TYPES.has(p.type)),
 	);
 
 	// Helper types (if needed) - only add if they'll actually be used in output
 	const needsFilter = outputProps.some((p) => p.type === 'filter');
 	const needsAssignment = outputProps.some((p) => p.type === 'assignmentCollection');
+	const needsResourceMapper = outputProps.some((p) => p.type === 'resourceMapper');
 
-	if (needsFilter || needsAssignment) {
+	if (needsFilter || needsAssignment || needsResourceMapper) {
 		lines.push('// Helper types for special n8n fields');
 		if (needsFilter) {
 			lines.push(generateFilterTypeDeclaration(false));
 		}
 		if (needsAssignment) {
 			lines.push(generateAssignmentTypeDeclarations(false));
+		}
+		if (needsResourceMapper) {
+			lines.push(generateResourceMapperTypeDeclaration(false));
 		}
 		lines.push('');
 	}
@@ -2981,13 +3588,16 @@ export function generateNodeTypeFile(nodes: NodeTypeDescription | NodeTypeDescri
 		const credType =
 			n.credentials && n.credentials.length > 0
 				? `${nodeName}${entryVersionSuffix}Credentials`
-				: 'Record<string, never>';
+				: undefined;
 
 		lines.push(`export type ${nodeTypeName} = {`);
 		lines.push(`${INDENT}type: '${n.name}';`);
 		lines.push(`${INDENT}version: ${versionUnion};`);
-		lines.push(`${INDENT}config: NodeConfig<${nodeName}${entryVersionSuffix}Params>;`);
-		lines.push(`${INDENT}credentials?: ${credType};`);
+		lines.push(
+			`${INDENT}config: ${buildNodeConfigType(`${nodeName}${entryVersionSuffix}Params`, {
+				credentialsTypeName: credType,
+			})};`,
+		);
 
 		if (isTrigger) {
 			lines.push(`${INDENT}isTrigger: true;`);
@@ -3092,20 +3702,19 @@ function generateDiscriminatedUnionForEntry(
 
 		lines.push(`export type ${configName} = {`);
 
-		// Add discriminator fields
+		emitNodeHintForCombo(lines, node, combo);
+
+		// Discriminator literal fields for this combo.
 		for (const [key, value] of Object.entries(combo)) {
 			if (value !== undefined) {
 				lines.push(`${INDENT}${key}: '${value}';`);
 			}
 		}
 
-		// Track seen property names to avoid duplicates
-		const seenNames = new Set<string>();
-		for (const prop of props) {
-			if (seenNames.has(prop.name)) {
-				continue; // Skip duplicate property names
-			}
-			seenNames.add(prop.name);
+		// Merge same-named declarations (e.g. UX forks like BigQuery's sqlQuery)
+		// so the emitted type def reflects the OR of variants accurately.
+		const mergedProps = mergeCollectionProperties(props);
+		for (const prop of mergedProps) {
 			// Pass combo as discriminator context to filter redundant displayOptions
 			const propLine = generatePropertyLine(prop, isPropertyOptional(prop), combo);
 			if (propLine) {
@@ -3245,210 +3854,6 @@ const AI_SUBNODE_TYPES: Array<{
 // =============================================================================
 // AI Input Type Extraction and Narrowed Subnode Config Generation
 // =============================================================================
-
-export interface AIInputTypeInfo {
-	type: string;
-	required: boolean;
-	displayOptions?: {
-		show?: Record<string, unknown[]>;
-		hide?: Record<string, unknown[]>;
-	};
-}
-
-// Types for builderHint.inputs
-interface BuilderHintInput {
-	required?: boolean;
-	displayOptions?: {
-		show?: Record<string, unknown[]>;
-		hide?: Record<string, unknown[]>;
-	};
-}
-
-interface NodeBuilderHint {
-	inputs?: Record<string, BuilderHintInput>;
-}
-
-/**
- * Extract AI input types from a node definition.
- * Handles both static array inputs and dynamic expression inputs.
- *
- * @param node The node type description
- * @returns Array of AI input types with required status (e.g., [{ type: 'ai_languageModel', required: true }])
- */
-export function extractAIInputTypes(node: NodeTypeDescription): AIInputTypeInfo[] {
-	const inputs = node.inputs;
-	// Use Map to track type -> required status (true if ANY input of that type is required)
-	const aiTypes: Map<string, boolean> = new Map();
-
-	// Handle string inputs (expression format like "={{ ... }}")
-	if (typeof inputs === 'string') {
-		// Extract ai_* types from the expression string using regex
-		// For expression inputs, we also try to extract required status
-		const aiTypeRegex = /["']ai_(\w+)["']/g;
-		let match;
-		while ((match = aiTypeRegex.exec(inputs)) !== null) {
-			const aiType = `ai_${match[1]}`;
-			// Check if this type has required: true in the expression
-			// Look for pattern like: { type: "ai_languageModel", ... required: true }
-			const requiredRegex = new RegExp(
-				`\\{[^}]*type:\\s*["']${aiType}["'][^}]*required:\\s*true[^}]*\\}`,
-				'g',
-			);
-			const isRequired = requiredRegex.test(inputs);
-			// Only update if not already set to true (any required input makes it required)
-			if (!aiTypes.has(aiType) || isRequired) {
-				aiTypes.set(aiType, isRequired);
-			}
-		}
-		return [...aiTypes.entries()].map(([type, required]) => ({ type, required }));
-	}
-
-	// Handle array inputs
-	if (!Array.isArray(inputs)) {
-		return [];
-	}
-
-	for (const input of inputs) {
-		let inputType: string | undefined;
-		let isRequired = false;
-
-		if (typeof input === 'string') {
-			inputType = input;
-		} else if (typeof input === 'object' && input !== null && 'type' in input) {
-			inputType = input.type;
-			// Extract required status from object input
-			if ('required' in input && input.required === true) {
-				isRequired = true;
-			}
-		}
-
-		// Only include AI input types (starting with 'ai_')
-		if (inputType?.startsWith('ai_')) {
-			// If any input of this type is required, mark it as required
-			const existingRequired = aiTypes.get(inputType) ?? false;
-			aiTypes.set(inputType, existingRequired || isRequired);
-		}
-	}
-
-	return [...aiTypes.entries()].map(([type, required]) => ({ type, required }));
-}
-
-/**
- * Extract AI input types from builderHint.inputs when available.
- * Falls back to extractAIInputTypes when no builderHint is present.
- *
- * This function:
- * - Uses builderHint.inputs for explicit subnode configuration
- * - Filters subnodes based on discriminator combo (mode, resource, operation)
- * - Strips discriminator keys from displayOptions (they're used for filtering)
- * - Preserves non-discriminator displayOptions for JSDoc generation
- *
- * @param node The node type description
- * @param combo Optional discriminator combination for filtering
- * @returns Array of AI input types with required status and displayOptions
- */
-export function extractAIInputTypesFromBuilderHint(
-	node: NodeTypeDescription,
-	combo?: DiscriminatorCombination,
-): AIInputTypeInfo[] {
-	// builderHint is an extended property not yet in the official type definition
-	const nodeWithBuilderHint = node as NodeTypeDescription & { builderHint?: NodeBuilderHint };
-	const builderHint = nodeWithBuilderHint.builderHint;
-	if (!builderHint?.inputs) {
-		// Fall back to existing extraction, but mark all as optional
-		// since we can't reliably determine required status from expressions
-		return extractAIInputTypes(node).map((input) => ({
-			...input,
-			required: false,
-		}));
-	}
-
-	const result: AIInputTypeInfo[] = [];
-
-	for (const [inputType, config] of Object.entries(builderHint.inputs)) {
-		if (!inputType.startsWith('ai_')) continue;
-
-		// Check if this input applies to the current discriminator combo
-		if (combo && config.displayOptions?.show) {
-			let applies = true;
-			for (const [key, values] of Object.entries(config.displayOptions.show)) {
-				if (DISCRIMINATOR_FIELDS.includes(key) && combo[key as keyof DiscriminatorCombination]) {
-					// This is a discriminator check
-					const comboValue = combo[key as keyof DiscriminatorCombination];
-					if (!values.includes(comboValue)) {
-						applies = false;
-						break;
-					}
-				}
-			}
-			if (!applies) continue;
-		}
-
-		// Determine if required (default to false for safety)
-		const isRequired = config.required === true;
-
-		// Extract non-discriminator displayOptions for JSDoc
-		const nonDiscriminatorOptions = getNonDiscriminatorDisplayOptions(config.displayOptions);
-
-		const aiInput: AIInputTypeInfo = {
-			type: inputType,
-			required: isRequired,
-		};
-
-		// Only add displayOptions if there are non-discriminator ones
-		if (nonDiscriminatorOptions) {
-			aiInput.displayOptions = nonDiscriminatorOptions;
-		}
-
-		result.push(aiInput);
-	}
-
-	return result;
-}
-
-/**
- * Extract non-discriminator displayOptions from a displayOptions object.
- * Discriminators (mode, resource, operation) are stripped as they're used for filtering.
- */
-function getNonDiscriminatorDisplayOptions(
-	displayOptions?: BuilderHintInput['displayOptions'],
-): AIInputTypeInfo['displayOptions'] | undefined {
-	if (!displayOptions) return undefined;
-
-	const result: AIInputTypeInfo['displayOptions'] = {};
-
-	if (displayOptions.show) {
-		const filteredShow: Record<string, unknown[]> = {};
-		for (const [key, values] of Object.entries(displayOptions.show)) {
-			if (!DISCRIMINATOR_FIELDS.includes(key)) {
-				filteredShow[key] = values;
-			}
-		}
-		if (Object.keys(filteredShow).length > 0) {
-			result.show = filteredShow;
-		}
-	}
-
-	if (displayOptions.hide) {
-		const filteredHide: Record<string, unknown[]> = {};
-		for (const [key, values] of Object.entries(displayOptions.hide)) {
-			if (!DISCRIMINATOR_FIELDS.includes(key)) {
-				filteredHide[key] = values;
-			}
-		}
-		if (Object.keys(filteredHide).length > 0) {
-			result.hide = filteredHide;
-		}
-	}
-
-	// Return undefined if empty
-	if (!result.show && !result.hide) {
-		return undefined;
-	}
-
-	return result;
-}
-
 /**
  * Format displayOptions as a JSDoc annotation string.
  * Format: @displayOptions.show { key: [values] }
@@ -3953,6 +4358,10 @@ export interface GenerationResult {
  * @returns Result with count of nodes processed
  */
 export async function orchestrateGeneration(options: GenerationOptions): Promise<GenerationResult> {
+	return await withSchemaDirIndex(async () => await generateAll(options));
+}
+
+async function generateAll(options: GenerationOptions): Promise<GenerationResult> {
 	const { nodes, outputDir } = options;
 
 	// Group nodes by package, filtering hidden

@@ -14,7 +14,6 @@ import type {
 	IConnections,
 	INode,
 	INodeExecutionData,
-	INodes,
 	INodeTypeDescription,
 	NodeHint,
 } from 'n8n-workflow';
@@ -47,6 +46,13 @@ export const DEFAULT_START_POSITION_X = GRID_SIZE * 11;
 export const DEFAULT_START_POSITION_Y = GRID_SIZE * 15;
 export const HEADER_HEIGHT = 65;
 export const PUSH_NODES_OFFSET = DEFAULT_NODE_SIZE[0] * 2 + GRID_SIZE;
+// Horizontal gap the auto-layout leaves between adjacent nodes (dagre `ranksep`).
+// Shared so manual placement and cleanup stay in lockstep.
+export const NODE_X_SPACING = GRID_SIZE * 8;
+// Center-to-center horizontal step when placing a node directly after another
+// (plus button, connection drop, mid-flow insert). Must equal a node width plus
+// NODE_X_SPACING so a freshly placed node lands exactly where cleanup would put it.
+export const HORIZONTAL_NODE_STEP = DEFAULT_NODE_SIZE[0] + NODE_X_SPACING;
 export const DEFAULT_VIEWPORT_BOUNDARIES: ViewportBoundaries = {
 	xMin: -Infinity,
 	yMin: -Infinity,
@@ -154,33 +160,14 @@ export const doRectsOverlap = (
 	);
 };
 
-/**
- * Returns the closest number divisible by the given number
- */
-const closestNumberDivisibleBy = (inputNumber: number, divisibleBy: number): number => {
-	const quotient = Math.ceil(inputNumber / divisibleBy);
-
-	// 1st possible closest number
-	const inputNumber1 = divisibleBy * quotient;
-
-	// 2nd possible closest number
-	const inputNumber2 =
-		inputNumber * divisibleBy > 0 ? divisibleBy * (quotient + 1) : divisibleBy * (quotient - 1);
-
-	// if true, then inputNumber1 is the required closest number
-	if (Math.abs(inputNumber - inputNumber1) < Math.abs(inputNumber - inputNumber2)) {
-		return inputNumber1;
-	}
-
-	// else inputNumber2 is the required closest number
-	return inputNumber2;
-};
-
 export function snapPositionToGrid(position: XYPosition): XYPosition {
-	return [
-		closestNumberDivisibleBy(position[0], GRID_SIZE),
-		closestNumberDivisibleBy(position[1], GRID_SIZE),
-	];
+	return [snapToGrid(position[0]), snapToGrid(position[1])];
+}
+
+export function snapToGrid(value: number): number {
+	const snapped = Math.round(value / GRID_SIZE) * GRID_SIZE;
+	// Turn -0 into 0 and keep NaN
+	return snapped === 0 ? 0 : snapped;
 }
 
 /**
@@ -201,7 +188,11 @@ export const getNewNodePosition = (
 		normalize?: boolean;
 	} = {},
 ): XYPosition => {
-	const resolvedOffset = snapPositionToGrid(offset);
+	// Step at least one grid cell, so that the conflict loop always moves the position
+	const resolvedOffset: XYPosition = [
+		Math.max(snapToGrid(offset[0]), GRID_SIZE),
+		Math.max(snapToGrid(offset[1]), GRID_SIZE),
+	];
 	const resolvedPosition: XYPosition = snapPositionToGrid(initialPosition);
 
 	if (normalize) {
@@ -388,7 +379,7 @@ export function getGenericHints({
 	nodeType,
 	nodeOutputData,
 	hasMultipleInputItems,
-	nodes,
+	getNodeByName,
 	connections,
 	hasNodeRun,
 }: {
@@ -397,7 +388,7 @@ export function getGenericHints({
 	nodeType: INodeTypeDescription;
 	nodeOutputData: INodeExecutionData[];
 	hasMultipleInputItems: boolean;
-	nodes: INodes;
+	getNodeByName: (name: string) => INode | null;
 	connections: IConnections;
 	hasNodeRun: boolean;
 }) {
@@ -436,7 +427,7 @@ export function getGenericHints({
 		hasMultipleInputItems &&
 		LIST_LIKE_NODE_OPERATIONS.includes((workflowNode.parameters.operation as string) || '')
 	) {
-		const executeOnce = workflowUtils.getNodeByName(nodes, node.name)?.executeOnce;
+		const executeOnce = getNodeByName(node.name)?.executeOnce;
 		if (!executeOnce) {
 			nodeHints.push({
 				message:
@@ -448,7 +439,7 @@ export function getGenericHints({
 
 	// add sendAndWait hint
 	if (hasMultipleInputItems && workflowNode.parameters.operation === SEND_AND_WAIT_OPERATION) {
-		const executeOnce = workflowUtils.getNodeByName(nodes, node.name)?.executeOnce;
+		const executeOnce = getNodeByName(node.name)?.executeOnce;
 		if (!executeOnce) {
 			nodeHints.push({
 				message: 'This action will run only once, for the first input item',

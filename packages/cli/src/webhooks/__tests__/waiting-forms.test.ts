@@ -1,18 +1,27 @@
-import type { IExecutionResponse, ExecutionRepository } from '@n8n/db';
+import type { IExecutionResponse } from '@n8n/db';
+import type { ExecutionSnapshot } from '@n8n/engine';
 import type express from 'express';
-import { mock } from 'jest-mock-extended';
 import type { InstanceSettings } from 'n8n-core';
 import { getHtmlSandboxCSP, WAITING_TOKEN_QUERY_PARAM } from 'n8n-core';
 import {
 	FORM_NODE_TYPE,
+	WAIT_NODE_TYPE,
 	WAITING_FORMS_EXECUTION_STATUS,
+	type IWebhookData,
 	type IWorkflowBase,
 	type Workflow,
 } from 'n8n-workflow';
+import { mock } from 'vitest-mock-extended';
+
+import type { EngineV2ExecutionReader } from '@/executions/engine-v2-execution-reader.service';
+import type { ExecutionPersistence } from '@/executions/execution-persistence';
+import type { EngineDataPlaneProxyService } from '@/services/engine-data-plane-proxy.service';
+import { WaitingForms } from '@/webhooks/waiting-forms';
+import * as WebhookHelpers from '@/webhooks/webhook-helpers';
+import type { WebhookService } from '@/webhooks/webhook.service';
+import * as WorkflowExecuteAdditionalData from '@/workflow-execute-additional-data';
 
 import type { WaitingWebhookRequest } from '../webhook.types';
-
-import { WaitingForms } from '@/webhooks/waiting-forms';
 
 class TestWaitingForms extends WaitingForms {
 	exposeCreateWorkflow(workflowData: IWorkflowBase): Workflow {
@@ -28,24 +37,28 @@ class TestWaitingForms extends WaitingForms {
 }
 
 describe('WaitingForms', () => {
-	const executionRepository = mock<ExecutionRepository>();
+	const executionPersistence = mock<ExecutionPersistence>();
 	const mockInstanceSettings = mock<InstanceSettings>();
 	const waitingForms = new TestWaitingForms(
 		mock(),
 		mock(),
-		executionRepository,
+		executionPersistence,
 		mock(),
 		mockInstanceSettings,
+		mock(),
+		mock(),
+		mock(),
+		mock(),
 	);
 
 	beforeEach(() => {
-		jest.restoreAllMocks();
+		vi.restoreAllMocks();
 	});
 
 	describe('findCompletionPage', () => {
 		it('should return lastNodeExecuted if it is a non-disabled form completion node', () => {
 			const workflow = mock<Workflow>({
-				getParentNodes: jest.fn().mockReturnValue([]),
+				getParentNodes: vi.fn().mockReturnValue([]),
 				nodes: {
 					Form1: {
 						disabled: undefined,
@@ -63,7 +76,7 @@ describe('WaitingForms', () => {
 
 		it('should return undefined if lastNodeExecuted is disabled', () => {
 			const workflow = mock<Workflow>({
-				getParentNodes: jest.fn().mockReturnValue([]),
+				getParentNodes: vi.fn().mockReturnValue([]),
 				nodes: {
 					Form1: {
 						disabled: true,
@@ -81,7 +94,7 @@ describe('WaitingForms', () => {
 
 		it('should return undefined if lastNodeExecuted is not a form node', () => {
 			const workflow = mock<Workflow>({
-				getParentNodes: jest.fn().mockReturnValue([]),
+				getParentNodes: vi.fn().mockReturnValue([]),
 				nodes: {
 					NonForm: {
 						disabled: undefined,
@@ -97,7 +110,7 @@ describe('WaitingForms', () => {
 
 		it('should return undefined if lastNodeExecuted operation is not completion', () => {
 			const workflow = mock<Workflow>({
-				getParentNodes: jest.fn().mockReturnValue([]),
+				getParentNodes: vi.fn().mockReturnValue([]),
 				nodes: {
 					Form1: {
 						disabled: undefined,
@@ -115,7 +128,7 @@ describe('WaitingForms', () => {
 
 		it('should find first valid completion form in parent nodes if lastNodeExecuted is not valid', () => {
 			const workflow = mock<Workflow>({
-				getParentNodes: jest.fn().mockReturnValue(['Form1', 'Form2', 'Form3']),
+				getParentNodes: vi.fn().mockReturnValue(['Form1', 'Form2', 'Form3']),
 				nodes: {
 					LastNode: {
 						disabled: undefined,
@@ -157,7 +170,7 @@ describe('WaitingForms', () => {
 
 		it('should return undefined if no valid completion form is found in parent nodes', () => {
 			const workflow = mock<Workflow>({
-				getParentNodes: jest.fn().mockReturnValue(['Form1', 'Form2']),
+				getParentNodes: vi.fn().mockReturnValue(['Form1', 'Form2']),
 				nodes: {
 					LastNode: {
 						disabled: undefined,
@@ -187,7 +200,7 @@ describe('WaitingForms', () => {
 
 		it('should skip parent nodes without runData', () => {
 			const workflow = mock<Workflow>({
-				getParentNodes: jest.fn().mockReturnValue(['Form1', 'Form2', 'Form3']),
+				getParentNodes: vi.fn().mockReturnValue(['Form1', 'Form2', 'Form3']),
 				nodes: {
 					LastNode: {
 						disabled: undefined,
@@ -226,11 +239,62 @@ describe('WaitingForms', () => {
 			expect(result).toBe('Form2');
 		});
 
+		it('should not render a form for an execution parked at a node boundary', async () => {
+			const execution = mock<IExecutionResponse>({
+				status: 'waiting',
+				data: { waitReason: 'suspended', resumeToken: undefined, resultData: { error: undefined } },
+			});
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
+
+			const req = mock<WaitingWebhookRequest>({
+				headers: {},
+				params: { path: '123', suffix: undefined },
+			});
+			const res = mock<express.Response>();
+
+			const result = await waitingForms.executeWebhook(req, res);
+
+			expect(result).toEqual({ noWebhookResponse: true });
+			expect(res.render).not.toHaveBeenCalled();
+		});
+
+		const statusPoll = async (waitReason?: 'suspended') => {
+			const execution = mock<IExecutionResponse>({
+				status: 'waiting',
+				data: {
+					waitReason,
+					resumeToken: undefined,
+					executionData: {
+						nodeExecutionStack: [{ node: { type: FORM_NODE_TYPE, parameters: {} } }],
+					},
+				},
+			});
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
+			const req = mock<WaitingWebhookRequest>({
+				headers: {},
+				params: { path: '123', suffix: WAITING_FORMS_EXECUTION_STATUS },
+			});
+			const res = mock<express.Response>();
+
+			await waitingForms.executeWebhook(req, res);
+			return res;
+		};
+
+		it('should report form-waiting when the run paused at a form node', async () => {
+			const res = await statusPoll();
+			expect(res.send).toHaveBeenCalledWith('form-waiting');
+		});
+
+		it('should report plain waiting for a run parked before a form node', async () => {
+			const res = await statusPoll('suspended');
+			expect(res.send).toHaveBeenCalledWith('waiting');
+		});
+
 		it('should return status of execution if suffix is WAITING_FORMS_EXECUTION_STATUS', async () => {
 			const execution = mock<IExecutionResponse>({
 				status: 'success',
 			});
-			executionRepository.findSingleExecution.mockResolvedValue(execution);
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
 
 			const req = mock<WaitingWebhookRequest>({
 				headers: {},
@@ -252,7 +316,7 @@ describe('WaitingForms', () => {
 			const execution = mock<IExecutionResponse>({
 				status: 'success',
 			});
-			executionRepository.findSingleExecution.mockResolvedValue(execution);
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
 
 			const req = mock<WaitingWebhookRequest>({
 				headers: { origin: 'null' },
@@ -273,7 +337,7 @@ describe('WaitingForms', () => {
 			const execution = mock<IExecutionResponse>({
 				status: 'success',
 			});
-			executionRepository.findSingleExecution.mockResolvedValue(execution);
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
 
 			const req = mock<WaitingWebhookRequest>({
 				headers: { origin: 'null' },
@@ -295,7 +359,7 @@ describe('WaitingForms', () => {
 			const execution = mock<IExecutionResponse>({
 				status: 'success',
 			});
-			executionRepository.findSingleExecution.mockResolvedValue(execution);
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
 
 			const req = mock<WaitingWebhookRequest>({
 				headers: { origin: undefined },
@@ -346,7 +410,7 @@ describe('WaitingForms', () => {
 					updatedAt: new Date(),
 				},
 			});
-			executionRepository.findSingleExecution.mockResolvedValue(execution);
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
 
 			const req = mock<WaitingWebhookRequest>({
 				headers: { origin: 'null', host: 'localhost:5678' },
@@ -375,7 +439,7 @@ describe('WaitingForms', () => {
 					nodes: [],
 					connections: {},
 					active: true,
-					activeVersionId: undefined, // Must be explicitly set to undefined; jest-mock-extended returns a truthy mock if omitted
+					activeVersionId: undefined, // Must be explicitly set to undefined; vitest-mock-extended returns a truthy mock if omitted
 					settings: {},
 					staticData: {},
 					isArchived: false,
@@ -397,7 +461,7 @@ describe('WaitingForms', () => {
 					nodes: [],
 					connections: {},
 					active: false,
-					activeVersionId: undefined, // Must be explicitly set to undefined; jest-mock-extended returns a truthy mock if omitted
+					activeVersionId: undefined, // Must be explicitly set to undefined; vitest-mock-extended returns a truthy mock if omitted
 					settings: {},
 					staticData: {},
 					isArchived: false,
@@ -418,7 +482,7 @@ describe('WaitingForms', () => {
 					name: 'Test Workflow',
 					nodes: [],
 					connections: {},
-					active: undefined, // Must be explicitly set to undefined; jest-mock-extended returns a truthy mock if omitted
+					active: undefined, // Must be explicitly set to undefined; vitest-mock-extended returns a truthy mock if omitted
 					activeVersionId: 'version-123',
 					settings: {},
 					staticData: {},
@@ -440,7 +504,7 @@ describe('WaitingForms', () => {
 					name: 'Test Workflow',
 					nodes: [],
 					connections: {},
-					active: undefined, // Must be explicitly set to undefined; jest-mock-extended returns a truthy mock if omitted
+					active: undefined, // Must be explicitly set to undefined; vitest-mock-extended returns a truthy mock if omitted
 					activeVersionId: null,
 					settings: {},
 					staticData: {},
@@ -465,7 +529,7 @@ describe('WaitingForms', () => {
 					resultData: {
 						lastNodeExecuted: 'LastNode',
 						runData: {},
-						error: undefined, // Must be explicitly set to undefined; jest-mock-extended returns a truthy mock if omitted
+						error: undefined, // Must be explicitly set to undefined; vitest-mock-extended returns a truthy mock if omitted
 					},
 					resumeToken: undefined, // Old execution without token
 				},
@@ -491,7 +555,7 @@ describe('WaitingForms', () => {
 					updatedAt: new Date(),
 				},
 			});
-			executionRepository.findSingleExecution.mockResolvedValue(execution);
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
 
 			const req = mock<WaitingWebhookRequest>({
 				headers: { host: 'localhost:5678' },
@@ -523,7 +587,7 @@ describe('WaitingForms', () => {
 					resultData: {
 						lastNodeExecuted: 'LastNode',
 						runData: {},
-						error: undefined, // Must be explicitly set to undefined; jest-mock-extended returns a truthy mock if omitted
+						error: undefined, // Must be explicitly set to undefined; vitest-mock-extended returns a truthy mock if omitted
 					},
 					resumeToken: undefined, // Old execution without token
 				},
@@ -549,7 +613,7 @@ describe('WaitingForms', () => {
 					updatedAt: new Date(),
 				},
 			});
-			executionRepository.findSingleExecution.mockResolvedValue(execution);
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
 
 			const req = mock<WaitingWebhookRequest>({
 				headers: { host: 'localhost:5678' },
@@ -598,7 +662,7 @@ describe('WaitingForms', () => {
 					updatedAt: new Date(),
 				},
 			});
-			executionRepository.findSingleExecution.mockResolvedValue(execution);
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
 
 			const req = mock<WaitingWebhookRequest>({
 				headers: { host: 'localhost:5678' },
@@ -609,8 +673,8 @@ describe('WaitingForms', () => {
 				url: '/form-waiting/123', // No token in URL
 			});
 
-			const mockRender = jest.fn();
-			const mockStatus = jest.fn().mockReturnValue({ render: mockRender });
+			const mockRender = vi.fn();
+			const mockStatus = vi.fn().mockReturnValue({ render: mockRender });
 			const res = mock<express.Response>({
 				status: mockStatus,
 			});
@@ -619,6 +683,10 @@ describe('WaitingForms', () => {
 
 			expect(mockStatus).toHaveBeenCalledWith(401);
 			expect(mockRender).toHaveBeenCalledWith('form-invalid-token');
+			expect(res.setHeader).toHaveBeenCalledWith(
+				'Content-Security-Policy',
+				expect.stringContaining('sandbox'),
+			);
 			expect(result).toEqual({ noWebhookResponse: true });
 		});
 
@@ -632,7 +700,7 @@ describe('WaitingForms', () => {
 						runData: {},
 						error: undefined,
 					},
-					resumeToken: undefined, // Must be explicitly set to undefined; jest-mock-extended returns a truthy mock if omitted
+					resumeToken: undefined, // Must be explicitly set to undefined; vitest-mock-extended returns a truthy mock if omitted
 				},
 				workflowData: {
 					id: 'workflow1',
@@ -656,7 +724,7 @@ describe('WaitingForms', () => {
 					updatedAt: new Date(),
 				},
 			});
-			executionRepository.findSingleExecution.mockResolvedValue(execution);
+			executionPersistence.findSingleExecution.mockResolvedValue(execution);
 
 			const req = mock<WaitingWebhookRequest>({
 				headers: { host: 'localhost:5678' },
@@ -731,4 +799,272 @@ describe('WaitingForms', () => {
 			expect(result).toEqual({ valid: false, webhookPath: undefined });
 		});
 	});
+
+	describe('cookie sanitization (n8nUserAuth)', () => {
+		const buildExecutionWithResumeNode = (resumeNodeType: string) =>
+			mock<IExecutionResponse>({
+				finished: true,
+				status: 'success',
+				data: {
+					resultData: {
+						lastNodeExecuted: 'ResumeNode',
+						runData: {},
+						error: undefined,
+					},
+					resumeToken: undefined,
+				},
+				workflowData: {
+					id: 'workflow1',
+					name: 'Test Workflow',
+					nodes: [
+						{
+							name: 'ResumeNode',
+							type: resumeNodeType,
+							typeVersion: 1,
+							position: [0, 0],
+							parameters: {},
+						},
+					],
+					connections: {},
+					active: false,
+					activeVersionId: undefined,
+					settings: {},
+					staticData: {},
+					isArchived: false,
+					createdAt: new Date(),
+					updatedAt: new Date(),
+				},
+			});
+
+		const buildReqWithAuthCookie = () =>
+			({
+				method: 'GET',
+				headers: { host: 'localhost:5678', cookie: 'n8n-auth=jwt.token; other=value' },
+				cookies: { 'n8n-auth': 'jwt.token', other: 'value' },
+				params: { path: '123', suffix: undefined },
+				url: '/form-waiting/123',
+			}) as unknown as WaitingWebhookRequest;
+
+		it('preserves the n8n-auth cookie when the resume node is a Form node', async () => {
+			executionPersistence.findSingleExecution.mockResolvedValue(
+				buildExecutionWithResumeNode(FORM_NODE_TYPE),
+			);
+
+			const req = buildReqWithAuthCookie();
+			const res = mock<express.Response>();
+
+			await waitingForms.executeWebhook(req, res);
+
+			expect(req.headers.cookie).toContain('n8n-auth=jwt.token');
+			expect(req.cookies['n8n-auth']).toBe('jwt.token');
+		});
+
+		it('strips the n8n-auth cookie when the resume node is not allowlisted', async () => {
+			executionPersistence.findSingleExecution.mockResolvedValue(
+				buildExecutionWithResumeNode('other-node-type'),
+			);
+
+			const req = buildReqWithAuthCookie();
+			const res = mock<express.Response>();
+
+			await waitingForms.executeWebhook(req, res);
+
+			expect(req.headers.cookie).not.toContain('n8n-auth=');
+			expect(req.headers.cookie).toContain('other=value');
+			expect(req.cookies['n8n-auth']).toBeUndefined();
+		});
+
+		it('strips the n8n-auth cookie when the execution cannot be resolved', async () => {
+			executionPersistence.findSingleExecution.mockResolvedValue(undefined);
+
+			const req = buildReqWithAuthCookie();
+			const res = mock<express.Response>();
+
+			try {
+				await waitingForms.executeWebhook(req, res);
+			} catch {
+				// NotFoundError is expected for missing execution; we still want to verify sanitize ran first.
+			}
+
+			expect(req.headers.cookie).not.toContain('n8n-auth=');
+			expect(req.cookies['n8n-auth']).toBeUndefined();
+		});
+	});
+});
+
+describe('WaitingForms on an engine v2 execution', () => {
+	const EXECUTION_ID = '01a038ae-c4a8-7799-8a3e-e3c2ca055cfa';
+	const dataPlane = mock<EngineDataPlaneProxyService>();
+	const executionReader = mock<EngineV2ExecutionReader>();
+	const webhookService = mock<WebhookService>();
+	const waitingForms = new WaitingForms(
+		mock(),
+		mock(),
+		mock<ExecutionPersistence>(),
+		webhookService,
+		mock<InstanceSettings>(),
+		mock(),
+		mock(),
+		dataPlane,
+		executionReader,
+	);
+
+	const formNode = { id: 'form-id', name: 'Form', type: FORM_NODE_TYPE, parameters: {} };
+	const waitNode = {
+		id: 'wait-id',
+		name: 'Wait',
+		type: WAIT_NODE_TYPE,
+		parameters: { resume: 'webhook' },
+	};
+	// Plain objects, not `mock()`: the route clones the node, and a proxy cannot be cloned.
+	const snapshot = (status: ExecutionSnapshot['status']) =>
+		({
+			id: EXECUTION_ID,
+			status,
+			workflow: { nodes: [formNode, waitNode] },
+		}) as unknown as ExecutionSnapshot;
+	const request = (suffix: string | undefined, headers: Record<string, string> = {}) =>
+		mock<WaitingWebhookRequest>({
+			method: 'GET',
+			params: { path: EXECUTION_ID, suffix },
+			query: { [WAITING_TOKEN_QUERY_PARAM]: 't' },
+			url: `/form-waiting/${EXECUTION_ID}/${suffix ?? ''}?${WAITING_TOKEN_QUERY_PARAM}=t`,
+			headers: { host: 'localhost', ...headers },
+		});
+	const response = () => {
+		const res = mock<express.Response>();
+		res.status.mockReturnValue(res);
+		return res;
+	};
+
+	beforeEach(() => {
+		vi.restoreAllMocks();
+		vi.clearAllMocks();
+	});
+
+	it('answers a bad token with the invalid-token page', async () => {
+		dataPlane.locateResumeTarget.mockResolvedValue({
+			ok: false,
+			status: 401,
+			error: 'invalid_token',
+		});
+		const res = response();
+
+		await waitingForms.executeWebhook(request(undefined), res);
+
+		expect(res.status).toHaveBeenCalledWith(401);
+		expect(res.render).toHaveBeenCalledWith('form-invalid-token');
+		expect(res.setHeader).toHaveBeenCalledWith('Content-Security-Policy', getHtmlSandboxCSP());
+	});
+
+	it.each([
+		['form-waiting', 'waiting', 'a form target', { stepId: 'step-1', nodeId: 'form-id' }],
+		['waiting', 'waiting', 'a webhook target', { stepId: 'step-1', nodeId: 'wait-id' }],
+		['running', 'running', 'a form target', { stepId: 'step-1', nodeId: 'form-id' }],
+		['running', 'running', 'no target', null],
+	] as const)(
+		"answers '%s' to the status poll of a %s execution with %s",
+		async (expected, status, _, target) => {
+			dataPlane.locateResumeTarget.mockResolvedValue({
+				ok: true,
+				value: { execution: snapshot(status), target },
+			});
+			const res = response();
+
+			await expect(
+				waitingForms.executeWebhook(
+					request(WAITING_FORMS_EXECUTION_STATUS, { origin: 'https://example.com' }),
+					res,
+				),
+			).resolves.toEqual({ noWebhookResponse: true });
+
+			expect(res.send).toHaveBeenCalledWith(expected);
+			expect(res.setHeader).toHaveBeenCalledWith(
+				'Access-Control-Allow-Origin',
+				'https://example.com',
+			);
+		},
+	);
+
+	it.each(['running', 'queued'] as const)(
+		'answers nothing while a %s execution has not reached its form, so the page keeps polling',
+		async (status) => {
+			dataPlane.locateResumeTarget.mockResolvedValue({
+				ok: true,
+				value: { execution: snapshot(status), target: null },
+			});
+			const res = response();
+
+			await expect(waitingForms.executeWebhook(request(undefined), res)).resolves.toEqual({
+				noWebhookResponse: true,
+			});
+
+			expect(res.render).not.toHaveBeenCalled();
+			expect(res.status).not.toHaveBeenCalled();
+		},
+	);
+
+	it('renders the completion page for an execution that completed', async () => {
+		dataPlane.locateResumeTarget.mockResolvedValue({
+			ok: true,
+			value: { execution: snapshot('completed'), target: null },
+		});
+		const res = response();
+
+		await waitingForms.executeWebhook(request(undefined), res);
+
+		expect(res.render).toHaveBeenCalledWith('form-trigger-completion', expect.any(Object));
+		expect(res.setHeader).toHaveBeenCalledWith('Content-Security-Policy', getHtmlSandboxCSP());
+	});
+
+	it('answers 409 for an execution that failed', async () => {
+		dataPlane.locateResumeTarget.mockResolvedValue({
+			ok: true,
+			value: { execution: snapshot('failed'), target: null },
+		});
+
+		await expect(waitingForms.executeWebhook(request(undefined), response())).rejects.toThrow(
+			'has finished already',
+		);
+	});
+
+	it.each([
+		['keeps', 'Form', formNode, 'n8n-auth=x'],
+		['removes', 'Wait', { ...waitNode, parameters: { resume: 'form' } }, ''],
+	] as const)(
+		'%s the auth cookie when a %s node waits for the form',
+		async (_, __, node, cookie) => {
+			dataPlane.locateResumeTarget.mockResolvedValue({
+				ok: true,
+				value: { execution: snapshot('waiting'), target: { stepId: 'step-1', nodeId: node.id } },
+			});
+			executionReader.fromSnapshot.mockResolvedValue({
+				id: EXECUTION_ID,
+				mode: 'manual',
+				status: 'waiting',
+				workflowData: { id: 'wf-1', name: 'wf', nodes: [node], connections: {} },
+				data: { resultData: { runData: {} } },
+			} as unknown as IExecutionResponse);
+			webhookService.getNodeWebhooks.mockReturnValue([
+				{
+					httpMethod: 'GET',
+					path: '',
+					webhookDescription: { restartWebhook: true, nodeType: 'form' },
+				} as unknown as IWebhookData,
+			]);
+			vi.spyOn(WorkflowExecuteAdditionalData, 'getBase').mockResolvedValue({} as any);
+			const executeWebhookSpy = vi
+				.spyOn(WebhookHelpers, 'executeWebhook')
+				.mockImplementation(
+					async (_w, _wd, _wfd, _wsn, _m, _pr, _red, _eid, _req, _res, callback) => {
+						callback(null, { noWebhookResponse: true });
+						return EXECUTION_ID;
+					},
+				);
+
+			await waitingForms.executeWebhook(request(undefined, { cookie: 'n8n-auth=x' }), response());
+
+			expect(executeWebhookSpy.mock.calls[0][8].headers.cookie).toBe(cookie);
+		},
+	);
 });

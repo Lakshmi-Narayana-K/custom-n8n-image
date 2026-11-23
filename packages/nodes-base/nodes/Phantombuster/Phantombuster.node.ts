@@ -1,16 +1,22 @@
 import {
-	type IExecuteFunctions,
 	type IDataObject,
+	type IExecuteFunctions,
 	type ILoadOptionsFunctions,
 	type INodeExecutionData,
 	type INodePropertyOptions,
 	type INodeType,
 	type INodeTypeDescription,
+	NodeApiError,
 	NodeConnectionTypes,
+	requestPath,
 } from 'n8n-workflow';
 
 import { agentFields, agentOperations } from './AgentDescription';
-import { phantombusterApiRequest, validateJSON } from './GenericFunctions';
+import {
+	phantombusterApiRequest,
+	phantombusterStreamingRequest,
+	validateJSON,
+} from './GenericFunctions';
 
 // import {
 // 	sentenceCase,
@@ -20,8 +26,7 @@ export class Phantombuster implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Phantombuster',
 		name: 'phantombuster',
-		// eslint-disable-next-line n8n-nodes-base/node-class-description-icon-not-svg
-		icon: 'file:phantombuster.png',
+		icon: 'file:phantombuster.svg',
 		group: ['input'],
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
@@ -30,7 +35,7 @@ export class Phantombuster implements INodeType {
 			name: 'Phantombuster',
 		},
 		builderHint: {
-			message:
+			searchHint:
 				'Recommended for scraping LinkedIn profiles and social media for leads, and company data. Use with AI Agent for lead generation workflows.',
 		},
 		usableAsTool: true,
@@ -66,7 +71,11 @@ export class Phantombuster implements INodeType {
 			async getAgents(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const returnData: INodePropertyOptions[] = [];
 
-				const responseData = await phantombusterApiRequest.call(this, 'GET', '/agents/fetch-all');
+				const responseData = await phantombusterApiRequest.call(
+					this,
+					'GET',
+					requestPath`/agents/fetch-all`,
+				);
 
 				for (const item of responseData) {
 					returnData.push({
@@ -119,9 +128,14 @@ export class Phantombuster implements INodeType {
 					if (operation === 'delete') {
 						const agentId = this.getNodeParameter('agentId', i) as string;
 
-						responseData = await phantombusterApiRequest.call(this, 'POST', '/agents/delete', {
-							id: agentId,
-						});
+						responseData = await phantombusterApiRequest.call(
+							this,
+							'POST',
+							requestPath`/agents/delete`,
+							{
+								id: agentId,
+							},
+						);
 
 						responseData = { success: true };
 					}
@@ -132,7 +146,7 @@ export class Phantombuster implements INodeType {
 						responseData = await phantombusterApiRequest.call(
 							this,
 							'GET',
-							'/agents/fetch',
+							requestPath`/agents/fetch`,
 							{},
 							{ id: agentId },
 						);
@@ -152,7 +166,7 @@ export class Phantombuster implements INodeType {
 						responseData = await phantombusterApiRequest.call(
 							this,
 							'GET',
-							'/agents/fetch-output',
+							requestPath`/agents/fetch-output`,
 							{},
 							qs,
 						);
@@ -161,7 +175,7 @@ export class Phantombuster implements INodeType {
 							const { resultObject } = await phantombusterApiRequest.call(
 								this,
 								'GET',
-								'/containers/fetch-result-object',
+								requestPath`/containers/fetch-result-object`,
 								{},
 								{ id: responseData.containerId },
 							);
@@ -177,7 +191,11 @@ export class Phantombuster implements INodeType {
 					if (operation === 'getAll') {
 						const returnAll = this.getNodeParameter('returnAll', i);
 
-						responseData = await phantombusterApiRequest.call(this, 'GET', '/agents/fetch-all');
+						responseData = await phantombusterApiRequest.call(
+							this,
+							'GET',
+							requestPath`/agents/fetch-all`,
+						);
 
 						if (!returnAll) {
 							const limit = this.getNodeParameter('limit', 0);
@@ -185,12 +203,11 @@ export class Phantombuster implements INodeType {
 						}
 					}
 					//https://hub.phantombuster.com/reference#post_agents-launch-1
-					if (operation === 'launch') {
+					// https://hub.phantombuster.com/reference/post_agents-launch-sync
+					if (operation === 'launch' || operation === 'launchSync') {
 						const agentId = this.getNodeParameter('agentId', i) as string;
 
 						const jsonParameters = this.getNodeParameter('jsonParameters', i);
-
-						const resolveData = this.getNodeParameter('resolveData', i);
 
 						const additionalFields = this.getNodeParameter('additionalFields', i);
 
@@ -250,16 +267,60 @@ export class Phantombuster implements INodeType {
 
 						Object.assign(body, additionalFields);
 
-						responseData = await phantombusterApiRequest.call(this, 'POST', '/agents/launch', body);
-
-						if (resolveData) {
+						if (operation === 'launch') {
 							responseData = await phantombusterApiRequest.call(
 								this,
-								'GET',
-								'/containers/fetch',
-								{},
-								{ id: responseData.containerId },
+								'POST',
+								requestPath`/agents/launch`,
+								body,
 							);
+
+							const resolveData = this.getNodeParameter('resolveData', i);
+							if (resolveData) {
+								responseData = await phantombusterApiRequest.call(
+									this,
+									'GET',
+									requestPath`/containers/fetch`,
+									{},
+									{ id: responseData.containerId },
+								);
+							}
+						} else {
+							let containerId: string | undefined;
+							responseData = await phantombusterStreamingRequest.call(
+								this,
+								{ method: 'POST', path: requestPath`/agents/launch-sync`, body },
+								(message) => {
+									if (
+										message.type === 'start' &&
+										typeof message.data === 'object' &&
+										message.data !== null &&
+										'containerId' in message.data
+									) {
+										containerId = message.data?.containerId as string;
+									}
+								},
+							);
+							// If the streaming call disconnects without an error ( no response ) reconnect using the attach endpoint
+							const MAX_RECONNECTIONS = 5;
+							const RECONNECTION_DELAY_MS = 1_000;
+							for (
+								let attempt = 0;
+								attempt < MAX_RECONNECTIONS && !responseData && containerId;
+								attempt += 1
+							) {
+								await new Promise((resolve) => setTimeout(resolve, RECONNECTION_DELAY_MS));
+								responseData = await phantombusterStreamingRequest.call(this, {
+									method: 'GET',
+									path: requestPath`/containers/attach`,
+									qs: { id: containerId },
+								});
+							}
+							if (!responseData) {
+								throw new NodeApiError(this.getNode(), {
+									message: 'Stream did not provide a response',
+								});
+							}
 						}
 					}
 				}

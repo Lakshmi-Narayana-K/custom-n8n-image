@@ -1,7 +1,8 @@
 import type { INodeProperties, IExecuteFunctions, INodeExecutionData } from 'n8n-workflow';
-import { updateDisplayOptions } from 'n8n-workflow';
+import { requestPath, updateDisplayOptions } from 'n8n-workflow';
 import { apiRequest } from '../../transport';
 import type { IModelStudioRequestBody } from '../../helpers/interfaces';
+import { modelRLC } from '../descriptions';
 
 const properties: INodeProperties[] = [
 	{
@@ -22,6 +23,15 @@ const properties: INodeProperties[] = [
 		],
 		default: 'qwen3-vl-flash',
 		description: 'The model to use for image analysis',
+		displayOptions: {
+			show: { '@version': [1] },
+		},
+	},
+	{
+		...modelRLC('visionModelSearch'),
+		displayOptions: {
+			show: { '@version': [{ _cnd: { gte: 1.1 } }] },
+		},
 	},
 	{
 		displayName: 'Input Type',
@@ -134,7 +144,11 @@ export async function execute(
 	this: IExecuteFunctions,
 	itemIndex: number,
 ): Promise<INodeExecutionData> {
-	const model = this.getNodeParameter('modelId', itemIndex) as string;
+	const nodeVersion = this.getNode().typeVersion;
+	const model =
+		nodeVersion >= 1.1
+			? (this.getNodeParameter('modelId', itemIndex, '', { extractValue: true }) as string)
+			: (this.getNodeParameter('modelId', itemIndex) as string);
 	const inputType = this.getNodeParameter('inputType', itemIndex) as string;
 	const question = this.getNodeParameter('question', itemIndex) as string;
 	const visionOptions = this.getNodeParameter('visionOptions', itemIndex, {}) as Record<
@@ -184,7 +198,7 @@ export async function execute(
 	const response = await apiRequest.call(
 		this,
 		'POST',
-		'/api/v1/services/aigc/multimodal-generation/generation',
+		requestPath`/api/v1/services/aigc/multimodal-generation/generation`,
 		{
 			body,
 		},

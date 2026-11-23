@@ -1,18 +1,24 @@
 import type { User } from '@n8n/db';
+import { toEngineConnections, toGroupValidationNodes } from '@n8n/workflow-sdk';
+import { validateWorkflowGroups } from 'n8n-workflow';
 import z from 'zod';
+
+import type { NodeTypes } from '@/node-types';
+import type { Telemetry } from '@/telemetry';
+import { makeGetNodeTypeForGrouping } from '@/workflow-helpers';
 
 import { USER_CALLED_MCP_TOOL_EVENT } from '../../mcp.constants';
 import type { ToolDefinition, UserCalledMCPToolEventPayload } from '../../mcp.types';
-
-import type { Telemetry } from '@/telemetry';
-
-import { CODE_BUILDER_VALIDATE_TOOL } from './constants';
+import { getSdkReferenceHint } from '../workflow-validation.utils';
+import { buildInvalidAiToolSourceErrorResponse } from './connection-structure-check';
+import { CODE_BUILDER_VALIDATE_TOOL, MAX_WORKFLOW_CODE_LENGTH } from './constants';
 
 const inputSchema = {
 	code: z
 		.string()
+		.max(MAX_WORKFLOW_CODE_LENGTH)
 		.describe(
-			'Full TypeScript/JavaScript workflow code using the n8n Workflow SDK. Must include the workflow export.',
+			`Full TypeScript/JavaScript workflow code using the n8n Workflow SDK. Must include the workflow export. Max ${MAX_WORKFLOW_CODE_LENGTH} characters.`,
 		),
 } satisfies z.ZodRawShape;
 
@@ -34,6 +40,12 @@ const outputSchema = {
 		.optional()
 		.describe('Validation warnings (if any)'),
 	errors: z.array(z.string()).optional().describe('Validation errors (if invalid)'),
+	hint: z
+		.string()
+		.optional()
+		.describe(
+			'Actionable hint for recovering from the error. When present, follow the suggested action before retrying.',
+		),
 } satisfies z.ZodRawShape;
 
 /**
@@ -43,11 +55,12 @@ const outputSchema = {
 export const createValidateWorkflowCodeTool = (
 	user: User,
 	telemetry: Telemetry,
+	nodeTypes: NodeTypes,
 ): ToolDefinition<typeof inputSchema> => ({
 	name: CODE_BUILDER_VALIDATE_TOOL.toolName,
 	config: {
 		description:
-			'Validate n8n Workflow SDK code. Parses the code into a workflow and checks for errors. Returns the workflow JSON if valid, or detailed error messages to fix. Always validate before creating a workflow.',
+			'Validate n8n Workflow SDK code. Required before creating or updating workflows from code. If you have not already read get_workflow_sdk_reference, call that first; guessing SDK syntax commonly creates invalid workflows.',
 		inputSchema,
 		outputSchema,
 		annotations: {
@@ -69,15 +82,63 @@ export const createValidateWorkflowCodeTool = (
 			const { ParseValidateHandler, stripImportStatements } = await import(
 				'@n8n/ai-workflow-builder'
 			);
-			const handler = new ParseValidateHandler({ generatePinData: false });
+			const handler = new ParseValidateHandler({
+				generatePinData: false,
+				nodeTypesProvider: nodeTypes,
+			});
 			const strippedCode = stripImportStatements(code);
 			const result = await handler.parseAndValidate(strippedCode);
+
+			const invalidToolSourceResponse = buildInvalidAiToolSourceErrorResponse(
+				result.workflow,
+				nodeTypes,
+				(errorMessage) => ({ valid: false, errors: [errorMessage] }),
+				telemetryPayload,
+				telemetry,
+			);
+			if (invalidToolSourceResponse) return invalidToolSourceResponse;
+
+			// Report node-group rule violations as validation errors, with the same
+			// messages the save path rejects with — like the ai_tool-source check
+			// above, they hard-block saving.
+			if ((result.workflow.nodeGroups?.length ?? 0) > 0) {
+				const groupsResult = validateWorkflowGroups({
+					nodes: toGroupValidationNodes(result.workflow.nodes),
+					connectionsBySourceNode: toEngineConnections(result.workflow.connections),
+					nodeGroups: result.workflow.nodeGroups,
+					getNodeType: makeGetNodeTypeForGrouping(nodeTypes),
+				});
+				if (!groupsResult.valid) {
+					const errorMessages = groupsResult.violations.map((violation) => violation.message);
+
+					telemetryPayload.results = {
+						success: false,
+						error: errorMessages.join(' '),
+						data: {
+							groupCount: result.workflow.nodeGroups?.length ?? 0,
+							groupViolationCount: groupsResult.violations.length,
+							groupViolationCodes: [
+								...new Set(groupsResult.violations.map((violation) => violation.code)),
+							],
+						},
+					};
+					telemetry.track(USER_CALLED_MCP_TOOL_EVENT, telemetryPayload);
+
+					const output = { valid: false, errors: errorMessages };
+					return {
+						content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+						structuredContent: output,
+						isError: true,
+					};
+				}
+			}
 
 			telemetryPayload.results = {
 				success: true,
 				data: {
 					nodeCount: result.workflow.nodes.length,
 					warningCount: result.warnings.length,
+					groupCount: result.workflow.nodeGroups?.length ?? 0,
 				},
 			};
 			telemetry.track(USER_CALLED_MCP_TOOL_EVENT, telemetryPayload);
@@ -104,9 +165,12 @@ export const createValidateWorkflowCodeTool = (
 			};
 			telemetry.track(USER_CALLED_MCP_TOOL_EVENT, telemetryPayload);
 
+			const hint = getSdkReferenceHint(error);
+
 			const output = {
 				valid: false,
 				errors: [errorMessage],
+				...(hint ? { hint } : {}),
 			};
 
 			return {

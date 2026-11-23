@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useMessage } from '@/app/composables/useMessage';
-import { useTelemetry } from '@/app/composables/useTelemetry';
-import { useToast } from '@/app/composables/useToast';
+import { useTelemetry } from '@n8n/composables/useTelemetry';
+import { useToast } from '@n8n/composables/useToast';
 import { MODAL_CONFIRM } from '@/app/constants';
 import {
 	DATA_TABLE_CARD_ACTIONS,
@@ -14,19 +14,23 @@ import type { DataTable } from '@/features/core/dataTable/dataTable.types';
 import type { IUser, UserAction } from '@n8n/design-system';
 import { useI18n } from '@n8n/i18n';
 import { computed } from 'vue';
+import { escapeHtml } from '@/app/utils/htmlUtils';
+import { getProtectedInstanceTooltip } from '@/features/integrations/sourceControl.ee/sourceControl.utils';
 
 import { N8nActionToggle } from '@n8n/design-system';
 import { useUIStore } from '@/app/stores/ui.store';
+import { useFavoritesStore } from '@/app/stores/favorites.store';
 import DownloadDataTableModal from './DownloadDataTableModal.vue';
 import ImportCsvModal from './ImportCsvModal.vue';
 type Props = {
 	dataTable: DataTable;
-	isReadOnly?: boolean;
+	/** Locks rename and delete, for example on a protected instance. Row actions stay available. */
+	schemaReadOnly?: boolean;
 	location: 'card' | 'breadcrumbs';
 };
 
 const props = withDefaults(defineProps<Props>(), {
-	isReadOnly: false,
+	schemaReadOnly: false,
 });
 
 const emit = defineEmits<{
@@ -42,6 +46,7 @@ const emit = defineEmits<{
 
 const dataTableStore = useDataTableStore();
 const uiStore = useUIStore();
+const favoritesStore = useFavoritesStore();
 
 const i18n = useI18n();
 const message = useMessage();
@@ -52,28 +57,38 @@ const downloadModalKey = computed(() => `${DOWNLOAD_DATA_TABLE_MODAL_KEY}-${prop
 const importCsvModalKey = computed(() => `${IMPORT_CSV_MODAL_KEY}-${props.dataTable.id}`);
 
 const actions = computed<Array<UserAction<IUser>>>(() => {
-	const availableActions = [
+	const schemaReadOnlyTooltip = props.schemaReadOnly ? getProtectedInstanceTooltip() : undefined;
+	const availableActions: Array<UserAction<IUser>> = [
 		{
 			label: i18n.baseText('dataTable.importCsv'),
 			value: DATA_TABLE_CARD_ACTIONS.IMPORT_CSV,
-			disabled: !dataTableStore.projectPermissions.dataTable.writeRow || props.isReadOnly,
+			disabled: !dataTableStore.projectPermissions.dataTable.writeRow,
 		},
 		{
 			label: i18n.baseText('dataTable.download.csv'),
 			value: DATA_TABLE_CARD_ACTIONS.DOWNLOAD_CSV,
+			disabled: !dataTableStore.projectPermissions.dataTable.readRow,
+		},
+		{
+			label: favoritesStore.isFavorite(props.dataTable.id, 'dataTable')
+				? i18n.baseText('favorites.remove')
+				: i18n.baseText('favorites.add'),
+			value: DATA_TABLE_CARD_ACTIONS.FAVORITE,
 			disabled: false,
 		},
 		{
 			label: i18n.baseText('generic.delete'),
 			value: DATA_TABLE_CARD_ACTIONS.DELETE,
-			disabled: !dataTableStore.projectPermissions.dataTable.delete || props.isReadOnly,
+			disabled: !dataTableStore.projectPermissions.dataTable.delete || props.schemaReadOnly,
+			tooltip: schemaReadOnlyTooltip,
 		},
 	];
 	if (props.location === 'breadcrumbs') {
 		availableActions.unshift({
 			label: i18n.baseText('generic.rename'),
 			value: DATA_TABLE_CARD_ACTIONS.RENAME,
-			disabled: !dataTableStore.projectPermissions.dataTable.update || props.isReadOnly,
+			disabled: !dataTableStore.projectPermissions.dataTable.update || props.schemaReadOnly,
+			tooltip: schemaReadOnlyTooltip,
 		});
 	}
 	return availableActions;
@@ -98,10 +113,14 @@ const onAction = async (action: string) => {
 			uiStore.openModal(downloadModalKey.value);
 			break;
 		}
+		case DATA_TABLE_CARD_ACTIONS.FAVORITE: {
+			await favoritesStore.toggleFavorite(props.dataTable.id, 'dataTable');
+			break;
+		}
 		case DATA_TABLE_CARD_ACTIONS.DELETE: {
 			const promptResponse = await message.confirm(
 				i18n.baseText('dataTable.delete.confirm.message', {
-					interpolate: { name: props.dataTable.name },
+					interpolate: { name: escapeHtml(props.dataTable.name) },
 				}),
 				i18n.baseText('dataTable.delete.confirm.title'),
 				{

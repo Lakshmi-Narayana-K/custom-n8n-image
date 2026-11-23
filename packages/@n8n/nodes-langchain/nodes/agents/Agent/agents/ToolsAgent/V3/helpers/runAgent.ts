@@ -7,6 +7,7 @@ import {
 	processEventStream,
 	saveToMemory,
 	type RequestResponseMetadata,
+	type ToolCallData,
 } from '@utils/agent-execution';
 import { buildResponseMetadata } from '@utils/agent-execution/buildResponseMetadata';
 import { buildTracingMetadata, getTracingConfig } from '@utils/tracing';
@@ -17,17 +18,45 @@ import type {
 	ISupplyDataFunctions,
 } from 'n8n-workflow';
 
+import type { ItemContext } from './prepareItemContext';
 import { SYSTEM_MESSAGE } from '../../prompt';
 import type { AgentResult } from '../types';
-import type { ItemContext } from './prepareItemContext';
 
 type RunAgentResult = AgentResult | EngineRequest<RequestResponseMetadata>;
 
-function isExecuteFunctions(
-	context: IExecuteFunctions | ISupplyDataFunctions,
-): context is IExecuteFunctions {
-	return 'getExecuteData' in context;
+/**
+ * Appends the attribution of every tool called during the run (see
+ * `ToolMetadata.attribution`). Done in code, after the model, so the label
+ * does not depend on the model honouring an instruction in the tool result.
+ */
+export function appendToolAttributions(
+	output: string,
+	steps: ToolCallData[],
+	tools: ItemContext['tools'],
+): string {
+	// A reply with no text would show as the label alone, which reads as a glitch
+	if (output.trim() === '') return output;
+	// A denied or failed call produced no partner result, so it earns no label
+	const calledTools = new Set(
+		steps
+			.filter((step) => !step.action.hitlDenied && !step.action.errored)
+			.map((step) => step.action.tool),
+	);
+	const attributions = new Set<string>();
+	for (const tool of tools) {
+		const attribution = tool.metadata?.attribution;
+		if (
+			calledTools.has(tool.name) &&
+			typeof attribution === 'string' &&
+			!output.includes(attribution)
+		) {
+			attributions.add(attribution);
+		}
+	}
+	if (attributions.size === 0) return output;
+	return `${output}\n\n${[...attributions].join('\n')}`;
 }
+
 /**
  * Runs the agent for a single item, choosing between streaming or non-streaming execution.
  * Handles both regular execution and execution after tool calls.
@@ -47,8 +76,13 @@ export async function runAgent(
 	model: BaseChatModel,
 	memory: BaseChatMemory | undefined,
 	response?: EngineResponse<RequestResponseMetadata>,
+	memoryHits?: { loads: number; saves: number },
 ): Promise<RunAgentResult> {
-	const { itemIndex, input, steps, tools, options } = itemContext;
+	const { itemIndex, input, steps, tools, options, outputParser } = itemContext;
+	// A structured output must stay parseable, so the attribution is skipped there.
+	const finalizeOutput = outputParser
+		? undefined
+		: (output: string) => appendToolAttributions(output, steps, tools);
 
 	const invokeParams = {
 		// steps are passed to the ToolCallingAgent in the runnable sequence to keep track of tool calls
@@ -64,10 +98,9 @@ export async function runAgent(
 	if (Object.keys(additionalMetadata).length > 0 && logger) {
 		ctx.logger.debug('Tracing metadata', { additionalMetadata });
 	}
-	const tracingConfig = isExecuteFunctions(ctx)
-		? getTracingConfig(ctx, { additionalMetadata })
-		: undefined;
-	const executorWithTracing = tracingConfig ? executor.withConfig(tracingConfig) : executor;
+	// `getTracingConfig` supports both context types, so sub-agents keep their LangSmith
+	// run name and execution id.
+	const executorWithTracing = executor.withConfig(getTracingConfig(ctx, { additionalMetadata }));
 
 	// Check if streaming is actually available
 	const isStreamingAvailable = 'isStreaming' in ctx ? ctx.isStreaming?.() : undefined;
@@ -79,6 +112,9 @@ export async function runAgent(
 		ctx.getNode().typeVersion >= 2.1
 	) {
 		const chatHistory = await loadMemory(memory, model, options.maxTokensFromMemory);
+		if (memory && memoryHits) {
+			memoryHits.loads++;
+		}
 		const eventStream = executorWithTracing.streamEvents(
 			{
 				...invokeParams,
@@ -90,7 +126,7 @@ export async function runAgent(
 			},
 		);
 
-		const result = await processEventStream(ctx, eventStream, itemIndex);
+		const result = await processEventStream(ctx, eventStream, itemIndex, finalizeOutput);
 
 		// If result contains tool calls, build the request object like the normal flow
 		if (result.toolCalls && result.toolCalls.length > 0) {
@@ -105,9 +141,12 @@ export async function runAgent(
 		if (memory && input && result?.output) {
 			const previousCount = response?.metadata?.previousRequests?.length;
 			await saveToMemory(input, result.output, memory, steps, previousCount);
+			if (memoryHits) {
+				memoryHits.saves++;
+			}
 		}
 
-		if (options.returnIntermediateSteps && steps.length > 0) {
+		if (options.returnIntermediateSteps) {
 			result.intermediateSteps = steps;
 		}
 
@@ -115,6 +154,9 @@ export async function runAgent(
 	} else {
 		// Handle regular execution
 		const chatHistory = await loadMemory(memory, model, options.maxTokensFromMemory);
+		if (memory && memoryHits) {
+			memoryHits.loads++;
+		}
 
 		const modelResponse = await executorWithTracing.invoke(
 			{
@@ -125,14 +167,20 @@ export async function runAgent(
 		);
 
 		if ('returnValues' in modelResponse) {
+			if (finalizeOutput && typeof modelResponse.returnValues.output === 'string') {
+				modelResponse.returnValues.output = finalizeOutput(modelResponse.returnValues.output);
+			}
 			// Save conversation to memory including any tool call context
 			if (memory && input && modelResponse.returnValues.output) {
 				const previousCount = response?.metadata?.previousRequests?.length;
 				await saveToMemory(input, modelResponse.returnValues.output, memory, steps, previousCount);
+				if (memoryHits) {
+					memoryHits.saves++;
+				}
 			}
 			// Include intermediate steps if requested
 			const result = { ...modelResponse.returnValues };
-			if (options.returnIntermediateSteps && steps.length > 0) {
+			if (options.returnIntermediateSteps) {
 				result.intermediateSteps = steps;
 			}
 			return result;

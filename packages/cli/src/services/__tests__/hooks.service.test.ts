@@ -4,44 +4,48 @@ import type {
 	User,
 	CredentialsRepository,
 	WorkflowRepository,
-	UserRepository,
+	Person,
+	PersonRepository,
 } from '@n8n/db';
+import type { Repository } from '@n8n/typeorm';
 import { IsNull, Not } from '@n8n/typeorm';
 import RudderStack from '@rudderstack/rudder-sdk-node';
 import type { Response } from 'express';
-import { mock } from 'jest-mock-extended';
+import { mock } from 'vitest-mock-extended';
 
 import type { AuthService } from '@/auth/auth.service';
 import type { Invitation } from '@/interfaces';
 import { HooksService } from '@/services/hooks.service';
 import type { UserService } from '@/services/user.service';
 
-jest.mock('@rudderstack/rudder-sdk-node');
+vi.mock('@rudderstack/rudder-sdk-node');
 
 describe('HooksService', () => {
 	const mockedUser = mock<User>();
 	const userService = mock<UserService>();
 	const authService = mock<AuthService>();
-	const userRepository = mock<UserRepository>();
+	const personRepository = mock<PersonRepository>();
+	const personCollection = mock<Repository<Person>>();
+	personRepository.forCloudHooks.mockReturnValue(personCollection);
 	const settingsRepository = mock<SettingsRepository>();
 	const workflowRepository = mock<WorkflowRepository>();
 	const credentialsRepository = mock<CredentialsRepository>();
 
-	const authMiddleware = jest.fn();
+	const authMiddleware = vi.fn();
 
 	authService.createAuthMiddleware.mockReturnValue(authMiddleware);
 
 	const hooksService = new HooksService(
 		userService,
 		authService,
-		userRepository,
+		personRepository,
 		settingsRepository,
 		workflowRepository,
 		credentialsRepository,
 	);
 
 	beforeEach(() => {
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 	});
 
 	it('hooksService.inviteUsers should call userService.inviteUsers', async () => {
@@ -67,7 +71,7 @@ describe('HooksService', () => {
 		expect(authService.issueCookie).toHaveBeenCalledWith(res, mockedUser, false);
 	});
 
-	it('hooksService.findOneUser should call userRepository.findOne', async () => {
+	it('hooksService.findOneUser should search people only', async () => {
 		// ARRANGE
 		const filter = { where: { id: '1' } };
 
@@ -75,16 +79,16 @@ describe('HooksService', () => {
 		await hooksService.findOneUser(filter);
 
 		// ASSERT
-		expect(userRepository.findOne).toHaveBeenCalledWith(filter);
+		expect(personCollection.findOne).toHaveBeenCalledWith(filter);
 	});
 
-	it('hooksService.saveUser should call userRepository.save', async () => {
+	it('hooksService.saveUser should save through the people collection', async () => {
 		// ACT
 		await hooksService.saveUser(mockedUser);
 
 		// ASSERT
 
-		expect(userRepository.save).toHaveBeenCalledWith(mockedUser);
+		expect(personCollection.save).toHaveBeenCalledWith(mockedUser);
 	});
 
 	it('hooksService.updateSettings should call settingRepository.update', async () => {
@@ -138,7 +142,7 @@ describe('HooksService', () => {
 
 		const req = mock<AuthenticatedRequest>();
 
-		const next = jest.fn();
+		const next = vi.fn();
 
 		// ACT
 		await hooksService.authMiddleware(req, res, next);
@@ -152,7 +156,7 @@ describe('HooksService', () => {
 		const collections = hooksService.dbCollections();
 
 		// ASSERT
-		expect(collections).toHaveProperty('User');
+		expect(collections.User).toBe(personCollection);
 		expect(collections).toHaveProperty('Settings');
 		expect(collections).toHaveProperty('Credentials');
 		expect(collections).toHaveProperty('Workflow');

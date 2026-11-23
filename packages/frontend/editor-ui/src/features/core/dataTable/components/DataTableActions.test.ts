@@ -1,4 +1,5 @@
 import userEvent from '@testing-library/user-event';
+import { within } from '@testing-library/vue';
 import { createComponentRenderer } from '@/__tests__/render';
 import { createTestingPinia } from '@pinia/testing';
 import { vi } from 'vitest';
@@ -23,11 +24,18 @@ const mockToast = {
 
 const mockDeleteDataTable = vi.fn();
 
+const mockDataTablePermissions = {
+	delete: true,
+	update: true,
+	readRow: true,
+	writeRow: true,
+};
+
 vi.mock('@/app/composables/useMessage', () => ({
 	useMessage: () => mockMessage,
 }));
 
-vi.mock('@/app/composables/useToast', () => ({
+vi.mock('@n8n/composables/useToast', () => ({
 	useToast: () => mockToast,
 }));
 
@@ -35,10 +43,7 @@ vi.mock('@/features/core/dataTable/dataTable.store', () => ({
 	useDataTableStore: () => ({
 		deleteDataTable: mockDeleteDataTable,
 		projectPermissions: {
-			dataTable: {
-				delete: true,
-				update: true,
-			},
+			dataTable: mockDataTablePermissions,
 		},
 	}),
 }));
@@ -74,10 +79,15 @@ const mockDataTable: DataTable = {
 const renderComponent = createComponentRenderer(DataTableActions, {
 	props: {
 		dataTable: mockDataTable,
-		isReadOnly: false,
+		schemaReadOnly: false,
 		location: 'breadcrumbs',
 	},
 });
+
+const openActionsDropdown = async (getByTestId: (testId: string) => HTMLElement) => {
+	const actionToggle = getByTestId('data-table-card-actions');
+	await userEvent.click(within(actionToggle).getByRole('button'));
+};
 
 let dataTableStore: MockedStore<typeof useDataTableStore>;
 let uiStore: MockedStore<typeof useUIStore>;
@@ -90,6 +100,10 @@ describe('DataTableActions', () => {
 		uiStore = mockedStore(useUIStore);
 		dataTableStore.deleteDataTable.mockResolvedValue(true);
 		mockMessage.confirm.mockResolvedValue(MODAL_CONFIRM);
+		mockDataTablePermissions.delete = true;
+		mockDataTablePermissions.update = true;
+		mockDataTablePermissions.readRow = true;
+		mockDataTablePermissions.writeRow = true;
 	});
 
 	it('should render N8nActionToggle with correct props', () => {
@@ -99,10 +113,10 @@ describe('DataTableActions', () => {
 		expect(actionToggle).toBeInTheDocument();
 	});
 
-	it('should render actions when read-only', () => {
+	it('should render actions when the table structure is locked', () => {
 		const { getByTestId } = renderComponent({
 			props: {
-				isReadOnly: true,
+				schemaReadOnly: true,
 			},
 		});
 
@@ -110,11 +124,43 @@ describe('DataTableActions', () => {
 		expect(actionToggle).toBeInTheDocument();
 	});
 
+	it('should keep row actions and disable rename and delete when the table structure is locked', async () => {
+		const { getByTestId } = renderComponent({
+			props: {
+				schemaReadOnly: true,
+			},
+		});
+
+		await openActionsDropdown(getByTestId);
+
+		expect(getByTestId(`action-${DATA_TABLE_CARD_ACTIONS.IMPORT_CSV}`)).not.toHaveAttribute(
+			'data-disabled',
+		);
+		expect(getByTestId(`action-${DATA_TABLE_CARD_ACTIONS.RENAME}`)).toHaveAttribute(
+			'data-disabled',
+		);
+		expect(getByTestId(`action-${DATA_TABLE_CARD_ACTIONS.DELETE}`)).toHaveAttribute(
+			'data-disabled',
+		);
+	});
+
+	it('should enable rename and delete when the table structure is not locked', async () => {
+		const { getByTestId } = renderComponent();
+
+		await openActionsDropdown(getByTestId);
+
+		expect(getByTestId(`action-${DATA_TABLE_CARD_ACTIONS.RENAME}`)).not.toHaveAttribute(
+			'data-disabled',
+		);
+		expect(getByTestId(`action-${DATA_TABLE_CARD_ACTIONS.DELETE}`)).not.toHaveAttribute(
+			'data-disabled',
+		);
+	});
+
 	it('should emit rename event when rename action is triggered', async () => {
 		const { getByTestId, emitted } = renderComponent();
 
-		// Click on the action toggle to open dropdown
-		await userEvent.click(getByTestId('data-table-card-actions'));
+		await openActionsDropdown(getByTestId);
 		expect(getByTestId('action-toggle-dropdown')).toBeInTheDocument();
 
 		// Click on the rename action
@@ -132,8 +178,7 @@ describe('DataTableActions', () => {
 	it('should show confirmation dialog when delete action is triggered', async () => {
 		const { getByTestId } = renderComponent();
 
-		// Click on the action toggle to open dropdown
-		await userEvent.click(getByTestId('data-table-card-actions'));
+		await openActionsDropdown(getByTestId);
 		expect(getByTestId('action-toggle-dropdown')).toBeInTheDocument();
 
 		// Click on the delete action
@@ -152,8 +197,7 @@ describe('DataTableActions', () => {
 	it('should call delete when confirmed and emit onDeleted', async () => {
 		const { getByTestId, emitted } = renderComponent();
 
-		// Click on the action toggle to open dropdown
-		await userEvent.click(getByTestId('data-table-card-actions'));
+		await openActionsDropdown(getByTestId);
 		expect(getByTestId('action-toggle-dropdown')).toBeInTheDocument();
 
 		// Click on the delete action
@@ -168,8 +212,7 @@ describe('DataTableActions', () => {
 
 		const { getByTestId, emitted } = renderComponent();
 
-		// Click on the action toggle to open dropdown
-		await userEvent.click(getByTestId('data-table-card-actions'));
+		await openActionsDropdown(getByTestId);
 		expect(getByTestId('action-toggle-dropdown')).toBeInTheDocument();
 
 		// Click on the delete action
@@ -184,8 +227,7 @@ describe('DataTableActions', () => {
 
 		const { getByTestId } = renderComponent();
 
-		// Click on the action toggle to open dropdown
-		await userEvent.click(getByTestId('data-table-card-actions'));
+		await openActionsDropdown(getByTestId);
 		expect(getByTestId('action-toggle-dropdown')).toBeInTheDocument();
 
 		// Click on the delete action
@@ -203,8 +245,7 @@ describe('DataTableActions', () => {
 
 		const { getByTestId } = renderComponent();
 
-		// Click on the action toggle to open dropdown
-		await userEvent.click(getByTestId('data-table-card-actions'));
+		await openActionsDropdown(getByTestId);
 		expect(getByTestId('action-toggle-dropdown')).toBeInTheDocument();
 
 		// Click on the delete action
@@ -221,17 +262,34 @@ describe('DataTableActions', () => {
 			const { getByTestId } = renderComponent({
 				props: {
 					dataTable: mockDataTable,
-					isReadOnly: false,
+					schemaReadOnly: false,
 					location: 'card',
 				},
 			});
 
-			await userEvent.click(getByTestId('data-table-card-actions'));
+			await openActionsDropdown(getByTestId);
 			await userEvent.click(getByTestId(`action-${DATA_TABLE_CARD_ACTIONS.DOWNLOAD_CSV}`));
 
 			expect(uiStore.openModal).toHaveBeenCalledWith(
 				`${DOWNLOAD_DATA_TABLE_MODAL_KEY}-${mockDataTable.id}`,
 			);
+		});
+
+		it('should not open modal when user lacks dataTable:readRow permission', async () => {
+			mockDataTablePermissions.readRow = false;
+
+			const { getByTestId } = renderComponent({
+				props: {
+					dataTable: mockDataTable,
+					schemaReadOnly: false,
+					location: 'card',
+				},
+			});
+
+			await openActionsDropdown(getByTestId);
+			await userEvent.click(getByTestId(`action-${DATA_TABLE_CARD_ACTIONS.DOWNLOAD_CSV}`));
+
+			expect(uiStore.openModal).not.toHaveBeenCalled();
 		});
 
 		it('should use different modal keys for different data tables', async () => {
@@ -244,12 +302,12 @@ describe('DataTableActions', () => {
 			const { getByTestId, unmount } = renderComponent({
 				props: {
 					dataTable: mockDataTable,
-					isReadOnly: false,
+					schemaReadOnly: false,
 					location: 'card',
 				},
 			});
 
-			await userEvent.click(getByTestId('data-table-card-actions'));
+			await openActionsDropdown(getByTestId);
 			await userEvent.click(getByTestId(`action-${DATA_TABLE_CARD_ACTIONS.DOWNLOAD_CSV}`));
 
 			unmount();
@@ -257,12 +315,12 @@ describe('DataTableActions', () => {
 			const { getByTestId: getByTestId2 } = renderComponent({
 				props: {
 					dataTable: anotherDataTable,
-					isReadOnly: false,
+					schemaReadOnly: false,
 					location: 'card',
 				},
 			});
 
-			await userEvent.click(getByTestId2('data-table-card-actions'));
+			await openActionsDropdown(getByTestId2);
 			await userEvent.click(getByTestId2(`action-${DATA_TABLE_CARD_ACTIONS.DOWNLOAD_CSV}`));
 
 			expect(uiStore.openModal).toHaveBeenCalledTimes(2);
@@ -276,13 +334,12 @@ describe('DataTableActions', () => {
 			const { getByTestId, queryByTestId } = renderComponent({
 				props: {
 					dataTable: mockDataTable,
-					isReadOnly: false,
+					schemaReadOnly: false,
 					location: 'breadcrumbs',
 				},
 			});
 
-			// Click on the action toggle to open dropdown
-			await userEvent.click(getByTestId('data-table-card-actions'));
+			await openActionsDropdown(getByTestId);
 			expect(getByTestId('action-toggle-dropdown')).toBeInTheDocument();
 
 			// Check that rename action is present
@@ -293,13 +350,12 @@ describe('DataTableActions', () => {
 			const { getByTestId, queryByTestId } = renderComponent({
 				props: {
 					dataTable: mockDataTable,
-					isReadOnly: false,
+					schemaReadOnly: false,
 					location: 'card',
 				},
 			});
 
-			// Click on the action toggle to open dropdown
-			await userEvent.click(getByTestId('data-table-card-actions'));
+			await openActionsDropdown(getByTestId);
 			expect(getByTestId('action-toggle-dropdown')).toBeInTheDocument();
 
 			// Check that rename action is NOT present

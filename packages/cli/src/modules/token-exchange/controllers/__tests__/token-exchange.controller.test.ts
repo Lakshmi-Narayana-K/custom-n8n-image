@@ -1,20 +1,19 @@
+import { EventService } from '@n8n/backend-services';
 import { mockInstance } from '@n8n/backend-test-utils';
 import { Container } from '@n8n/di';
 import type { Response } from 'express';
-import { mock } from 'jest-mock-extended';
 import { ErrorReporter } from 'n8n-core';
-import { UnexpectedError } from 'n8n-workflow';
+import { mock } from 'vitest-mock-extended';
 
-import { AuthError } from '@/errors/response-errors/auth.error';
-import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { EventService } from '@/events/event.service';
+import { AuthError, BadRequestError, UnexpectedError } from '@n8n/errors';
 import type { AuthlessRequest } from '@/requests';
 
-import { TokenExchangeConfig } from '../../token-exchange.config';
-import { TokenExchangeController } from '../token-exchange.controller';
-import { TOKEN_EXCHANGE_GRANT_TYPE } from '../../token-exchange.schemas';
 import { TokenExchangeService } from '../../services/token-exchange.service';
-import type { IssuedTokenResult } from '../../token-exchange.types';
+import { TokenExchangeConfig } from '../../token-exchange.config';
+import { TokenExchangeAuthError } from '../../token-exchange.errors';
+import { TOKEN_EXCHANGE_GRANT_TYPE } from '../../token-exchange.schemas';
+import { TokenExchangeFailureReason, type IssuedTokenResult } from '../../token-exchange.types';
+import { TokenExchangeController } from '../token-exchange.controller';
 
 describe('TokenExchangeController', () => {
 	mockInstance(ErrorReporter);
@@ -31,7 +30,7 @@ describe('TokenExchangeController', () => {
 	let res: ReturnType<typeof mock<Response>>;
 
 	beforeEach(() => {
-		jest.resetAllMocks();
+		vi.resetAllMocks();
 		tokenExchangeConfig.enabled = true;
 		tokenExchangeConfig.maxTokenTtl = 900;
 		tokenExchangeConfig.jtiCleanupIntervalSeconds = 60;
@@ -138,7 +137,7 @@ describe('TokenExchangeController', () => {
 
 			test('returns RFC 8693 success response with issued token', async () => {
 				req.body = validBody;
-				jest.mocked(tokenExchangeService.exchange).mockResolvedValue(issuedResult);
+				vi.mocked(tokenExchangeService.exchange).mockResolvedValue(issuedResult);
 
 				await controller.exchangeToken(req, res);
 
@@ -153,7 +152,7 @@ describe('TokenExchangeController', () => {
 
 			test('response includes all required RFC 8693 fields', async () => {
 				req.body = { ...validBody, scope: 'openid profile' };
-				jest.mocked(tokenExchangeService.exchange).mockResolvedValue(issuedResult);
+				vi.mocked(tokenExchangeService.exchange).mockResolvedValue(issuedResult);
 
 				await controller.exchangeToken(req, res);
 
@@ -169,7 +168,7 @@ describe('TokenExchangeController', () => {
 
 			test('emits token-exchange-succeeded event with subject and issuer from result', async () => {
 				req.body = validBody;
-				jest.mocked(tokenExchangeService.exchange).mockResolvedValue(issuedResult);
+				vi.mocked(tokenExchangeService.exchange).mockResolvedValue(issuedResult);
 
 				await controller.exchangeToken(req, res);
 
@@ -193,9 +192,9 @@ describe('TokenExchangeController', () => {
 
 			test('returns 400 invalid_grant when service throws AuthError', async () => {
 				req.body = validBody;
-				jest
-					.mocked(tokenExchangeService.exchange)
-					.mockRejectedValue(new AuthError('Token verification failed'));
+				vi.mocked(tokenExchangeService.exchange).mockRejectedValue(
+					new AuthError('Token verification failed'),
+				);
 
 				await controller.exchangeToken(req, res);
 
@@ -206,9 +205,9 @@ describe('TokenExchangeController', () => {
 
 			test('returns 400 invalid_request when service throws BadRequestError', async () => {
 				req.body = validBody;
-				jest
-					.mocked(tokenExchangeService.exchange)
-					.mockRejectedValue(new BadRequestError('Invalid token format'));
+				vi.mocked(tokenExchangeService.exchange).mockRejectedValue(
+					new BadRequestError('Invalid token format'),
+				);
 
 				await controller.exchangeToken(req, res);
 
@@ -221,9 +220,9 @@ describe('TokenExchangeController', () => {
 
 			test('returns 500 server_error when service throws unexpected error', async () => {
 				req.body = validBody;
-				jest
-					.mocked(tokenExchangeService.exchange)
-					.mockRejectedValue(new UnexpectedError('Something broke'));
+				vi.mocked(tokenExchangeService.exchange).mockRejectedValue(
+					new UnexpectedError('Something broke'),
+				);
 
 				await controller.exchangeToken(req, res);
 
@@ -231,11 +230,14 @@ describe('TokenExchangeController', () => {
 				expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'server_error' }));
 			});
 
-			test('emits failure reason from AuthError in token-exchange-failed event', async () => {
+			test('emits typed failure reason from TokenExchangeAuthError in token-exchange-failed event', async () => {
 				req.body = validBody;
-				jest
-					.mocked(tokenExchangeService.exchange)
-					.mockRejectedValue(new AuthError('Token has already been used'));
+				vi.mocked(tokenExchangeService.exchange).mockRejectedValue(
+					new TokenExchangeAuthError(
+						TokenExchangeFailureReason.TokenReplay,
+						'Token has already been used',
+					),
+				);
 
 				await controller.exchangeToken(req, res);
 
@@ -243,7 +245,7 @@ describe('TokenExchangeController', () => {
 					'token-exchange-failed',
 					expect.objectContaining({
 						subject: '',
-						failureReason: 'Token has already been used',
+						failureReason: TokenExchangeFailureReason.TokenReplay,
 						grantType: TOKEN_EXCHANGE_GRANT_TYPE,
 						clientIp: '127.0.0.1',
 					}),
@@ -253,7 +255,7 @@ describe('TokenExchangeController', () => {
 			test('reports only unexpected errors to ErrorReporter', async () => {
 				const error = new UnexpectedError('Something broke');
 				req.body = validBody;
-				jest.mocked(tokenExchangeService.exchange).mockRejectedValue(error);
+				vi.mocked(tokenExchangeService.exchange).mockRejectedValue(error);
 
 				await controller.exchangeToken(req, res);
 

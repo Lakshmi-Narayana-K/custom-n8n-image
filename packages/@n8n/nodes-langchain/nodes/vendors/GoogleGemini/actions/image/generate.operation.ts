@@ -1,5 +1,5 @@
 import type { IExecuteFunctions, INodeExecutionData, INodeProperties } from 'n8n-workflow';
-import { NodeOperationError, updateDisplayOptions } from 'n8n-workflow';
+import { NodeOperationError, requestPath, updateDisplayOptions } from 'n8n-workflow';
 
 import {
 	type GenerateContentRequest,
@@ -7,7 +7,8 @@ import {
 	type ImagenResponse,
 	Modality,
 } from '../../helpers/interfaces';
-import { apiRequest } from '../../transport';
+import { getFilenameFromMimeType } from '../../helpers/utils';
+import { apiRequest, modelPath } from '../../transport';
 import { modelRLC } from '../descriptions';
 
 const properties: INodeProperties[] = [
@@ -42,9 +43,13 @@ const properties: INodeProperties[] = [
 				displayName: 'Number of Images',
 				name: 'sampleCount',
 				default: 1,
-				description:
-					'Number of images to generate. Not supported by Gemini models, supported by Imagen models.',
+				description: 'Number of images to generate',
 				type: 'number',
+				displayOptions: {
+					show: {
+						'/modelId': [{ _cnd: { includes: 'imagen' } }],
+					},
+				},
 				typeOptions: {
 					minValue: 1,
 				},
@@ -72,6 +77,11 @@ export const description = updateDisplayOptions(displayOptions, properties);
 export async function execute(this: IExecuteFunctions, i: number): Promise<INodeExecutionData[]> {
 	const model = this.getNodeParameter('modelId', i, '', { extractValue: true }) as string;
 	const prompt = this.getNodeParameter('prompt', i, '') as string;
+	if (!prompt.trim()) {
+		throw new NodeOperationError(this.getNode(), 'A non-empty prompt is required.', {
+			itemIndex: i,
+		});
+	}
 	const binaryPropertyOutput = this.getNodeParameter(
 		'options.binaryPropertyOutput',
 		i,
@@ -92,17 +102,20 @@ export async function execute(this: IExecuteFunctions, i: number): Promise<INode
 			generationConfig,
 		};
 
-		const response = (await apiRequest.call(this, 'POST', `/v1beta/${model}:generateContent`, {
-			body,
-		})) as GenerateContentResponse;
+		const response = (await apiRequest.call(
+			this,
+			'POST',
+			requestPath`/v1beta${modelPath.call(this, model)}:generateContent`,
+			{
+				body,
+			},
+		)) as GenerateContentResponse;
 		const promises = response.candidates.map(async (candidate) => {
 			const imagePart = candidate.content.parts.find((part) => 'inlineData' in part);
+			const mimeType = imagePart?.inlineData.mimeType;
+			const fileName = getFilenameFromMimeType(mimeType, 'image', 'png');
 			const buffer = Buffer.from(imagePart?.inlineData.data ?? '', 'base64');
-			const binaryData = await this.helpers.prepareBinaryData(
-				buffer,
-				'image.png',
-				imagePart?.inlineData.mimeType,
-			);
+			const binaryData = await this.helpers.prepareBinaryData(buffer, fileName, mimeType);
 			return {
 				binary: {
 					[binaryPropertyOutput]: binaryData,
@@ -129,15 +142,21 @@ export async function execute(this: IExecuteFunctions, i: number): Promise<INode
 				sampleCount,
 			},
 		};
-		const response = (await apiRequest.call(this, 'POST', `/v1beta/${model}:predict`, {
-			body,
-		})) as ImagenResponse;
+		const response = (await apiRequest.call(
+			this,
+			'POST',
+			requestPath`/v1beta${modelPath.call(this, model)}:predict`,
+			{
+				body,
+			},
+		)) as ImagenResponse;
 
 		const promises = response.predictions.map(async (prediction) => {
+			const fileName = getFilenameFromMimeType(prediction.mimeType, 'image', 'png');
 			const buffer = Buffer.from(prediction.bytesBase64Encoded ?? '', 'base64');
 			const binaryData = await this.helpers.prepareBinaryData(
 				buffer,
-				'image.png',
+				fileName,
 				prediction.mimeType,
 			);
 			return {

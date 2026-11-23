@@ -27,17 +27,10 @@ const effectiveSize = computed(() => {
 	return props.size;
 });
 
-// Map legacy variant values to current ones
-const effectiveVariant = computed(() => {
-	if (props.variant === 'highlight') return 'ghost';
-	if (props.variant === 'highlight-fill') return 'ghost';
-	return props.variant;
-});
-
 const computedIconSize = computed((): IconSize | undefined => {
 	if (props.iconSize) return props.iconSize;
 	if (effectiveSize.value === 'xsmall') return 'xsmall';
-	return effectiveSize.value as IconSize;
+	return effectiveSize.value;
 });
 
 const componentTag = computed(() => {
@@ -56,11 +49,12 @@ const classes = computed(() =>
 	cn(
 		'button',
 		$style.button,
-		$style[effectiveVariant.value],
+		$style[props.variant],
 		$style[effectiveSize.value],
 		props.loading && $style.loading,
 		props.iconOnly && $style.iconOnly,
 		props.disabled && $style.disabled,
+		isDisabled.value && 'is-disabled',
 		props.class,
 	),
 );
@@ -94,10 +88,10 @@ const handleClick = (event: MouseEvent) => {
 		:disabled="componentTag === 'button' ? isDisabled || undefined : undefined"
 		:aria-disabled="isDisabled || undefined"
 		:aria-busy="loading || undefined"
-		:tabindex="componentTag === 'a' && isDisabled ? -1 : undefined"
+		:tabindex="componentTag === 'a' && isDisabled ? -1 : attrs.tabindex"
 		:class="classes"
 		:data-icon-only="iconOnly ? 'true' : undefined"
-		aria-live="polite"
+		:aria-live="attrs['aria-live'] ?? 'polite'"
 		@click="handleClick"
 	>
 		<Transition name="n8n-button-fade">
@@ -109,8 +103,13 @@ const handleClick = (event: MouseEvent) => {
 		</Transition>
 
 		<div :class="$style['button-inner']">
-			<slot name="icon">
-				<N8nIcon v-if="icon && !loading" :icon="icon" :size="computedIconSize" />
+			<slot v-if="!loading" name="icon">
+				<N8nIcon
+					v-if="icon && !loading"
+					:icon="icon"
+					:fallback-icon="fallbackIcon"
+					:size="computedIconSize"
+				/>
 			</slot>
 
 			<span v-if="label">{{ label }}</span>
@@ -127,6 +126,7 @@ const handleClick = (event: MouseEvent) => {
 
 <style lang="scss" module>
 @use '../../css/mixins/focus';
+@use '../../css/mixins/motion';
 
 .button {
 	appearance: none;
@@ -143,13 +143,13 @@ const handleClick = (event: MouseEvent) => {
 
 	height: var(--button--height);
 	padding: var(--button--padding);
-	border-radius: var(--button--radius);
+	border-radius: var(--radius--full);
 	font-size: var(--button--font-size);
 
 	--button--color--background: transparent;
-	--button--color--background-hover: transparent;
-	--button--color--background-active: transparent;
-	--button--color: light-dark(var(--color--neutral-900), var(--color--neutral-100));
+	--button--color--background-hover: var(--background--hover);
+	--button--color--background-active: var(--background--active);
+	--button--color: var(--text-color);
 	--button--shadow: 0 0 0 0 transparent;
 	--button--shadow--hover: 0 0 0 0 transparent;
 	--button--shadow--active: 0 0 0 0 transparent;
@@ -178,7 +178,9 @@ const handleClick = (event: MouseEvent) => {
 			var(--button--shadow--hover);
 	}
 
-	&:active {
+	&:active,
+	&[aria-expanded='true'],
+	:global([aria-expanded='true']) & {
 		background-color: var(--button--color--background-active);
 		box-shadow:
 			inset var(--button--border--shadow--active),
@@ -191,120 +193,115 @@ const handleClick = (event: MouseEvent) => {
 
 	&:focus-visible {
 		@include focus.focus-ring;
+		--button--border-color: var(--focus--border-color) !important;
 	}
 
 	&.xsmall {
 		--button--height: var(--height--xs);
 		--button--padding: 0 var(--spacing--2xs);
-		--button--radius: var(--radius--3xs);
+		--button--radius: var(--radius--xs);
 		--button--font-size: var(--font-size--2xs);
 	}
 
 	&.small {
 		--button--height: var(--height--sm);
 		--button--padding: 0 var(--spacing--xs);
-		--button--radius: var(--radius--3xs);
+		--button--radius: var(--radius--xs);
 		--button--font-size: var(--font-size--xs);
 	}
 
 	&.medium {
 		--button--height: var(--height--md);
 		--button--padding: 0 var(--spacing--xs);
-		--button--radius: var(--radius--3xs);
+		--button--radius: var(--radius--xs);
 		--button--font-size: var(--font-size--sm);
 	}
 
 	&.large {
 		--button--height: var(--height--lg);
 		--button--padding: 0 var(--spacing--sm);
-		--button--radius: var(--radius--2xs);
+		--button--radius: var(--radius--sm);
 		--button--font-size: var(--font-size--sm);
 	}
 
 	&.xlarge {
 		--button--height: var(--height--xl);
 		--button--padding: 0 var(--spacing--sm);
-		--button--radius: var(--radius--xs);
+		--button--radius: var(--radius--sm);
 		--button--font-size: var(--font-size--md);
 	}
 
 	&.solid {
-		--button--color--background: var(--color--orange-400);
-		--button--color--background-hover: var(--color--orange-500);
-		--button--color--background-active: var(--color--orange-600);
-		--button--color: var(--color--neutral-white);
-		--button--shadow: 0 1px 3px 0
-			light-dark(var(--color--black-alpha-100), var(--color--black-alpha-200));
-		--button--shadow--hover: 0 1px 3px 0
-			light-dark(var(--color--black-alpha-100), var(--color--black-alpha-200));
-		--button--shadow--active: 0 1px 3px 0
-			light-dark(var(--color--black-alpha-100), var(--color--black-alpha-200));
-		--button--border-color: var(--color--orange-400);
-		--button--border-color--hover: var(--color--orange-500);
-		--button--border-color--active: var(--color--orange-600);
+		--button--color--background: var(--color--primary);
+		--button--color--background-hover: color-mix(
+			in srgb,
+			var(--color--primary),
+			light-dark(var(--color--neutral-white), var(--color--neutral-black)) 10%
+		);
+		--button--color--background-active: color-mix(
+			in srgb,
+			var(--color--primary),
+			light-dark(var(--color--neutral-white), var(--color--neutral-black)) 12%
+		);
+		--button--color: var(--text-color--inverse);
+		--button--border-color: var(--color--primary);
+		--button--border-color--hover: color-mix(
+			in srgb,
+			var(--button--border-color),
+			light-dark(var(--color--neutral-white), var(--color--neutral-black)) 10%
+		);
+		--button--border-color--active: color-mix(
+			in srgb,
+			var(--button--border-color),
+			light-dark(var(--color--neutral-white), var(--color--neutral-black)) 12%
+		);
 		--button--border--shadow: 0 0 0 1px var(--button--border-color);
 		--button--border--shadow--hover: 0 0 0 1px var(--button--border-color--hover);
 		--button--border--shadow--active: 0 0 0 1px var(--button--border-color--active);
 	}
 
-	&.subtle {
-		--button--color--background: light-dark(var(--color--neutral-white), var(--color--neutral-800));
-		--button--color--background-hover: light-dark(
-			var(--color--neutral-150),
-			var(--color--neutral-700)
-		);
-		--button--color--background-active: light-dark(
-			var(--color--neutral-200),
-			var(--color--neutral-600)
-		);
-		--button--shadow:
-			0 1px 3px light-dark(var(--color--black-alpha-100), var(--color--black-alpha-300)),
-			0 0 0 1.5px light-dark(transparent, var(--color--black-alpha-100));
-		--button--shadow--hover:
-			0 1px 3px 0 light-dark(var(--color--black-alpha-200), var(--color--black-alpha-300)),
-			0 0 0 1px light-dark(transparent, var(--color--black-alpha-100));
-		--button--shadow--active:
-			0 1px 3px 0 light-dark(var(--color--black-alpha-200), var(--color--black-alpha-300)),
-			0 0 0 1px light-dark(transparent, var(--color--black-alpha-100));
-		--button--border-color: light-dark(
-			var(--color--black-alpha-200),
-			var(--color--white-alpha-100)
-		);
-		--button--border-color--hover: light-dark(
-			var(--color--black-alpha-200),
-			var(--color--white-alpha-300)
-		);
-		--button--border-color--active: light-dark(
-			var(--color--black-alpha-300),
-			var(--color--white-alpha-300)
-		);
+	&.brand {
+		--button--color--background: var(--background--brand);
+		--button--color--background-hover: var(--background--brand--hover);
+		--button--color--background-active: var(--background--brand--active);
+		--button--color: var(--color--neutral-black);
+		--button--shadow: var(--shadow--xs);
+		--button--shadow--hover: var(--shadow--xs);
+		--button--shadow--active: var(--shadow--xs);
+		--button--border-color: var(--background--brand);
+		--button--border-color--hover: var(--background--brand--hover);
+		--button--border-color--active: var(--background--brand--active);
 		--button--border--shadow: 0 0 0 1px var(--button--border-color);
 		--button--border--shadow--hover: 0 0 0 1px var(--button--border-color--hover);
 		--button--border--shadow--active: 0 0 0 1px var(--button--border-color--active);
 	}
 
 	&.outline {
-		--button--color--background: transparent;
-		--button--color--background-hover: light-dark(
-			var(--color--neutral-150),
-			var(--color--white-alpha-100)
+		--button--color--background: var(--background--surface);
+		--button--color--background-hover: color-mix(
+			in srgb,
+			var(--button--color--background),
+			light-dark(var(--color--neutral-black), var(--color--neutral-white)) 5%
 		);
-		--button--color--background-active: light-dark(
-			var(--color--black-alpha-200),
-			var(--color--white-alpha-200)
+		--button--color--background-active: color-mix(
+			in srgb,
+			var(--button--color--background),
+			light-dark(var(--color--neutral-black), var(--color--neutral-white)) 10%
 		);
-		--button--border-color: light-dark(
-			var(--color--black-alpha-200),
-			var(--color--white-alpha-100)
+		--button--border-color: var(--border-color);
+		--button--border-color--hover: color-mix(
+			in srgb,
+			var(--button--border-color),
+			light-dark(var(--color--neutral-black), var(--color--neutral-white)) 5%
 		);
-		--button--border-color--hover: light-dark(
-			var(--color--black-alpha-200),
-			var(--color--white-alpha-200)
+		--button--border-color--active: color-mix(
+			in srgb,
+			var(--button--border-color),
+			light-dark(var(--color--neutral-black), var(--color--neutral-white)) 10%
 		);
-		--button--border-color--active: light-dark(
-			var(--color--black-alpha-300),
-			var(--color--white-alpha-300)
-		);
+		--button--shadow: var(--shadow--xs);
+		--button--shadow--hover: var(--shadow--xs);
+		--button--shadow--active: var(--shadow--xs);
 		--button--border--shadow: 0 0 0 1px var(--button--border-color);
 		--button--border--shadow--hover: 0 0 0 1px var(--button--border-color--hover);
 		--button--border--shadow--active: 0 0 0 1px var(--button--border-color--active);
@@ -312,14 +309,6 @@ const handleClick = (event: MouseEvent) => {
 
 	&.ghost {
 		--button--color--background: transparent;
-		--button--color--background-hover: light-dark(
-			var(--color--black-alpha-100),
-			var(--color--white-alpha-100)
-		);
-		--button--color--background-active: light-dark(
-			var(--color--black-alpha-200),
-			var(--color--white-alpha-200)
-		);
 		--button--border-color: transparent;
 		--button--border--shadow: 0 0 0 1px var(--button--border-color);
 		--button--border--shadow--hover: 0 0 0 1px var(--button--border-color);
@@ -382,6 +371,13 @@ const handleClick = (event: MouseEvent) => {
 	&.disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+
+		&:hover {
+			background-color: var(--button--color--background);
+			box-shadow:
+				inset var(--button--border--shadow),
+				var(--button--shadow);
+		}
 	}
 
 	&.loading {
@@ -408,6 +404,7 @@ const handleClick = (event: MouseEvent) => {
 }
 
 .button-inner {
+	flex: 1;
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -429,44 +426,14 @@ const handleClick = (event: MouseEvent) => {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	animation: spin 1s linear infinite;
-
-	@media (prefers-reduced-motion: reduce) {
-		animation: none;
-	}
+	@include motion.spin;
 }
 
-/* TODO: Move to global animations css library */
-:global(.n8n-button-fade-enter-active),
+:global(.n8n-button-fade-enter-active) {
+	@include motion.fade-in-up;
+}
+
 :global(.n8n-button-fade-leave-active) {
-	--easing--ease-out: cubic-bezier(0.215, 0.61, 0.355, 1);
-	transition:
-		opacity 0.2s var(--easing--ease-out),
-		transform 0.2s var(--easing--ease-out);
-
-	@media (prefers-reduced-motion: reduce) {
-		transition: opacity 0.1s;
-	}
-}
-
-:global(.n8n-button-fade-enter-from),
-:global(.n8n-button-fade-leave-to) {
-	opacity: 0;
-	transform: translateY(4px);
-	filter: blur(2px);
-
-	@media (prefers-reduced-motion: reduce) {
-		transform: none;
-		filter: none;
-	}
-}
-
-@keyframes spin {
-	from {
-		transform: rotate(0deg);
-	}
-	to {
-		transform: rotate(360deg);
-	}
+	@include motion.fade-out-down;
 }
 </style>

@@ -1,22 +1,23 @@
 import {
+	EVALUATION_TRIGGER_NODE_TYPE,
 	MANUAL_TRIGGER_NODE_TYPE,
-	TRIMMED_TASK_DATA_CONNECTIONS_KEY,
 	createRunExecutionData,
+	isTrimmedNodeExecutionData,
 } from 'n8n-workflow';
+import { CANCELLABLE_EXECUTION_STATUSES } from './executions.constants';
 import type {
 	ITaskData,
 	ExecutionStatus,
+	ExecutionSummary,
 	IDataObject,
-	INode,
-	IPinData,
 	IRunData,
 	ExecutionError,
 	INodeTypeBaseDescription,
 	INodeExecutionData,
-	Workflow,
 	IWorkflowDataProxyAdditionalKeys,
 } from 'n8n-workflow';
 import type { INodeUi, IWorkflowDb } from '@/Interface';
+import type { WorkflowObjectAccessors } from '@/app/types/workflow';
 import type {
 	ExecutionFilterType,
 	ExecutionPreviewNodeSchema,
@@ -36,6 +37,8 @@ import {
 	WORKFLOW_TRIGGER_NODE_TYPE,
 } from '@/app/constants';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import { useWorkflowExecutionStateStore } from '@/app/stores/workflowExecutionState.store';
+import { createWorkflowDocumentId } from '@/app/stores/workflowDocument.store';
 import { useRootStore } from '@n8n/stores/useRootStore';
 import { i18n } from '@n8n/i18n';
 import { h } from 'vue';
@@ -43,13 +46,18 @@ import NodeExecutionErrorMessage from '@/app/components/NodeExecutionErrorMessag
 import { parse } from 'flatted';
 import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
 
+export function hasCancellableExecutions(executions: ExecutionSummary[]): boolean {
+	const cancellableStatuses = new Set<ExecutionStatus>(CANCELLABLE_EXECUTION_STATUSES);
+
+	return executions.some((execution) => cancellableStatuses.has(execution.status));
+}
+
 export function getDefaultExecutionFilters(): ExecutionFilterType {
 	return {
 		workflowId: 'all',
 		status: 'all',
 		startDate: '',
 		endDate: '',
-		tags: [],
 		annotationTags: [],
 		metadata: [],
 		vote: 'all',
@@ -63,10 +71,6 @@ export const executionFilterToQueryFilter = (
 	const queryFilter: IDataObject = {};
 	if (filter.workflowId !== 'all') {
 		queryFilter.workflowId = filter.workflowId;
-	}
-
-	if (!isEmpty(filter.tags)) {
-		queryFilter.tags = filter.tags;
 	}
 
 	if (!isEmpty(filter.annotationTags)) {
@@ -134,60 +138,25 @@ export const openFormPopupWindow = (url: string) => {
 
 export const clearPopupWindowState = () => (formPopupWindow = false);
 
-export async function displayForm({
-	nodes,
-	runData,
-	pinData,
-	destinationNode,
-	triggerNode,
-	directParentNodes,
+/** Opens the test form popup for each Form Trigger the backend registered in this manual run. */
+export function displayForm({
+	formTestUrls,
 	source,
-	getTestUrl,
 }: {
-	nodes: INode[];
-	runData: IRunData | undefined;
-	pinData: IPinData;
-	destinationNode: string | undefined;
-	triggerNode: string | undefined;
-	directParentNodes: string[];
+	formTestUrls: string[];
 	source: string | undefined;
-	getTestUrl: (node: INode) => string;
 }) {
-	for (const node of nodes) {
-		if (triggerNode !== undefined && triggerNode !== node.name) continue;
+	if (source === 'RunData.ManualChatMessage') return;
 
-		const hasNodeRunAndIsNotFormTrigger =
-			runData?.hasOwnProperty(node.name) && node.type !== FORM_TRIGGER_NODE_TYPE;
-
-		if (hasNodeRunAndIsNotFormTrigger || pinData[node.name]) continue;
-
-		if (![FORM_TRIGGER_NODE_TYPE].includes(node.type)) continue;
-
-		if (destinationNode && destinationNode !== node.name && !directParentNodes.includes(node.name))
-			continue;
-
-		if (node.name === destinationNode || !node.disabled) {
-			let testUrl = '';
-			if (node.type === FORM_TRIGGER_NODE_TYPE) testUrl = getTestUrl(node);
-
-			try {
-				const res = await fetch(testUrl, { method: 'GET' });
-				if (!res.ok) continue;
-			} catch (error) {
-				continue;
-			}
-
-			if (testUrl && source !== 'RunData.ManualChatMessage') {
-				clearPopupWindowState();
-				openFormPopupWindow(testUrl);
-			}
-		}
+	for (const formTestUrl of formTestUrls) {
+		clearPopupWindowState();
+		openFormPopupWindow(formTestUrl);
 	}
 }
 
 export const waitingNodeTooltip = (
 	node: INodeUi | null | undefined,
-	workflow?: Workflow,
+	workflow?: WorkflowObjectAccessors,
 	metadata?: { resumeUrl?: string; resumeFormUrl?: string },
 ) => {
 	if (!node) return '';
@@ -196,7 +165,9 @@ export const waitingNodeTooltip = (
 			node.type,
 		)?.waitingNodeTooltip;
 		if (waitingNodeTooltipFromNodeType) {
-			const activeExecutionId = useWorkflowsStore().activeExecutionId as string;
+			const activeExecutionId = useWorkflowExecutionStateStore(
+				createWorkflowDocumentId(useWorkflowsStore().workflowId),
+			).activeExecutionId as string;
 			// Use signed URLs from metadata if available
 			// otherwise fall back to constructing URLs without token
 			const additionalData: IWorkflowDataProxyAdditionalKeys = {
@@ -229,12 +200,7 @@ export const waitingNodeTooltip = (
 	return '';
 };
 
-/**
- * Check whether node execution data contains a trimmed item.
- */
-export function isTrimmedNodeExecutionData(data: INodeExecutionData[] | null) {
-	return data?.some((entry) => entry.json?.[TRIMMED_TASK_DATA_CONNECTIONS_KEY]);
-}
+export { isTrimmedNodeExecutionData };
 
 /**
  * Check whether task data contains a trimmed item.
@@ -369,6 +335,13 @@ export function getExecutionErrorToastConfiguration({
 }) {
 	const message = getExecutionErrorMessage({ error, lastNodeExecuted });
 
+	if (error.name === 'WorkflowHasIssuesError') {
+		return {
+			title: i18n.baseText('pushConnection.workflowHasIssues.title'),
+			message: h('div', { style: 'white-space: pre-line' }, error.message),
+		};
+	}
+
 	if (error.name === 'SubworkflowOperationError') {
 		return { title: error.message, message: error.description ?? '' };
 	}
@@ -431,6 +404,11 @@ export function findTriggerNodeToAutoSelect(
 		[MANUAL_TRIGGER_NODE_TYPE]: 6,
 		[WORKFLOW_TRIGGER_NODE_TYPE]: 5,
 		[ERROR_TRIGGER_NODE_TYPE]: 4,
+		// Ranked below the core-node fallback: selecting this trigger runs the whole
+		// evaluation dataset, so it should never win over a trigger the user can run
+		// interactively. Its codex category is "Utility", so without this entry it
+		// would fall through to the 8 reserved for third-party app triggers.
+		[EVALUATION_TRIGGER_NODE_TYPE]: -1,
 	};
 
 	function isCoreNode(node: INodeUi): boolean {

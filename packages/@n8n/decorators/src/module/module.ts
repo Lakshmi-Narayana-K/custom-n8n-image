@@ -1,7 +1,9 @@
 import type { LICENSE_FEATURES, InstanceType } from '@n8n/constants';
 import { Container, Service, type Constructable } from '@n8n/di';
+import type { NodeLoader } from 'n8n-workflow';
 
 import { ModuleMetadata } from './module-metadata';
+import type { SystemTaskClass } from '../system-task/system-task';
 
 /**
  * Structurally similar (not identical) interface to typeorm's `BaseEntity`
@@ -82,12 +84,24 @@ export interface ModuleInterface {
 	context?(): Promise<ModuleContext>;
 
 	/**
-	 * Return a path to a dir to load nodes and credentials from.
+	 * Return the system task classes this module contributes. Each returned
+	 * class is registered with the system task registry after the module's
+	 * `init()`. Return an empty array when a config or environment gate keeps
+	 * the module's tasks off.
 	 *
-	 * @returns Path to a dir to load nodes and credentials from. `null` to skip.
-	 * @example '/Users/nathan/.n8n/nodes/node_modules'
+	 * @example [ InsightsCompactionTask, InsightsPruningTask ]
 	 */
-	loadDir?(): Promise<string | null>;
+	systemTasks?(): Promise<SystemTaskClass[]>;
+
+	/**
+	 * Return zero or more node loaders contributed by this module.
+	 *
+	 * A loader can wrap a directory of node packages (using`scanDirectoryForPackages`)
+	 * or return nodes from any source (external APIs, static data...).
+	 *
+	 * Each loader's `packageName` must be unique across all loaders.
+	 */
+	nodeLoaders?(): Promise<NodeLoader[]>;
 }
 
 export type ModuleClass = Constructable<ModuleInterface>;

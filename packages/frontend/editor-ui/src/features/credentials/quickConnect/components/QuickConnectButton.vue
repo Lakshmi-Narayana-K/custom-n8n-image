@@ -44,7 +44,7 @@ const buttonLabel = computed(() => {
 </script>
 
 <template>
-	<N8nTooltip :disabled="!disabled || !disabledTooltip" placement="right">
+	<N8nTooltip :disabled="!disabled || !disabledTooltip" :offset="24">
 		<template #content>{{ disabledTooltip }}</template>
 		<template #default>
 			<GoogleAuthButton
@@ -56,7 +56,7 @@ const buttonLabel = computed(() => {
 			<N8nButton
 				v-else
 				v-bind="$attrs"
-				variant="subtle"
+				variant="outline"
 				:size="size"
 				:class="$style.quickConnectButton"
 				:disabled="disabled"

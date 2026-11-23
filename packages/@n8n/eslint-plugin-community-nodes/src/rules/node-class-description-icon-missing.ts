@@ -8,12 +8,18 @@ import {
 	createRule,
 } from '../utils/index.js';
 
+/** @deprecated Use `require-node-description-fields` instead. */
 export const NodeClassDescriptionIconMissingRule = createRule({
 	name: 'node-class-description-icon-missing',
 	meta: {
 		type: 'problem',
+		deprecated: {
+			message: 'Use require-node-description-fields instead.',
+			replacedBy: [{ rule: { name: 'require-node-description-fields' } }],
+		},
 		docs: {
-			description: 'Node class description must have an `icon` property defined',
+			description:
+				'Node class description must have an `icon` property defined. Deprecated: use `require-node-description-fields` instead.',
 		},
 		messages: {
 			missingIcon: 'Node class description is missing required `icon` property',
@@ -35,10 +41,7 @@ export const NodeClassDescriptionIconMissingRule = createRule({
 				}
 
 				const descriptionProperty = findClassProperty(node, 'description');
-				if (
-					!descriptionProperty?.value ||
-					descriptionProperty.value.type !== TSESTree.AST_NODE_TYPES.ObjectExpression
-				) {
+				if (descriptionProperty?.value?.type !== TSESTree.AST_NODE_TYPES.ObjectExpression) {
 					return;
 				}
 

@@ -13,11 +13,18 @@ import { useI18n } from '@n8n/i18n';
 import { computed, useTemplateRef, watch, ref } from 'vue';
 import { useChatStore } from '../chat.store';
 
-const { selectedModel, credentials, readyToShowModelSelector, showArtifactIcon } = defineProps<{
+const {
+	selectedModel,
+	credentials,
+	readyToShowModelSelector,
+	showArtifactIcon,
+	hasDynamicCredentials,
+} = defineProps<{
 	selectedModel: ChatModelDto | null;
 	credentials: CredentialsMap | null;
 	readyToShowModelSelector: boolean;
 	showArtifactIcon: boolean;
+	hasDynamicCredentials: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -28,6 +35,7 @@ const emit = defineEmits<{
 	selectCredential: [provider: ChatHubProvider, credentialId: string | null];
 	openWorkflow: [workflowId: string];
 	reopenArtifact: [];
+	toggleDynamicCredentials: [];
 }>();
 
 const modelSelectorRef = useTemplateRef('modelSelectorRef');
@@ -84,7 +92,7 @@ defineExpose({
 				ref="modelSelectorRef"
 				:selected-agent="selectedModel"
 				:credentials="credentials"
-				text
+				:show-border="false"
 				:agents="chatStore.agents"
 				:is-loading="isLoadingAgents"
 				@change="onModelChange"
@@ -96,7 +104,7 @@ defineExpose({
 		</div>
 		<div :class="$style.buttons">
 			<N8nButton
-				variant="subtle"
+				variant="outline"
 				v-if="selectedModel?.model.provider === 'custom-agent'"
 				size="small"
 				icon="settings"
@@ -105,14 +113,24 @@ defineExpose({
 			/>
 			<N8nIconButton
 				v-if="showArtifactIcon"
-				variant="subtle"
+				variant="outline"
 				size="small"
 				icon="panel-right"
 				@click="emit('reopenArtifact')"
 			/>
+			<N8nIconButton
+				v-if="hasDynamicCredentials"
+				variant="outline"
+				size="small"
+				icon="key-round"
+				:title="i18n.baseText('chatHub.chat.header.button.manageConnections')"
+				:aria-label="i18n.baseText('chatHub.chat.header.button.manageConnections')"
+				data-testid="manage-dynamic-credentials-button"
+				@click="emit('toggleDynamicCredentials')"
+			/>
 			<N8nButton
 				v-if="showOpenWorkflow"
-				variant="subtle"
+				variant="outline"
 				size="small"
 				icon="settings"
 				:label="i18n.baseText('chatHub.chat.header.button.openWorkflow')"

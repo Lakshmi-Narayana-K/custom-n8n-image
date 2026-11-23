@@ -1,16 +1,18 @@
-import type { AuthenticatedRequest } from '@n8n/db';
+import type { ZodClass } from '@n8n/api-types';
+import { Time } from '@n8n/constants';
+import { AuthenticatedRequest } from '@n8n/db';
 import type { RateLimiterLimits, UserKeyedRateLimiterConfig } from '@n8n/decorators';
 import { BodyKeyedRateLimiterConfig } from '@n8n/decorators';
 import { Service } from '@n8n/di';
 import type { Request, RequestHandler } from 'express';
 import { rateLimit as expressRateLimit } from 'express-rate-limit';
+import type { Store } from 'express-rate-limit';
 import assert from 'node:assert';
 import type { ZodTypeAny } from 'zod';
-import type { ZodClass } from '@n8n/api-types';
 
 const defaultLimits: Required<RateLimiterLimits> = {
 	limit: 1000,
-	windowMs: 60_000,
+	windowMs: Time.minutes.toMilliseconds,
 };
 
 /**
@@ -71,6 +73,30 @@ export class RateLimitService {
 				return identifier.startsWith('skip:');
 			},
 		});
+	}
+
+	/**
+	 * Counts requests for each API key and never blocks. Requests without an API key are skipped.
+	 * The counts are stored on the request under `requestPropertyName`.
+	 */
+	createApiKeyRateLimitMiddleware(
+		limits: { limit: number | (() => number); windowMs: number },
+		{ requestPropertyName, store }: { requestPropertyName: string; store: Store },
+	): RequestHandler {
+		const limiter = expressRateLimit({
+			limit: limits.limit,
+			windowMs: limits.windowMs,
+			legacyHeaders: false,
+			standardHeaders: false,
+			requestPropertyName,
+			store,
+			handler: (_req, _res, next) => next(),
+			// The Public API creates a limiter on the first request and again when a window changes.
+			validate: { creationStack: false },
+			skip: (req: AuthenticatedRequest): boolean => req.tokenGrant?.apiKeyId === undefined,
+			keyGenerator: (req: AuthenticatedRequest) => `apiKey:${req.tokenGrant?.apiKeyId}`,
+		});
+		return async (req, res, next) => await limiter(req, res, () => next());
 	}
 
 	private extractBodyIdentifier(body: unknown, fieldName: string, fieldSchema: ZodTypeAny): string {

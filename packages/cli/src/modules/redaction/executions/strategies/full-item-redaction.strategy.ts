@@ -6,7 +6,7 @@ import type {
 	ITaskDataConnections,
 } from 'n8n-workflow';
 
-import type { RedactableExecution } from '@/executions/execution-redaction';
+import type { RedactableExecution } from '@n8n/backend-services';
 
 import type {
 	IExecutionRedactionStrategy,
@@ -26,11 +26,15 @@ export class FullItemRedactionStrategy implements IExecutionRedactionStrategy {
 		const runData = execution.data.resultData.runData;
 		if (!runData) return;
 
-		const reason = context.hasDynamicCredentials
+		const reason = context.enforceDynCredRedaction
 			? 'dynamic_credentials'
-			: context.redactExecutionData === true
-				? 'user_requested'
-				: 'workflow_redaction_policy';
+			: context.enforceCredentialUsabilityRedaction
+				? 'credential_inaccessible'
+				: context.redactExecutionData === true
+					? 'user_requested'
+					: context.redactedBySubWorkflow
+						? 'sub_workflow_redaction_policy'
+						: 'workflow_redaction_policy';
 
 		for (const nodeName of Object.keys(runData)) {
 			for (const taskData of runData[nodeName]) {
@@ -53,11 +57,30 @@ export class FullItemRedactionStrategy implements IExecutionRedactionStrategy {
 			delete resultData.error;
 		}
 
+		const executionData = execution.data.executionData;
+
+		if (executionData) {
+			for (const executeData of executionData.nodeExecutionStack ?? []) {
+				if (executeData.data) {
+					this.redactConnections(executeData.data, reason);
+				}
+			}
+
+			for (const runIndexMap of Object.values(executionData.waitingExecution ?? {})) {
+				for (const waitingExecution of Object.values(runIndexMap)) {
+					this.redactConnections(waitingExecution, reason);
+				}
+			}
+		}
+
 		execution.data.redactionInfo = {
 			...execution.data.redactionInfo,
 			isRedacted: true,
 			reason,
 			canReveal: context.userCanReveal,
+			...(reason === 'credential_inaccessible' && {
+				credentialIds: [...context.inaccessibleCredentialIds],
+			}),
 		};
 	}
 

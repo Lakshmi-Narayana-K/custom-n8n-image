@@ -1,30 +1,41 @@
 import { defineStore } from 'pinia';
-import { ref, computed, reactive, toRaw } from 'vue';
+import { ref, computed, reactive, toRaw, watch } from 'vue';
 import { useRootStore } from '@n8n/stores/useRootStore';
-import { useSettingsStore } from '@/app/stores/settings.store';
+import { useSettingsStore } from '@n8n/stores/settings.store';
 import { usePushConnectionStore } from '@/app/stores/pushConnection.store';
-import { useToast } from '@/app/composables/useToast';
+import { useToast } from '@n8n/composables/useToast';
 import {
 	fetchSettings,
 	updateSettings,
-	fetchPreferences,
-	updatePreferences,
-	fetchModelCredentials,
 	fetchServiceCredentials,
+	fetchInstanceModelCredentials,
+	fetchModelCatalog,
+	verifyModel as verifyModelRequest,
+	verifySandbox as verifySandboxRequest,
+	verifySearch as verifySearchRequest,
 } from './instanceAi.settings.api';
 import { hasPermission } from '@/app/utils/rbac/permissions';
-import { createGatewayLink, getGatewayStatus } from './instanceAi.api';
-import type {
-	FrontendModuleSettings,
-	InstanceAiAdminSettingsResponse,
-	InstanceAiAdminSettingsUpdateRequest,
-	InstanceAiUserPreferencesResponse,
-	InstanceAiUserPreferencesUpdateRequest,
-	InstanceAiModelCredential,
-	InstanceAiPermissions,
-	InstanceAiPermissionMode,
-	ToolCategory,
+import { createBrowserLink, disconnectBrowserSession, getBrowserStatus } from './instanceAi.api';
+import {
+	DEFAULT_INSTANCE_AI_PERMISSIONS,
+	type FrontendModuleSettings,
+	type InstanceAiAdminSettingsResponse,
+	type InstanceAiAdminSettingsUpdateRequest,
+	type InstanceAiProviderConnection,
+	type InstanceAiPermissions,
+	type InstanceAiPermissionMode,
+	type InstanceAiModelCatalogResponse,
+	type ToolCategory,
+	type InstanceAiVerifyModelRequest,
+	type InstanceAiVerifySandboxRequest,
+	type InstanceAiVerifySearchRequest,
+	type InstanceAiVerificationResponse,
 } from '@n8n/api-types';
+import { i18n } from '@n8n/i18n';
+import type { ToolConnectionStatus } from '@/features/shared/toolsConnection/types';
+import { deriveInstanceAiConfiguration } from './instanceAiConfiguration';
+import { isBrowserUseSupportedOnDevice } from './utils/browserUseSupport';
+import { useInstanceAiSetupPanelExperiment } from '@/experiments/instanceAiSetupPanel/useInstanceAiSetupPanelExperiment';
 
 export const useInstanceAiSettingsStore = defineStore('instanceAiSettings', () => {
 	const rootStore = useRootStore();
@@ -34,45 +45,83 @@ export const useInstanceAiSettingsStore = defineStore('instanceAiSettings', () =
 	const isLoading = ref(false);
 	const isSaving = ref(false);
 	const settings = ref<InstanceAiAdminSettingsResponse | null>(null);
-	const preferences = ref<InstanceAiUserPreferencesResponse | null>(null);
-	const credentials = ref<InstanceAiModelCredential[]>([]);
-	const serviceCredentials = ref<InstanceAiModelCredential[]>([]);
+	const serviceCredentials = ref<InstanceAiProviderConnection[]>([]);
+	const instanceModelCredentials = ref<InstanceAiProviderConnection[]>([]);
+	const modelCatalog = ref<InstanceAiModelCatalogResponse['models'] | null>(null);
+	const isModelCatalogLoading = ref(false);
+	let modelCatalogFetchPromise: Promise<void> | null = null;
 	const draft = reactive<InstanceAiAdminSettingsUpdateRequest>({});
-	const preferencesDraft = reactive<InstanceAiUserPreferencesUpdateRequest>({});
 
-	// ── Gateway / daemon state ──────────────────────────────────────────
-	const isDaemonConnecting = ref(false);
-	const setupCommand = ref<string | null>(null);
-	const isGatewayPolling = ref(false);
+	const hasObservedBrowserConnection = ref(false);
 
-	const gatewayConnected = ref(false);
-	const gatewayDirectory = ref<string | null>(null);
-	const gatewayHostIdentifier = ref<string | null>(null);
-	const gatewayToolCategories = ref<ToolCategory[]>([]);
-	const isGatewayConnected = computed(() => gatewayConnected.value);
-	const activeDirectory = computed(() => gatewayDirectory.value);
-	const isLocalGatewayDisabled = computed(
-		() => settingsStore.moduleSettings?.['instance-ai']?.localGatewayDisabled === true,
+	const browserConnected = ref(false);
+	const browserConnectedAt = ref<string | null>(null);
+	const browserToolCategories = ref<ToolCategory[]>([]);
+	const browserStatusLoaded = ref(false);
+	const browserConnectUrl = ref<string | null>(null);
+	const browserConnectUrlExpiresAt = ref<string | null>(null);
+	let browserConnectUrlRequestId = 0;
+	const isInstanceAiDisabled = computed(
+		() => settingsStore.moduleSettings?.['instance-ai']?.enabled !== true,
+	);
+	const isBrowserUseEnabledByAdmin = computed(
+		() => settingsStore.moduleSettings?.['instance-ai']?.browserUseEnabled === true,
+	);
+	const isMcpAvailable = computed(
+		() => settingsStore.moduleSettings?.['instance-ai']?.mcpConnectionsAvailable === true,
+	);
+
+	const isBrowserUseAvailable = computed(
+		() => isBrowserUseSupportedOnDevice() && isBrowserUseEnabledByAdmin.value,
 	);
 	const isProxyEnabled = computed(
 		() => settingsStore.moduleSettings?.['instance-ai']?.proxyEnabled === true,
 	);
-
-	const isDirty = computed(() => {
-		if (!settings.value && !preferences.value) return false;
-		return Object.keys(draft).length > 0 || Object.keys(preferencesDraft).length > 0;
-	});
+	const isCloudManaged = computed(
+		() => settingsStore.moduleSettings?.['instance-ai']?.cloudManaged === true,
+	);
+	const isSandboxEnabled = computed(
+		() => settingsStore.moduleSettings?.['instance-ai']?.sandboxEnabled === true,
+	);
+	/** New threads run on the n8n Assistant agent of the agents runtime. */
+	const isAssistantAgentEnabled = computed(
+		() =>
+			!isInstanceAiDisabled.value &&
+			settingsStore.moduleSettings?.['instance-ai']?.assistantAgentEnabled === true,
+	);
+	const isWorkflowBuilderAvailable = computed(
+		() => settingsStore.moduleSettings?.['instance-ai']?.workflowBuilderAvailable ?? true,
+	);
+	const { isEnabled: isInstanceAiSetupPanelEnabled } = useInstanceAiSetupPanelExperiment();
 
 	function syncInstanceAiFlagIntoGlobalModuleSettings(
 		adminRes: InstanceAiAdminSettingsResponse,
 	): void {
 		const ms = settingsStore.moduleSettings;
 		const prev = ms['instance-ai'];
+		const configuration = deriveInstanceAiConfiguration(
+			adminRes,
+			instanceModelCredentials.value,
+			serviceCredentials.value,
+		);
 		const merged: NonNullable<FrontendModuleSettings['instance-ai']> = {
 			enabled: adminRes.enabled,
-			localGatewayDisabled: prev?.localGatewayDisabled ?? false,
+			mcpConnectionsAvailable:
+				adminRes.mcpAccessEnabled && (prev?.mcpConnectionsAvailable ?? false),
+			browserUseEnabled: adminRes.browserUseEnabled ?? prev?.browserUseEnabled ?? true,
 			proxyEnabled: prev?.proxyEnabled ?? false,
-			optinModalDismissed: adminRes.optinModalDismissed,
+			cloudManaged: prev?.cloudManaged ?? false,
+			setupCompleted: configuration.setupCompleted,
+			sandboxEnabled: adminRes.sandboxEnabled,
+			workflowBuilderAvailable: adminRes.sandboxEnabled
+				? (prev?.workflowBuilderAvailable ?? true)
+				: false,
+			sandboxUnavailableReason: adminRes.sandboxEnabled
+				? (prev?.sandboxUnavailableReason ?? null)
+				: null,
+			runDebugEnabled: prev?.runDebugEnabled ?? false,
+			workflowSuggestionsEnabled: prev?.workflowSuggestionsEnabled ?? false,
+			assistantAgentEnabled: prev?.assistantAgentEnabled ?? false,
 		};
 		settingsStore.moduleSettings = {
 			...ms,
@@ -82,131 +131,114 @@ export const useInstanceAiSettingsStore = defineStore('instanceAiSettings', () =
 	const canManage = computed(() =>
 		hasPermission(['rbac'], { rbac: { scope: 'instanceAi:manage' } }),
 	);
+	const canManageAiUsage = computed(() =>
+		hasPermission(['rbac'], { rbac: { scope: 'aiAssistant:manage' } }),
+	);
+	const canManageInstanceCredentials = computed(() =>
+		hasPermission(['rbac'], { rbac: { scope: 'credential:manageInstance' } }),
+	);
 
-	async function fetch(): Promise<void> {
+	async function fetch(): Promise<boolean> {
 		isLoading.value = true;
 		try {
-			const promises: [
-				Promise<InstanceAiAdminSettingsResponse | null>,
-				Promise<InstanceAiUserPreferencesResponse>,
-			] = [
-				canManage.value ? fetchSettings(rootStore.restApiContext) : Promise.resolve(null),
-				fetchPreferences(rootStore.restApiContext),
-			];
-			const [s, p] = await Promise.all(promises);
-			settings.value = s;
-			preferences.value = p;
-			if (!isProxyEnabled.value) {
-				const credPromises: [
-					Promise<InstanceAiModelCredential[]>,
-					Promise<InstanceAiModelCredential[]>,
-				] = [
-					fetchModelCredentials(rootStore.restApiContext),
-					canManage.value ? fetchServiceCredentials(rootStore.restApiContext) : Promise.resolve([]),
-				];
-				const [c, sc] = await Promise.all(credPromises);
-				credentials.value = c;
+			settings.value = canManage.value ? await fetchSettings(rootStore.restApiContext) : null;
+			if (!isCloudManaged.value && canManage.value) {
+				const [sc, imc] = await Promise.all([
+					fetchServiceCredentials(rootStore.restApiContext),
+					isProxyEnabled.value
+						? Promise.resolve([])
+						: fetchInstanceModelCredentials(rootStore.restApiContext),
+				]);
 				serviceCredentials.value = sc;
+				instanceModelCredentials.value = imc;
 			}
 			clearDraft();
+			return true;
 		} catch {
-			toast.showError(new Error('Failed to load settings'), 'Settings error');
+			toast.showError(
+				new Error(i18n.baseText('settings.n8nAgent.toast.loadError')),
+				i18n.baseText('settings.n8nAgent.toast.errorTitle'),
+			);
+			return false;
 		} finally {
 			isLoading.value = false;
 		}
 	}
 
-	async function save(): Promise<void> {
+	/**
+	 * Persists the staged admin draft. Returns whether the save succeeded; on
+	 * failure the draft is discarded so a later unrelated save can't flush it.
+	 */
+	async function save(showToast = true): Promise<boolean> {
+		if (Object.keys(draft).length === 0) return true;
 		isSaving.value = true;
 		try {
-			const hasAdminChanges = Object.keys(draft).length > 0;
-			const hasPreferenceChanges = Object.keys(preferencesDraft).length > 0;
-
-			const [adminResult, prefsResult] = await Promise.allSettled([
-				hasAdminChanges
-					? updateSettings(rootStore.restApiContext, {
-							...toRaw(draft),
-						} as InstanceAiAdminSettingsUpdateRequest)
-					: Promise.resolve(settings.value),
-				hasPreferenceChanges
-					? updatePreferences(rootStore.restApiContext, preferencesDraft)
-					: Promise.resolve(preferences.value),
-			]);
-
-			if (adminResult.status === 'fulfilled' && adminResult.value)
-				settings.value = adminResult.value;
-			if (prefsResult.status === 'fulfilled' && prefsResult.value)
-				preferences.value = prefsResult.value;
-
-			const failed = [adminResult, prefsResult].filter((r) => r.status === 'rejected');
-			if (failed.length > 0) {
-				throw (failed[0] as PromiseRejectedResult).reason;
-			}
-
+			const result = await updateSettings(rootStore.restApiContext, {
+				...toRaw(draft),
+			} as InstanceAiAdminSettingsUpdateRequest);
+			settings.value = result;
 			clearDraft();
-			toast.showMessage({ title: 'Settings saved', type: 'success' });
-			if (hasAdminChanges) {
-				await settingsStore.getModuleSettings();
-				const adminSaved =
-					adminResult.status === 'fulfilled' && adminResult.value ? adminResult.value : null;
-				if (adminSaved) {
-					syncInstanceAiFlagIntoGlobalModuleSettings(adminSaved);
-				}
+			if (showToast) {
+				toast.showMessage({
+					title: i18n.baseText('settings.n8nAgent.toast.saved'),
+					type: 'success',
+				});
 			}
-		} catch {
-			toast.showError(new Error('Failed to save settings'), 'Settings error');
+			syncInstanceAiFlagIntoGlobalModuleSettings(result);
+			await settingsStore.getModuleSettings().catch(() => {});
+			return true;
+		} catch (error) {
+			clearDraft();
+			toast.showError(error, i18n.baseText('settings.n8nAgent.toast.errorTitle'));
+			return false;
 		} finally {
 			isSaving.value = false;
 		}
 	}
 
-	async function persistOptinModalDismissed(): Promise<void> {
-		try {
-			const result = await updateSettings(rootStore.restApiContext, {
-				optinModalDismissed: true,
-			});
-			settings.value = result;
-			syncInstanceAiFlagIntoGlobalModuleSettings(result);
-		} catch (error) {}
-	}
-
 	/** Persists only the Instance AI on/off flag (does not send other admin draft fields). */
-	async function persistEnabled(value: boolean): Promise<void> {
+	async function persistEnabled(value: boolean, showToast = true): Promise<boolean> {
 		isSaving.value = true;
 		try {
 			const result = await updateSettings(rootStore.restApiContext, { enabled: value });
 			settings.value = result;
 			delete draft.enabled;
-			await settingsStore.getModuleSettings();
 			syncInstanceAiFlagIntoGlobalModuleSettings(result);
-			toast.showMessage({ title: 'Settings saved', type: 'success' });
+			await settingsStore.getModuleSettings().catch(() => {});
+			if (showToast) {
+				toast.showMessage({
+					title: i18n.baseText('settings.n8nAgent.toast.saved'),
+					type: 'success',
+				});
+			}
+			return true;
 		} catch {
-			toast.showError(new Error('Failed to save settings'), 'Settings error');
+			toast.showError(
+				new Error(i18n.baseText('settings.n8nAgent.toast.saveError')),
+				i18n.baseText('settings.n8nAgent.toast.errorTitle'),
+			);
+			return false;
 		} finally {
 			isSaving.value = false;
 		}
 	}
 
+	const browserUseConnectionStatus = computed<ToolConnectionStatus>(() => {
+		if (browserConnected.value) return 'connected';
+		return hasObservedBrowserConnection.value ? 'disconnected' : 'none';
+	});
+
 	function setField<K extends keyof InstanceAiAdminSettingsUpdateRequest>(
 		key: K,
 		value: InstanceAiAdminSettingsUpdateRequest[K],
 	): void {
-		draft[key] = value;
-	}
-
-	function setPreferenceField<K extends keyof InstanceAiUserPreferencesUpdateRequest>(
-		key: K,
-		value: InstanceAiUserPreferencesUpdateRequest[K],
-	): void {
-		preferencesDraft[key] = value;
+		if (value === undefined) delete draft[key];
+		else draft[key] = value;
 	}
 
 	function clearDraft(): void {
 		for (const key of Object.keys(draft)) {
 			delete (draft as Record<string, unknown>)[key];
-		}
-		for (const key of Object.keys(preferencesDraft)) {
-			delete (preferencesDraft as Record<string, unknown>)[key];
 		}
 	}
 
@@ -218,207 +250,218 @@ export const useInstanceAiSettingsStore = defineStore('instanceAiSettings', () =
 	function getPermission(key: keyof InstanceAiPermissions): InstanceAiPermissionMode {
 		const draftVal = draft.permissions?.[key];
 		if (draftVal !== undefined) return draftVal;
-		return settings.value?.permissions?.[key] ?? 'require_approval';
+		// A key the server did not send falls back to its own default, not to
+		// `require_approval`: not every permission defaults to approval.
+		return settings.value?.permissions?.[key] ?? DEFAULT_INSTANCE_AI_PERMISSIONS[key];
 	}
 
-	function reset(): void {
-		clearDraft();
-	}
+	// ── Browser Use ────────────────────────────────────────────────────────
 
-	// ── Gateway polling ───────────────────────────────────────────────────
-
-	let gatewayPollTimer: ReturnType<typeof setInterval> | null = null;
-
-	function pollGatewayStatus(): void {
-		if (isGatewayPolling.value) return;
-		isGatewayPolling.value = true;
-
-		// Fetch initial status immediately so UI reflects current state
-		void getGatewayStatus(rootStore.restApiContext)
-			.then((status) => {
-				gatewayConnected.value = status.connected;
-				gatewayDirectory.value = status.directory;
-				gatewayHostIdentifier.value = status.hostIdentifier ?? null;
-				gatewayToolCategories.value = status.toolCategories ?? [];
-			})
-			.catch(() => {});
-
-		gatewayPollTimer = setInterval(async () => {
-			try {
-				const status = await getGatewayStatus(rootStore.restApiContext);
-				const wasConnected = gatewayConnected.value;
-				gatewayConnected.value = status.connected;
-				gatewayDirectory.value = status.directory;
-				gatewayHostIdentifier.value = status.hostIdentifier ?? null;
-				gatewayToolCategories.value = status.toolCategories ?? [];
-				if (!status.connected && wasConnected) {
-					daemonConnectAttempted = false;
-					startDaemonProbing();
-				}
-			} catch {
-				// Silently retry
-			}
-		}, 3000);
-	}
-
-	function stopGatewayPolling(): void {
-		if (gatewayPollTimer) {
-			clearInterval(gatewayPollTimer);
-			gatewayPollTimer = null;
-		}
-		isGatewayPolling.value = false;
-	}
-
-	// ── Auto-connect daemon ──────────────────────────────────────────────
-
-	const DAEMON_BASE = 'http://127.0.0.1:7655';
-	let daemonEventSource: EventSource | null = null;
-	let daemonConnectAttempted = false;
-
-	async function connectDaemon(): Promise<void> {
-		if (isGatewayConnected.value || isDaemonConnecting.value || daemonConnectAttempted) return;
-		daemonConnectAttempted = true;
-		isDaemonConnecting.value = true;
+	async function fetchBrowserStatus(): Promise<void> {
 		try {
-			const result = await createGatewayLink(rootStore.restApiContext);
-
-			let baseUrl = rootStore.restApiContext.baseUrl.replace(/\/rest$/, '');
-			if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-				baseUrl = `${window.location.protocol}//${window.location.host}${baseUrl}`;
-			}
-			const res = await globalThis.fetch(`${DAEMON_BASE}/connect`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					url: baseUrl,
-					token: result.token,
-				}),
-			});
-
-			if (!res.ok) {
-				const body = (await res.json()) as { error?: string };
-				throw new Error(body.error ?? 'Daemon connection failed');
-			}
-
-			pollGatewayStatus();
-		} catch (error) {
-			const message = error instanceof Error ? error.message : 'Failed to connect daemon';
-			toast.showError(new Error(message), 'Daemon connection failed');
-		} finally {
-			isDaemonConnecting.value = false;
-			stopDaemonProbing();
-		}
-	}
-
-	function startDaemonProbing(): void {
-		if (daemonEventSource || daemonConnectAttempted || isGatewayConnected.value) return;
-
-		daemonEventSource = new EventSource(`${DAEMON_BASE}/events`);
-		daemonEventSource.addEventListener('ready', () => {
-			void connectDaemon();
-		});
-	}
-
-	function stopDaemonProbing(): void {
-		if (daemonEventSource) {
-			daemonEventSource.close();
-			daemonEventSource = null;
-		}
-	}
-
-	// ── Gateway push listener ──────────────────────────────────────────
-
-	let removeGatewayPushListener: (() => void) | null = null;
-
-	function startGatewayPushListener(): void {
-		if (removeGatewayPushListener) return;
-		const pushStore = usePushConnectionStore();
-		removeGatewayPushListener = pushStore.addEventListener((message) => {
-			if (message.type !== 'instanceAiGatewayStateChanged') return;
-			gatewayConnected.value = message.data.connected;
-			gatewayDirectory.value = message.data.directory;
-			gatewayHostIdentifier.value = message.data.hostIdentifier ?? null;
-			gatewayToolCategories.value = message.data.toolCategories ?? [];
-			if (!message.data.connected) {
-				daemonConnectAttempted = false;
-				startDaemonProbing();
-			}
-		});
-	}
-
-	function stopGatewayPushListener(): void {
-		if (removeGatewayPushListener) {
-			removeGatewayPushListener();
-			removeGatewayPushListener = null;
-		}
-	}
-
-	async function fetchSetupCommand(): Promise<void> {
-		try {
-			const result = await createGatewayLink(rootStore.restApiContext);
-			setupCommand.value = result.command;
+			const status = await getBrowserStatus(rootStore.restApiContext);
+			browserConnected.value = status.connected;
+			browserConnectedAt.value = status.connectedAt;
+			browserToolCategories.value = status.toolCategories ?? [];
+			if (status.connected) hasObservedBrowserConnection.value = true;
 		} catch {
-			// Fallback handled in the component
+		} finally {
+			browserStatusLoaded.value = true;
+		}
+	}
+
+	function clearBrowserConnectUrl(): void {
+		browserConnectUrlRequestId++;
+		browserConnectUrl.value = null;
+		browserConnectUrlExpiresAt.value = null;
+	}
+
+	/**
+	 * Fetch a fresh opaque extension connect URL from the server. The URL is
+	 * stored (not displayed) so the setup modal can open it on user click.
+	 */
+	async function fetchBrowserConnectUrl(): Promise<string | null> {
+		const requestId = ++browserConnectUrlRequestId;
+		try {
+			const result = await createBrowserLink(rootStore.restApiContext);
+			if (requestId !== browserConnectUrlRequestId) return null;
+			browserConnectUrl.value = result.connectUrl;
+			browserConnectUrlExpiresAt.value = result.expiresAt;
+			return result.connectUrl;
+		} catch {
+			toast.showError(
+				new Error(i18n.baseText('instanceAi.browserUse.connectLinkError.message')),
+				i18n.baseText('instanceAi.browserUse.connectLinkError.title'),
+			);
+			return null;
+		}
+	}
+
+	/** Tears down the direct browser session on the server. */
+	async function disconnectBrowserUse(): Promise<void> {
+		try {
+			await disconnectBrowserSession(rootStore.restApiContext);
+		} catch {
+			toast.showError(
+				new Error(i18n.baseText('instanceAi.browserUse.disconnectError.message')),
+				i18n.baseText('instanceAi.browserUse.disconnectError.title'),
+			);
+			return;
+		}
+		clearBrowserConnectUrl();
+		hasObservedBrowserConnection.value = false;
+		browserConnected.value = false;
+		browserConnectedAt.value = null;
+		browserToolCategories.value = [];
+	}
+
+	// ── Browser push listener ────────────────────────────────────────────
+
+	let removeBrowserPushListener: (() => void) | null = null;
+	let stopPushReconnectWatch: (() => void) | null = null;
+
+	function startBrowserPushListener(): void {
+		if (removeBrowserPushListener) return;
+		const pushStore = usePushConnectionStore();
+		removeBrowserPushListener = pushStore.addEventListener((message) => {
+			if (message.type === 'instanceAiBrowserStateChanged') {
+				browserConnected.value = message.data.connected;
+				browserConnectedAt.value = message.data.connectedAt;
+				browserToolCategories.value = message.data.toolCategories ?? [];
+				if (message.data.connected) hasObservedBrowserConnection.value = true;
+			}
+		});
+
+		stopPushReconnectWatch = watch(
+			() => pushStore.isConnected,
+			(now, prev) => {
+				if (now && !prev) {
+					void fetchBrowserStatus();
+				}
+			},
+		);
+	}
+
+	function stopBrowserPushListener(): void {
+		if (removeBrowserPushListener) {
+			removeBrowserPushListener();
+			removeBrowserPushListener = null;
+		}
+		if (stopPushReconnectWatch) {
+			stopPushReconnectWatch();
+			stopPushReconnectWatch = null;
 		}
 	}
 
 	async function refreshCredentials(): Promise<void> {
-		if (isProxyEnabled.value) return;
+		if (isCloudManaged.value) return;
 		try {
-			const [c, sc] = await Promise.all([
-				fetchModelCredentials(rootStore.restApiContext),
-				fetchServiceCredentials(rootStore.restApiContext),
-			]);
-			credentials.value = c;
-			serviceCredentials.value = sc;
+			serviceCredentials.value = await fetchServiceCredentials(rootStore.restApiContext);
 		} catch {
 			// Silently fail — credentials list will refresh on next full fetch
 		}
+	}
+
+	async function refreshInstanceModelCredentials(): Promise<void> {
+		if (isProxyEnabled.value || !canManage.value) return;
+		try {
+			instanceModelCredentials.value = await fetchInstanceModelCredentials(
+				rootStore.restApiContext,
+			);
+		} catch {}
+	}
+
+	async function loadModelCatalog(): Promise<void> {
+		if (modelCatalog.value) return;
+		if (modelCatalogFetchPromise) return await modelCatalogFetchPromise;
+
+		isModelCatalogLoading.value = true;
+		const request = fetchModelCatalog(rootStore.restApiContext)
+			.then((response) => {
+				if (Object.values(response.models).some((models) => models.length > 0)) {
+					modelCatalog.value = response.models;
+				}
+			})
+			.catch(() => {})
+			.finally(() => {
+				isModelCatalogLoading.value = false;
+				modelCatalogFetchPromise = null;
+			});
+		modelCatalogFetchPromise = request;
+
+		await request;
 	}
 
 	async function refreshModuleSettings(): Promise<void> {
 		await settingsStore.getModuleSettings();
 	}
 
+	async function verifyModel(
+		payload: InstanceAiVerifyModelRequest,
+	): Promise<InstanceAiVerificationResponse> {
+		return await verifyModelRequest(rootStore.restApiContext, payload);
+	}
+
+	async function verifySandbox(
+		payload: InstanceAiVerifySandboxRequest,
+	): Promise<InstanceAiVerificationResponse> {
+		return await verifySandboxRequest(rootStore.restApiContext, payload);
+	}
+
+	async function verifySearch(
+		payload: InstanceAiVerifySearchRequest,
+	): Promise<InstanceAiVerificationResponse> {
+		return await verifySearchRequest(rootStore.restApiContext, payload);
+	}
+
 	return {
 		canManage,
+		canManageAiUsage,
+		canManageInstanceCredentials,
 		settings,
-		preferences,
-		credentials,
 		serviceCredentials,
+		instanceModelCredentials,
+		modelCatalog,
 		draft,
-		preferencesDraft,
 		isLoading,
 		isSaving,
-		isDirty,
+		isModelCatalogLoading,
 		fetch,
 		save,
 		persistEnabled,
-		persistOptinModalDismissed,
 		setField,
-		setPreferenceField,
 		setPermission,
 		getPermission,
-		reset,
-		// Gateway / daemon
-		isDaemonConnecting,
-		setupCommand,
-		isGatewayPolling,
-		isGatewayConnected,
-		gatewayDirectory,
-		gatewayHostIdentifier,
-		gatewayToolCategories,
-		activeDirectory,
-		isLocalGatewayDisabled,
+		isInstanceAiDisabled,
+		isMcpAvailable,
+		isBrowserUseAvailable,
+		isBrowserUseEnabledByAdmin,
 		isProxyEnabled,
-		pollGatewayStatus,
-		stopGatewayPolling,
-		startDaemonProbing,
-		stopDaemonProbing,
-		startGatewayPushListener,
-		stopGatewayPushListener,
-		fetchSetupCommand,
+		isSandboxEnabled,
+		isWorkflowBuilderAvailable,
+		isAssistantAgentEnabled,
+		isInstanceAiSetupPanelEnabled,
+		isCloudManaged,
+		startBrowserPushListener,
+		stopBrowserPushListener,
 		refreshCredentials,
+		refreshInstanceModelCredentials,
+		loadModelCatalog,
 		refreshModuleSettings,
+		verifyModel,
+		verifySandbox,
+		verifySearch,
+		// Browser Use
+		browserConnected,
+		browserUseConnectionStatus,
+		browserConnectedAt,
+		browserToolCategories,
+		browserStatusLoaded,
+		browserConnectUrl,
+		browserConnectUrlExpiresAt,
+		fetchBrowserStatus,
+		fetchBrowserConnectUrl,
+		clearBrowserConnectUrl,
+		disconnectBrowserUse,
 	};
 });

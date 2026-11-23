@@ -5,9 +5,8 @@ import { useRouter } from 'vue-router';
 import { useEvaluationStore } from '@/features/ai/evaluation.ee/evaluation.store';
 import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
 import type { ActionType, WorkflowSettings } from '@/app/composables/useWorkflowsCache';
-import { useWorkflowSettingsCache } from '@/app/composables/useWorkflowsCache';
+import { actionTypes, useWorkflowSettingsCache } from '@/app/composables/useWorkflowsCache';
 import { useUIStore } from '@/app/stores/ui.store';
-import type { IWorkflowDb } from '@/Interface';
 import {
 	WORKFLOW_SETTINGS_MODAL_KEY,
 	WORKFLOW_ACTIVE_MODAL_KEY,
@@ -20,22 +19,24 @@ import {
 	ERROR_TRIGGER_NODE_TYPE,
 } from '@/app/constants';
 import { useMessage } from '@/app/composables/useMessage';
-import { useTelemetry } from '@/app/composables/useTelemetry';
+import { useTelemetry } from '@n8n/composables/useTelemetry';
 import { useSourceControlStore } from '@/features/integrations/sourceControl.ee/sourceControl.store';
-import { MCP_DOCS_PAGE_URL, MCP_SETTINGS_VIEW } from '@/features/ai/mcpAccess/mcp.constants';
+import { MCP_DOCS_PAGE_URL, MCP_SETTINGS_VIEW } from '@n8n/frontend-module-mcp';
 
 import { N8nSuggestedActions } from '@n8n/design-system';
-import { useSettingsStore } from '@/app/stores/settings.store';
-import { useUsersStore } from '@/features/settings/users/users.store';
+import { useSettingsStore } from '@n8n/stores/settings.store';
+import { useUsersStore } from '@n8n/stores/users.store';
 import { WorkflowDocumentStoreKey } from '@/app/constants/injectionKeys';
+import { useWorkflowEvaluationState } from '@/features/ai/evaluation.ee/composables/useWorkflowEvaluationState';
 
-const props = defineProps<{
-	workflow: IWorkflowDb;
+defineProps<{
+	hideTrigger?: boolean;
 }>();
 
 const i18n = useI18n();
 const router = useRouter();
 const evaluationStore = useEvaluationStore();
+const evaluationState = useWorkflowEvaluationState();
 const nodeTypesStore = useNodeTypesStore();
 const workflowsCache = useWorkflowSettingsCache();
 const uiStore = useUIStore();
@@ -49,42 +50,43 @@ const workflowDocumentStore = inject(WorkflowDocumentStoreKey, null);
 const isPopoverOpen = ref(false);
 const cachedSettings = ref<WorkflowSettings | null>(null);
 
+const nodes = computed(() => workflowDocumentStore?.value?.allNodes ?? []);
 const hasAINode = computed(() => {
-	const nodes = props.workflow.nodes;
-	return nodes.some((node) => {
+	return nodes.value.some((node) => {
 		const nodeType = nodeTypesStore.getNodeType(node.type, node.typeVersion);
 		return nodeType?.codex?.categories?.includes('AI');
 	});
 });
 
 const hasEvaluationSetOutputsNode = computed((): boolean => {
-	return evaluationStore.evaluationSetOutputsNodeExist;
+	return evaluationState.evaluationSetOutputsNodeExist.value;
 });
 
 const hasErrorWorkflow = computed(() => {
-	return !!props.workflow.settings?.errorWorkflow;
+	const errorWorkflow = workflowDocumentStore?.value?.settings?.errorWorkflow;
+	return !!errorWorkflow;
 });
 
 const isErrorWorkflow = computed(() => {
-	return props.workflow.nodes.some(
+	return nodes.value.some(
 		(node) => node.type === ERROR_TRIGGER_NODE_TYPE && node.disabled !== true,
 	);
 });
 
 const hasSavedTimeNodes = computed(() => {
-	if (!props.workflow?.nodes) return false;
-	return props.workflow.nodes.some(
-		(node) => node.type === TIME_SAVED_NODE_TYPE && node.disabled !== true,
-	);
+	return nodes.value.some((node) => node.type === TIME_SAVED_NODE_TYPE && node.disabled !== true);
 });
 
 const hasTimeSaved = computed(() => {
-	return props.workflow.settings?.timeSavedPerExecution !== undefined || hasSavedTimeNodes.value;
+	const timeSavedPerExecution = workflowDocumentStore?.value?.settings?.timeSavedPerExecution;
+	return timeSavedPerExecution !== undefined || hasSavedTimeNodes.value;
 });
 
 const isActivationModalOpen = computed(() => {
 	return uiStore.isModalActiveById[WORKFLOW_ACTIVE_MODAL_KEY];
 });
+
+const isAnyModalOpen = computed(() => uiStore.isAnyModalOpen);
 
 const isProtectedEnvironment = computed(() => {
 	return sourceControlStore.preferences.branchReadOnly;
@@ -209,15 +211,16 @@ const availableActions = computed(() => {
 			...baseAction,
 			id: 'workflow-mcp-access',
 			description: i18n.baseText('mcp.productionChecklist.workflow.description'),
-			completed: props.workflow.settings?.availableInMCP ?? false,
+			completed: workflowDocumentStore?.value?.settings?.availableInMCP ?? false,
 		};
 	}
 });
 
 async function loadWorkflowSettings() {
-	if (props.workflow.id) {
-		// todo add global config
-		cachedSettings.value = await workflowsCache.getMergedWorkflowSettings(props.workflow.id);
+	if (workflowDocumentStore?.value?.workflowId) {
+		cachedSettings.value = await workflowsCache.getMergedWorkflowSettings(
+			workflowDocumentStore?.value.workflowId,
+		);
 	}
 }
 
@@ -227,7 +230,7 @@ async function handleActionClick(actionId: string) {
 			// Navigate to evaluations
 			await router.push({
 				name: VIEWS.EVALUATION_EDIT,
-				params: { name: props.workflow.id },
+				params: { workflowId: workflowDocumentStore?.value?.workflowId },
 			});
 			break;
 		case 'errorWorkflow':
@@ -247,13 +250,7 @@ async function handleActionClick(actionId: string) {
 }
 
 function isValidAction(action: string): action is ActionType {
-	return [
-		'evaluations',
-		'errorWorkflow',
-		'timeSaved',
-		'workflow-mcp-access',
-		'instance-mcp-access',
-	].includes(action);
+	return actionTypes.some((type) => type === action);
 }
 
 async function handleIgnoreClick(actionId: string) {
@@ -261,7 +258,10 @@ async function handleIgnoreClick(actionId: string) {
 		return;
 	}
 
-	await workflowsCache.ignoreSuggestedAction(props.workflow.id, actionId);
+	await workflowsCache.ignoreSuggestedAction(
+		workflowDocumentStore?.value?.workflowId ?? '',
+		actionId,
+	);
 	await loadWorkflowSettings();
 
 	telemetry.track('user clicked ignore suggested action', {
@@ -279,9 +279,8 @@ async function handleIgnoreAll() {
 	);
 
 	if (ignoreAllConfirmed === MODAL_CONFIRM) {
-		await workflowsCache.ignoreAllSuggestedActionsForAllWorkflows(
-			availableActions.value.map((action) => action.id),
-		);
+		// Ignore every action type, also the ones that this workflow does not show
+		await workflowsCache.ignoreAllSuggestedActionsForAllWorkflows([...actionTypes]);
 		await loadWorkflowSettings();
 
 		telemetry.track('user clicked ignore suggested actions for all workflows');
@@ -305,40 +304,77 @@ function handlePopoverOpenChange(open: boolean) {
 	}
 }
 
+// With the publication service, activeVersionId flips optimistically when the
+// publish request returns; whether the triggers actually registered arrives
+// later as a lifecycle push. Only count the workflow as activated once the
+// lifecycle confirms it, so a failed publish never auto-opens the checklist
+// (ADO-4969). Without the service, activation is synchronous and
+// activeVersionId is already authoritative (the lifecycle stays 'idle' there).
+const isConfirmedActive = computed(() => {
+	if (!workflowDocumentStore?.value?.activeVersionId) {
+		return false;
+	}
+
+	if (settingsStore.isWorkflowPublicationServiceEnabled) {
+		return workflowDocumentStore.value.publicationStatus === 'published';
+	}
+
+	return true;
+});
+
 // Watch for workflow activation
-watch(
-	() => !!workflowDocumentStore?.value?.activeVersionId,
-	async (isActive, wasActive) => {
-		if (isActive && !wasActive) {
-			// Check if this is the first activation
-			if (!cachedSettings.value?.firstActivatedAt) {
+watch(isConfirmedActive, async (isActive, wasActive) => {
+	if (isActive && !wasActive) {
+		const workflowId = workflowDocumentStore?.value?.workflowId ?? '';
+		// Make sure the checklist opens only on the first activation, also when the
+		// workflow loads as active before onMounted has read the cache.
+		const { firstActivatedAt } = await workflowsCache.getWorkflowSettings(workflowId);
+		if (!firstActivatedAt) {
+			if (isAnyModalOpen.value) {
+				// Defer opening until any open modal closes so the popover
+				// doesn't paint over it.
+				const stop = watch(isAnyModalOpen, (isOpen) => {
+					if (!isOpen) {
+						stop();
+						openSuggestedActions();
+					}
+				});
+			} else {
 				setTimeout(() => {
 					openSuggestedActions();
 				}, 0); // Ensure UI is ready and availableActions.length > 0
 			}
-
-			// Update firstActivatedAt after opening popover
-			await workflowsCache.updateFirstActivatedAt(props.workflow.id);
 		}
-	},
-);
+
+		// Update firstActivatedAt after opening popover
+		await workflowsCache.updateFirstActivatedAt(workflowId);
+	}
+});
 
 onMounted(async () => {
 	await loadWorkflowSettings();
 });
+
+// Whether the checklist has anything to show, so hosts can gate their entry
+// point on it. Completed actions still count: the checklist stays reachable.
+const hasActions = computed(() => availableActions.value.length > 0);
+
+defineExpose({ open: openSuggestedActions, hasActions });
 </script>
 
 <template>
 	<N8nSuggestedActions
 		v-if="availableActions.length > 0"
 		:open="isPopoverOpen"
+		:hide-trigger="hideTrigger"
 		:title="i18n.baseText('workflowProductionChecklist.title')"
 		:actions="availableActions"
 		:ignore-all-label="i18n.baseText('workflowProductionChecklist.turnOffWorkflowSuggestions')"
 		:notice="
 			isProtectedEnvironment ? i18n.baseText('workflowProductionChecklist.readOnlyNotice') : ''
 		"
-		popover-alignment="end"
+		popover-alignment="start"
+		:popover-side-offset="0"
 		@action-click="handleActionClick"
 		@ignore-click="handleIgnoreClick"
 		@ignore-all="handleIgnoreAll"

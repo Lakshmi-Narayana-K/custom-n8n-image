@@ -1,11 +1,14 @@
-import { mock } from 'jest-mock-extended';
 import type { IHttpRequestOptions, INode, INodeProperties, IRequestOptions } from 'n8n-workflow';
+import { createPrivateKey, createSign } from 'node:crypto';
+import { Readable } from 'node:stream';
+import { mock } from 'vitest-mock-extended';
 
 import {
 	buildEvalMockCredentials,
 	callEvalMockHandler,
 	isSecretCredentialProperty,
 	normalizeLegacyRequest,
+	resolveEvalMockRequestUrl,
 	serializeMockToHttpResponse,
 } from '../eval-mock-helpers';
 import type { EvalLlmMockHandler, EvalMockHttpResponse } from '../index';
@@ -183,6 +186,22 @@ describe('eval-mock-helpers', () => {
 			expect(result.privateKey).toEqual(expect.stringContaining('END RSA PRIVATE KEY'));
 		});
 
+		it('should include a privateKey that parses and RS256-signs', () => {
+			// PEM markers alone are not enough: service-account nodes jwt.sign()
+			// with this key before any HTTP request, so it must be a real key.
+			const result = buildEvalMockCredentials([]);
+
+			const key = createPrivateKey(String(result.privateKey));
+			expect(key.asymmetricKeyType).toBe('rsa');
+			const signer = createSign('RSA-SHA256');
+			signer.update('eval-mock');
+			expect(signer.sign(key).length).toBeGreaterThan(0);
+		});
+
+		it('should reuse the same generated privateKey across calls', () => {
+			expect(buildEvalMockCredentials([]).privateKey).toBe(buildEvalMockCredentials([]).privateKey);
+		});
+
 		it('should return oauthTokenData and privateKey even with empty properties array', () => {
 			const result = buildEvalMockCredentials([]);
 
@@ -190,13 +209,21 @@ describe('eval-mock-helpers', () => {
 			expect(result.oauthTokenData).toBeDefined();
 			expect(result.privateKey).toBeDefined();
 		});
+
+		it('should produce structurally valid JSON for properties of type "json"', () => {
+			const result = buildEvalMockCredentials([
+				credProp({ name: 'json', type: 'json', default: '' }),
+			]);
+
+			expect(() => JSON.parse(result.json as string)).not.toThrow();
+		});
 	});
 
 	// -----------------------------------------------------------------------
 	// serializeMockToHttpResponse
 	// -----------------------------------------------------------------------
 	describe('serializeMockToHttpResponse', () => {
-		it('should convert a JSON body to a Buffer', () => {
+		it('should pass through a JSON body as the parsed object', () => {
 			const mockResponse: EvalMockHttpResponse = {
 				body: { message: 'hello' },
 				headers: { 'content-type': 'application/json' },
@@ -205,8 +232,102 @@ describe('eval-mock-helpers', () => {
 
 			const result = serializeMockToHttpResponse(mockResponse);
 
-			expect(Buffer.isBuffer(result.body)).toBe(true);
-			expect(result.body.toString()).toBe(JSON.stringify({ message: 'hello' }));
+			expect(result.body).toEqual({ message: 'hello' });
+			expect(Buffer.isBuffer(result.body)).toBe(false);
+		});
+
+		it('should mark JSON responses as __bodyResolved', () => {
+			// HttpRequestV3's autodetect path only re-decodes body if
+			// __bodyResolved is falsy. When we hand over a parsed object we must
+			// set this flag so the node skips its Buffer→string→parse pipeline.
+			const mockResponse: EvalMockHttpResponse = {
+				body: [{ id: 1 }],
+				headers: { 'content-type': 'application/json' },
+				statusCode: 200,
+			};
+
+			const result = serializeMockToHttpResponse(mockResponse) as { __bodyResolved?: boolean };
+
+			expect(result.__bodyResolved).toBe(true);
+		});
+
+		it('should pass string bodies through as-is with __bodyResolved on the default path', () => {
+			// Matches axios default (responseType: 'json') which returns the
+			// original string when JSON.parse fails — consumer-ready.
+			const mockResponse: EvalMockHttpResponse = {
+				body: 'plain text',
+				headers: { 'content-type': 'text/plain' },
+				statusCode: 200,
+			};
+
+			const result = serializeMockToHttpResponse(mockResponse) as {
+				body: unknown;
+				__bodyResolved?: boolean;
+			};
+
+			expect(result.body).toBe('plain text');
+			expect(result.__bodyResolved).toBe(true);
+		});
+
+		it('should match JSON content types with charset parameters', () => {
+			const mockResponse: EvalMockHttpResponse = {
+				body: [{ id: 1 }, { id: 2 }],
+				headers: { 'content-type': 'application/json; charset=utf-8' },
+				statusCode: 200,
+			};
+
+			const result = serializeMockToHttpResponse(mockResponse);
+
+			expect(result.body).toEqual([{ id: 1 }, { id: 2 }]);
+			expect(Buffer.isBuffer(result.body)).toBe(false);
+		});
+
+		it('should accept mixed-case Content-Type headers', () => {
+			const mockResponse: EvalMockHttpResponse = {
+				body: { ok: true },
+				headers: { 'Content-Type': 'application/json' },
+				statusCode: 200,
+			};
+
+			const result = serializeMockToHttpResponse(mockResponse);
+
+			expect(result.body).toEqual({ ok: true });
+			expect(Buffer.isBuffer(result.body)).toBe(false);
+		});
+
+		it('should pass object bodies through regardless of content-type on the default path', () => {
+			// Content-Type is not the gatekeeper — axios's default responseType
+			// ('json') parses any parseable body. The mock respects the
+			// producer's chosen body shape and marks it consumer-ready.
+			const mockResponse: EvalMockHttpResponse = {
+				body: { message: 'hello' },
+				headers: { 'content-type': 'text/plain' },
+				statusCode: 200,
+			};
+
+			const result = serializeMockToHttpResponse(mockResponse) as {
+				body: unknown;
+				__bodyResolved?: boolean;
+			};
+
+			expect(result.body).toEqual({ message: 'hello' });
+			expect(result.__bodyResolved).toBe(true);
+		});
+
+		it('should pass object bodies through as-is when no content-type is set', () => {
+			// Matches axios's default behavior (responseType: 'json') — when no
+			// Content-Type is declared, axios tries to JSON.parse the body, so
+			// the mock hands over the already-parsed object with __bodyResolved.
+			const mockResponse: EvalMockHttpResponse = {
+				body: { message: 'hello' },
+				headers: {},
+				statusCode: 200,
+			};
+
+			const result = serializeMockToHttpResponse(mockResponse);
+
+			expect(result.body).toEqual({ message: 'hello' });
+			expect((result as { __bodyResolved?: boolean }).__bodyResolved).toBe(true);
 		});
 
 		it('should preserve headers and statusCode', () => {
@@ -220,7 +341,17 @@ describe('eval-mock-helpers', () => {
 
 			expect(result.headers).toEqual({ 'x-custom': 'value' });
 			expect(result.statusCode).toBe(201);
-			expect(result.statusMessage).toBe('OK');
+			expect(result.statusMessage).toBe('Created');
+		});
+
+		it('should carry the standard reason phrase of the status code', () => {
+			const result = serializeMockToHttpResponse({
+				body: { error: 'not found' },
+				headers: {},
+				statusCode: 404,
+			});
+
+			expect(result.statusMessage).toBe('Not Found');
 		});
 
 		it('should pass through a Buffer body without double-encoding', () => {
@@ -234,7 +365,139 @@ describe('eval-mock-helpers', () => {
 			const result = serializeMockToHttpResponse(mockResponse);
 
 			expect(result.body).toBe(originalBuffer);
-			expect(result.body.toString()).toBe('raw-binary-data');
+			expect((result.body as Buffer).toString()).toBe('raw-binary-data');
+		});
+
+		it('should pass a Buffer body through even when Content-Type is JSON', () => {
+			// If the mock handler hands us a Buffer explicitly, trust it — don't
+			// silently unwrap it to an object just because headers claim JSON.
+			const originalBuffer = Buffer.from('{"already":"serialized"}');
+			const mockResponse: EvalMockHttpResponse = {
+				body: originalBuffer,
+				headers: { 'content-type': 'application/json' },
+				statusCode: 200,
+			};
+
+			const result = serializeMockToHttpResponse(mockResponse);
+
+			expect(result.body).toBe(originalBuffer);
+		});
+
+		// -----------------------------------------------------------------------
+		// Request-aware body shaping — matches axios responseType behavior
+		// -----------------------------------------------------------------------
+		describe('with request options (axios-parity mode)', () => {
+			const jsonResponse: EvalMockHttpResponse = {
+				body: { data: [1, 2, 3] },
+				headers: { 'content-type': 'application/json' },
+				statusCode: 200,
+			};
+
+			it('should return a Readable stream when requestOptions.encoding is "stream"', async () => {
+				const result = serializeMockToHttpResponse(jsonResponse, {
+					url: 'https://api.example.com/file',
+					encoding: 'stream',
+				});
+
+				expect(result.body).toBeInstanceOf(Readable);
+				// Consume the stream to verify it holds the serialized body bytes.
+				const chunks: Buffer[] = [];
+				for await (const chunk of result.body as Readable) {
+					chunks.push(chunk as Buffer);
+				}
+				expect(Buffer.concat(chunks).toString()).toBe(JSON.stringify({ data: [1, 2, 3] }));
+			});
+
+			it('should return a Buffer when requestOptions.encoding is "arraybuffer"', () => {
+				const result = serializeMockToHttpResponse(jsonResponse, {
+					url: 'https://api.example.com/image',
+					encoding: 'arraybuffer',
+				});
+
+				expect(Buffer.isBuffer(result.body)).toBe(true);
+				expect((result.body as Buffer).toString()).toBe(JSON.stringify({ data: [1, 2, 3] }));
+				// No __bodyResolved flag on the Buffer path — the node still needs to decode.
+				expect((result as { __bodyResolved?: boolean }).__bodyResolved).toBeUndefined();
+			});
+
+			it('should return parsed body + __bodyResolved in the default (JSON) path', () => {
+				const result = serializeMockToHttpResponse(jsonResponse, {
+					url: 'https://api.example.com/posts',
+				});
+
+				expect(result.body).toEqual({ data: [1, 2, 3] });
+				expect(Buffer.isBuffer(result.body)).toBe(false);
+				expect((result as { __bodyResolved?: boolean }).__bodyResolved).toBe(true);
+			});
+
+			it('should pass text responses through as strings on the default path', () => {
+				// The default path (undefined encoding) matches axios responseType:'json',
+				// which keeps unparseable strings as strings — not Buffers.
+				const textResponse: EvalMockHttpResponse = {
+					body: 'hello world',
+					headers: { 'content-type': 'text/plain' },
+					statusCode: 200,
+				};
+
+				const result = serializeMockToHttpResponse(textResponse, {
+					url: 'https://api.example.com/robots.txt',
+				});
+
+				expect(result.body).toBe('hello world');
+				expect((result as { __bodyResolved?: boolean }).__bodyResolved).toBe(true);
+			});
+
+			it('should preserve a Buffer body on the stream path (wrap, not copy)', async () => {
+				const bufferResponse: EvalMockHttpResponse = {
+					body: Buffer.from('raw bytes'),
+					headers: { 'content-type': 'application/octet-stream' },
+					statusCode: 200,
+				};
+
+				const result = serializeMockToHttpResponse(bufferResponse, {
+					url: 'https://api.example.com/file',
+					encoding: 'stream',
+				});
+
+				expect(result.body).toBeInstanceOf(Readable);
+				const chunks: Buffer[] = [];
+				for await (const chunk of result.body as Readable) {
+					chunks.push(chunk as Buffer);
+				}
+				expect(Buffer.concat(chunks).toString()).toBe('raw bytes');
+			});
+
+			it('should pass Buffer through unchanged on the arraybuffer path', () => {
+				const original = Buffer.from('raw bytes');
+				const bufferResponse: EvalMockHttpResponse = {
+					body: original,
+					headers: { 'content-type': 'application/octet-stream' },
+					statusCode: 200,
+				};
+
+				const result = serializeMockToHttpResponse(bufferResponse, {
+					url: 'https://api.example.com/file',
+					encoding: 'arraybuffer',
+				});
+
+				expect(result.body).toBe(original);
+			});
+
+			it('should return a string body + __bodyResolved when encoding is "text"', () => {
+				const textResponse: EvalMockHttpResponse = {
+					body: 'hello world',
+					headers: { 'content-type': 'text/plain' },
+					statusCode: 200,
+				};
+
+				const result = serializeMockToHttpResponse(textResponse, {
+					url: 'https://api.example.com/robots.txt',
+					encoding: 'text',
+				});
+
+				expect(result.body).toBe('hello world');
+				expect((result as { __bodyResolved?: boolean }).__bodyResolved).toBe(true);
+			});
 		});
 	});
 
@@ -242,6 +505,30 @@ describe('eval-mock-helpers', () => {
 	// normalizeLegacyRequest
 	// -----------------------------------------------------------------------
 	describe('normalizeLegacyRequest', () => {
+		it('maps the legacy `simple: false` opt-out to ignoreHttpStatusErrors', () => {
+			const fromString = normalizeLegacyRequest('https://api.example.com/data', {
+				method: 'GET',
+				simple: false,
+			});
+			const fromObject = normalizeLegacyRequest({
+				uri: 'https://api.example.com/data',
+				method: 'GET',
+				simple: false,
+				resolveWithFullResponse: true,
+			});
+
+			expect(fromString.ignoreHttpStatusErrors).toBe(true);
+			expect(fromObject.ignoreHttpStatusErrors).toBe(true);
+		});
+
+		it('leaves ignoreHttpStatusErrors unset when the legacy request did not opt out', () => {
+			const defaulted = normalizeLegacyRequest({ uri: 'https://api.example.com', method: 'GET' });
+			const explicit = normalizeLegacyRequest('https://api.example.com', { simple: true });
+
+			expect('ignoreHttpStatusErrors' in defaulted).toBe(false);
+			expect('ignoreHttpStatusErrors' in explicit).toBe(false);
+		});
+
 		it('should convert string URI + options object into IHttpRequestOptions', () => {
 			const options: IRequestOptions = {
 				method: 'POST',
@@ -310,6 +597,135 @@ describe('eval-mock-helpers', () => {
 			expect(result.body).toEqual({ update: true });
 			expect(result.qs).toEqual({ version: '2' });
 		});
+
+		it('should fold the URL-encoded `form` slot into body (object form)', () => {
+			const requestObj: IRequestOptions = {
+				uri: 'https://api.example.com/token',
+				method: 'POST',
+				form: { grant_type: 'refresh_token', refresh_token: 'abc' },
+			};
+
+			const result = normalizeLegacyRequest(requestObj);
+
+			expect(result.body).toEqual({ grant_type: 'refresh_token', refresh_token: 'abc' });
+		});
+
+		it('should fold the multipart `formData` slot into body (string-uri form)', () => {
+			const options: IRequestOptions = {
+				method: 'POST',
+				formData: { file: 'binary-part' },
+			};
+
+			const result = normalizeLegacyRequest('https://api.example.com/upload', options);
+
+			expect(result.body).toEqual({ file: 'binary-part' });
+		});
+
+		it('should prefer body over formData and form when several slots are set', () => {
+			const requestObj: IRequestOptions = {
+				uri: 'https://api.example.com',
+				method: 'POST',
+				body: { fromBody: true },
+				formData: { fromFormData: true },
+				form: { fromForm: true },
+			};
+
+			const result = normalizeLegacyRequest(requestObj);
+
+			expect(result.body).toEqual({ fromBody: true });
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// resolveEvalMockRequestUrl
+	// -----------------------------------------------------------------------
+	describe('resolveEvalMockRequestUrl', () => {
+		it('should build a path-style S3 URL from service, path and query', () => {
+			const result = resolveEvalMockRequestUrl(
+				{
+					method: 'GET',
+					url: '',
+					qs: {
+						service: 's3',
+						path: '/my-bucket/',
+						query: { 'list-type': 2 },
+						_region: 'eu-west-1',
+					},
+				},
+				'aws',
+			);
+
+			expect(result.url).toBe('https://s3.eu-west-1.amazonaws.com/my-bucket/?list-type=2');
+			expect(result.qs).toBeUndefined();
+		});
+
+		it('should take the region from the request when qs has none', () => {
+			const result = resolveEvalMockRequestUrl(
+				{
+					method: 'POST',
+					url: '',
+					qs: { service: 'lambda', path: '/2015-03-31/functions/fn/invocations' },
+					region: 'ap-southeast-2',
+				} as IHttpRequestOptions,
+				'awsAssumeRole',
+			);
+
+			expect(result.url).toBe(
+				'https://lambda.ap-southeast-2.amazonaws.com/2015-03-31/functions/fn/invocations',
+			);
+		});
+
+		it('should use the China domain for cn- regions', () => {
+			const result = resolveEvalMockRequestUrl(
+				{ method: 'GET', url: '', qs: { service: 'sqs', path: '/', _region: 'cn-north-1' } },
+				'aws',
+			);
+
+			expect(result.url).toBe('https://sqs.cn-north-1.amazonaws.com.cn/');
+		});
+
+		it('should not mutate the original request', () => {
+			const original: IHttpRequestOptions = {
+				method: 'GET',
+				url: '',
+				qs: { service: 'my-bucket.s3', path: '', query: { location: '' } },
+			};
+
+			resolveEvalMockRequestUrl(original, 'aws');
+
+			expect(original.url).toBe('');
+			expect(original.qs).toEqual({ service: 'my-bucket.s3', path: '', query: { location: '' } });
+		});
+
+		it('should return a request that already has a URL unchanged', () => {
+			const request: IHttpRequestOptions = {
+				method: 'GET',
+				url: 'https://custom.example.com/bucket',
+				qs: { service: 's3' },
+			};
+
+			expect(resolveEvalMockRequestUrl(request, 'aws')).toBe(request);
+		});
+
+		it('should return the request unchanged when the service makes an invalid URL', () => {
+			const request: IHttpRequestOptions = {
+				method: 'GET',
+				url: '',
+				qs: { service: 'my bucket.s3', path: '/', _region: 'eu-west-1' },
+			};
+
+			expect(resolveEvalMockRequestUrl(request, 'aws')).toBe(request);
+		});
+
+		it('should return the request unchanged when the region makes an invalid URL', () => {
+			const request: IHttpRequestOptions = {
+				method: 'GET',
+				url: '',
+				qs: { service: 's3', path: '/my-bucket/', _region: 'EU (Ireland)' },
+			};
+
+			expect(resolveEvalMockRequestUrl(request, 'aws')).toBe(request);
+		});
 	});
 
 	// -----------------------------------------------------------------------
@@ -329,15 +745,82 @@ describe('eval-mock-helpers', () => {
 		};
 
 		it('should return body when handler responds and returnFullResponse is false', async () => {
-			const handler: EvalLlmMockHandler = jest.fn().mockResolvedValue(successResponse);
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(successResponse);
 
 			const result = await callEvalMockHandler(handler, requestOptions, node);
 
 			expect(result).toEqual({ data: 'mocked' });
 		});
 
+		const notFoundResponse: EvalMockHttpResponse = {
+			body: { error: 'not found' },
+			headers: { 'content-type': 'application/json' },
+			statusCode: 404,
+		};
+
+		it('hands a 404 back as a full response when a legacy request set simple:false', async () => {
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(notFoundResponse);
+
+			const result = await callEvalMockHandler(
+				handler,
+				normalizeLegacyRequest({
+					uri: requestOptions.url,
+					method: 'GET',
+					simple: false,
+					resolveWithFullResponse: true,
+				}),
+				node,
+				true,
+				'legacy',
+			);
+
+			expect(result).toMatchObject({
+				statusCode: 404,
+				statusMessage: 'Not Found',
+				body: { error: 'not found' },
+			});
+		});
+
+		it('hands a 404 body back when ignoreHttpStatusErrors is set without a full response', async () => {
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(notFoundResponse);
+
+			const result = await callEvalMockHandler(
+				handler,
+				{ ...requestOptions, ignoreHttpStatusErrors: true },
+				node,
+			);
+
+			expect(result).toEqual({ error: 'not found' });
+		});
+
+		it('honours the except list of an ignoreHttpStatusErrors config', async () => {
+			const options: IHttpRequestOptions = {
+				...requestOptions,
+				ignoreHttpStatusErrors: { ignore: true, except: [404] },
+			};
+			const notFound: EvalLlmMockHandler = vi.fn().mockResolvedValue(notFoundResponse);
+			const serverError: EvalLlmMockHandler = vi
+				.fn()
+				.mockResolvedValue({ ...notFoundResponse, statusCode: 500 });
+
+			await expect(callEvalMockHandler(notFound, options, node)).rejects.toThrow(
+				'Request failed with status code 404',
+			);
+			await expect(callEvalMockHandler(serverError, options, node, true)).resolves.toMatchObject({
+				statusCode: 500,
+			});
+		});
+
+		it('still throws for status >= 400 when ignoreHttpStatusErrors is false', async () => {
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(notFoundResponse);
+
+			await expect(
+				callEvalMockHandler(handler, { ...requestOptions, ignoreHttpStatusErrors: false }, node),
+			).rejects.toThrow('Request failed with status code 404');
+		});
+
 		it('should return serialized response when returnFullResponse is true', async () => {
-			const handler: EvalLlmMockHandler = jest.fn().mockResolvedValue(successResponse);
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(successResponse);
 
 			const result = await callEvalMockHandler(handler, requestOptions, node, true);
 
@@ -345,11 +828,31 @@ describe('eval-mock-helpers', () => {
 			expect(result).toHaveProperty('headers');
 			expect(result).toHaveProperty('statusCode', 200);
 			const typedResult = result as ReturnType<typeof serializeMockToHttpResponse>;
+			// JSON Content-Type → body passes through parsed so HTTP Request nodes on
+			// responseFormat: autodetect see parsed items rather than a raw Buffer.
+			expect(typedResult.body).toEqual({ data: 'mocked' });
+		});
+
+		it('should return a Buffer body when the mock already handed over one', async () => {
+			// If the mock producer decided the body is binary (mock-handler.ts
+			// 'binary' type), we respect that and keep it as a Buffer even on
+			// the default path — the node's autodetect handles raw bytes fine.
+			const bufferResponse: EvalMockHttpResponse = {
+				body: Buffer.from('raw bytes'),
+				headers: { 'content-type': 'application/octet-stream' },
+				statusCode: 200,
+			};
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(bufferResponse);
+
+			const result = await callEvalMockHandler(handler, requestOptions, node, true);
+
+			const typedResult = result as ReturnType<typeof serializeMockToHttpResponse>;
 			expect(Buffer.isBuffer(typedResult.body)).toBe(true);
+			expect((typedResult.body as Buffer).toString()).toBe('raw bytes');
 		});
 
 		it('should return undefined when handler returns undefined', async () => {
-			const handler: EvalLlmMockHandler = jest.fn().mockResolvedValue(undefined);
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(undefined);
 
 			const result = await callEvalMockHandler(handler, requestOptions, node);
 
@@ -362,7 +865,7 @@ describe('eval-mock-helpers', () => {
 				headers: { 'content-type': 'application/json' },
 				statusCode: 404,
 			};
-			const handler: EvalLlmMockHandler = jest.fn().mockResolvedValue(errorResponse);
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(errorResponse);
 
 			await expect(
 				callEvalMockHandler(handler, requestOptions, node, false, 'axios'),
@@ -375,7 +878,7 @@ describe('eval-mock-helpers', () => {
 				headers: {},
 				statusCode: 500,
 			};
-			const handler: EvalLlmMockHandler = jest.fn().mockResolvedValue(errorResponse);
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(errorResponse);
 
 			await expect(
 				callEvalMockHandler(handler, requestOptions, node, false, 'legacy'),
@@ -388,11 +891,11 @@ describe('eval-mock-helpers', () => {
 				headers: { 'x-error': 'true' },
 				statusCode: 400,
 			};
-			const handler: EvalLlmMockHandler = jest.fn().mockResolvedValue(errorResponse);
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(errorResponse);
 
 			try {
 				await callEvalMockHandler(handler, requestOptions, node, false, 'axios');
-				fail('Expected error to be thrown');
+				expect.fail('Expected error to be thrown');
 			} catch (error: unknown) {
 				const err = error as Error & {
 					isAxiosError: boolean;
@@ -411,11 +914,11 @@ describe('eval-mock-helpers', () => {
 				headers: { 'x-reason': 'denied' },
 				statusCode: 403,
 			};
-			const handler: EvalLlmMockHandler = jest.fn().mockResolvedValue(errorResponse);
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(errorResponse);
 
 			try {
 				await callEvalMockHandler(handler, requestOptions, node, false, 'legacy');
-				fail('Expected error to be thrown');
+				expect.fail('Expected error to be thrown');
 			} catch (error: unknown) {
 				const err = error as Error & {
 					statusCode: number;
@@ -434,11 +937,11 @@ describe('eval-mock-helpers', () => {
 				headers: {},
 				statusCode: 401,
 			};
-			const handler: EvalLlmMockHandler = jest.fn().mockResolvedValue(errorResponse);
+			const handler: EvalLlmMockHandler = vi.fn().mockResolvedValue(errorResponse);
 
 			try {
 				await callEvalMockHandler(handler, requestOptions, node);
-				fail('Expected error to be thrown');
+				expect.fail('Expected error to be thrown');
 			} catch (error: unknown) {
 				const err = error as Error & { isAxiosError: boolean };
 				expect(err.isAxiosError).toBe(true);

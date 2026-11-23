@@ -1,12 +1,16 @@
-import type { AuthenticatedRequest, User } from '@n8n/db';
+import type { AuthenticatedRequest, TokenGrant, User } from '@n8n/db';
 import { UserRepository } from '@n8n/db';
 import { Service } from '@n8n/di';
+import { getApiKeyScopesForRole } from '@n8n/permissions';
 import { JsonWebTokenError, TokenExpiredError } from 'jsonwebtoken';
 
-import type { AuthStrategy } from '@/services/auth-strategy.types';
-import { JwtService } from '@/services/jwt.service';
+import type {
+	AuthStrategy,
+	AuthStrategyOptions,
+	AuthStrategyResult,
+} from '@n8n/backend-services/auth';
+import { JwtService } from '@n8n/backend-services';
 
-import { ALL_API_KEY_SCOPES } from '@n8n/permissions';
 import { TOKEN_EXCHANGE_ISSUER, type IssuedJwtPayload } from '../token-exchange.types';
 
 const BEARER_PREFIX = 'Bearer ';
@@ -19,22 +23,25 @@ export class ScopedJwtStrategy implements AuthStrategy {
 		private readonly userRepository: UserRepository,
 	) {}
 
-	async authenticate(req: AuthenticatedRequest): Promise<boolean | null> {
-		// 1. Extract token from Authorization: Bearer or x-n8n-api-key header
-		const token = this.extractToken(req);
+	async buildTokenGrant(
+		token: string,
+		options?: AuthStrategyOptions,
+	): Promise<TokenGrant | false | null> {
 		if (!token) return null;
 
-		// 2. Decode (unverified) — check iss before expensive signature verification
-		const decoded = this.jwtService.decode<IssuedJwtPayload>(token);
-		if (!decoded || decoded.iss !== TOKEN_EXCHANGE_ISSUER) {
+		const issuer = options?.issuer ?? TOKEN_EXCHANGE_ISSUER;
+
+		// 1. Decode (unverified) — check iss before expensive signature verification
+		const decoded = this.jwtService.decodeUnverified<IssuedJwtPayload>(token);
+		if (!decoded || decoded.iss !== issuer) {
 			return null; // Not a token-exchange JWT — pass to next strategy
 		}
 
-		// 3. Verify signature + expiry
+		// 2. Verify signature + expiry
 		let payload: IssuedJwtPayload;
 		try {
-			payload = this.jwtService.verify<IssuedJwtPayload>(token, {
-				issuer: TOKEN_EXCHANGE_ISSUER,
+			payload = this.jwtService.verify<IssuedJwtPayload>('tokenExchange', token, {
+				issuer,
 			});
 		} catch (error) {
 			if (error instanceof TokenExpiredError || error instanceof JsonWebTokenError) {
@@ -43,11 +50,11 @@ export class ScopedJwtStrategy implements AuthStrategy {
 			throw error;
 		}
 
-		// 4. Resolve subject (sub claim)
+		// 3. Resolve subject (sub claim)
 		const subject = await this.findUser(payload.sub);
 		if (!subject || subject.disabled) return false;
 
-		// 5. Resolve actor (act.sub claim) if present — actor is optional;
+		// 4. Resolve actor (act.sub claim) if present — actor is optional;
 		//    a missing actor is not an error, but a disabled actor is.
 		let actor: User | undefined;
 		if (payload.act) {
@@ -56,20 +63,42 @@ export class ScopedJwtStrategy implements AuthStrategy {
 			actor = found ?? undefined;
 		}
 
-		// 6. Acting principal: actor (if resolved) or subject
+		// 5. Acting principal: actor (if resolved) or subject
 		const actingUser = actor ?? subject;
 
-		// 7. Scopes come from the acting user's role (role.scopes is eager: true)
-		req.tokenGrant = {
+		// 6. Scopes come from the acting user's role (role.scopes is eager: true)
+		return {
 			scopes: actingUser.role.scopes.map((s) => s.slug),
-			apiKeyScopes: Array.from(ALL_API_KEY_SCOPES),
+			apiKeyScopes: getApiKeyScopesForRole(actingUser),
 			subject,
 			...(actor && { actor }),
 		};
+	}
+
+	async authenticate(req: AuthenticatedRequest): Promise<AuthStrategyResult> {
+		// 1. Extract token from Authorization: Bearer or x-n8n-api-key header
+		const token = this.extractToken(req);
+		if (!token) return { outcome: 'abstained' };
+
+		// 2. Build token grant
+		const tokenGrant = await this.buildTokenGrant(token);
+
+		if (tokenGrant === false) {
+			return { outcome: 'rejected' };
+		}
+		if (tokenGrant === null) {
+			return { outcome: 'abstained' };
+		}
+
+		// 3. Acting principal: actor (if resolved) or subject
+		const actingUser = tokenGrant.actor ?? tokenGrant.subject;
+
+		// 6. Setup token grant for request
+		req.tokenGrant = tokenGrant;
 
 		req.user = actingUser;
 
-		return true;
+		return { outcome: 'authenticated' };
 	}
 
 	private async findUser(id: string) {

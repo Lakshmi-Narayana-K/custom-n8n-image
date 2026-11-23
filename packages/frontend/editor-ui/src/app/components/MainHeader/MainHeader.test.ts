@@ -5,6 +5,7 @@ import MainHeader from '@/app/components/MainHeader/MainHeader.vue';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
 import { useSourceControlStore } from '@/features/integrations/sourceControl.ee/sourceControl.store';
 import { useCollaborationStore } from '@/features/collaboration/collaboration/collaboration.store';
+import { useSettingsStore } from '@n8n/stores/settings.store';
 import { STORES } from '@n8n/stores';
 import { WorkflowIdKey, WorkflowDocumentStoreKey } from '@/app/constants/injectionKeys';
 import { computed, shallowRef } from 'vue';
@@ -13,7 +14,8 @@ import {
 	createWorkflowDocumentId,
 } from '@/app/stores/workflowDocument.store';
 
-vi.mock('@n8n/permissions', () => ({
+vi.mock('@n8n/permissions', async (importOriginal) => ({
+	...(await importOriginal<typeof import('@n8n/permissions')>()),
 	getResourcePermissions: vi.fn(() => ({
 		workflow: {
 			update: true,
@@ -23,10 +25,9 @@ vi.mock('@n8n/permissions', () => ({
 }));
 
 vi.mock('vue-router', async (importOriginal) => ({
-	// eslint-disable-next-line @typescript-eslint/consistent-type-imports
-	...(await importOriginal<typeof import('vue-router')>()),
+	...(await importOriginal()),
 	useRoute: vi.fn().mockReturnValue({
-		params: { name: 'test' },
+		params: { workflowId: 'test' },
 		query: {},
 		meta: {
 			nodeView: true,
@@ -37,7 +38,7 @@ vi.mock('vue-router', async (importOriginal) => ({
 		replace: vi.fn(),
 		currentRoute: {
 			value: {
-				params: { name: 'test' },
+				params: { workflowId: 'test' },
 				query: {},
 			},
 		},
@@ -51,7 +52,7 @@ vi.mock('@/app/stores/pushConnection.store', () => ({
 	}),
 }));
 
-vi.mock('@/app/composables/useToast', () => {
+vi.mock('@n8n/composables/useToast', () => {
 	const showError = vi.fn();
 	const showMessage = vi.fn();
 	const showToast = vi.fn();
@@ -83,7 +84,6 @@ const renderComponent = createComponentRenderer(MainHeader, {
 				props: ['id', 'tags', 'name', 'currentFolder', 'isArchived', 'description'],
 				template: '<div data-test-id="workflow-details-stub"></div>',
 			},
-			GithubButton: { template: '<div></div>' },
 			TabBar: { template: '<div></div>' },
 		},
 		provide: {
@@ -97,13 +97,17 @@ describe('MainHeader', () => {
 	let workflowsStore: MockedStore<typeof useWorkflowsStore>;
 	let sourceControlStore: MockedStore<typeof useSourceControlStore>;
 	let collaborationStore: MockedStore<typeof useCollaborationStore>;
+	let settingsStore: MockedStore<typeof useSettingsStore>;
 
 	beforeEach(() => {
 		workflowsStore = mockedStore(useWorkflowsStore);
 		sourceControlStore = mockedStore(useSourceControlStore);
 		collaborationStore = mockedStore(useCollaborationStore);
+		settingsStore = mockedStore(useSettingsStore);
+		settingsStore.settings.canvasOnly = false;
 
-		workflowsStore.workflow = {
+		workflowsStore.setWorkflowId('1');
+		workflowDocumentStore.hydrate({
 			id: '1',
 			name: 'Test Workflow',
 			active: false,
@@ -118,7 +122,7 @@ describe('MainHeader', () => {
 			connections: {},
 			tags: [],
 			meta: {},
-		};
+		});
 
 		workflowDocumentStore.setName('Test Workflow');
 
@@ -131,5 +135,32 @@ describe('MainHeader', () => {
 
 		const workflowDetails = getByTestId('workflow-details-stub');
 		expect(workflowDetails).toBeInTheDocument();
+	});
+
+	// Especially important because WorkflowHeaderDraftPublishActions.vue child component of MainHeader
+	// registers keyboard shortcuts like Cmd+S for saving, Cmd+U for unpublish and Cmd+P for publish.
+	it('should not mount WorkflowDetails when canvas-only mode is on', () => {
+		settingsStore.settings.canvasOnly = true;
+
+		const { queryByTestId } = renderComponent();
+
+		expect(queryByTestId('workflow-details-stub')).not.toBeInTheDocument();
+	});
+
+	// Regression: the header renders before the workflow document store is set
+	// (e.g. the blank-canvas boot window). It must not throw when no NDV store is
+	// available — it uses injectNDVStoreIfProvided() and guards the access.
+	// (WorkflowDetails is `v-if="workflowName"`, so it is absent with no workflow;
+	// the point is that rendering the header does not throw.)
+	it('renders without throwing when no workflow document is loaded', () => {
+		expect(() =>
+			renderComponent({
+				global: {
+					provide: {
+						[WorkflowDocumentStoreKey as symbol]: shallowRef(null),
+					},
+				},
+			}),
+		).not.toThrow();
 	});
 });

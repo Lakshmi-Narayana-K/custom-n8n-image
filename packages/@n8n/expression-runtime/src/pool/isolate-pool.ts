@@ -16,7 +16,16 @@ export class PoolExhaustedError extends IsolateError {
 	}
 }
 
-export class IsolatePool {
+/** Public contract shared by IsolatePool and IdleScalingPool. */
+export interface IPool {
+	initialize(): Promise<void>;
+	acquire(): RuntimeBridge;
+	release(bridge: RuntimeBridge): Promise<void>;
+	dispose(): Promise<void>;
+	waitForReplenishment(): Promise<void>;
+}
+
+export class IsolatePool implements IPool {
 	private bridges: RuntimeBridge[] = [];
 	private disposed = false;
 	/** Number of bridges currently being created. */
@@ -107,7 +116,9 @@ export class IsolatePool {
 
 				if (attempt < IsolatePool.MAX_REPLENISH_RETRIES) {
 					const delay = IsolatePool.REPLENISH_RETRY_BASE_MS * 2 ** attempt;
-					setTimeout(() => this.replenish(attempt + 1), delay).unref();
+					const timer = setTimeout(() => this.replenish(attempt + 1), delay);
+					// In a browser `setTimeout` returns a number, which has no `unref`.
+					if (typeof timer === 'object') timer.unref();
 				}
 			});
 		this.replenishPromises.add(promise);

@@ -1,15 +1,18 @@
-import { getConnectedTools } from '@utils/helpers';
 import {
 	type IDataObject,
 	type IExecuteFunctions,
 	type INodeExecutionData,
 	type INodeProperties,
+	NodeOperationError,
 	accumulateTokenUsage,
 	jsonParse,
+	requestPath,
 	updateDisplayOptions,
 	validateNodeParameters,
 } from 'n8n-workflow';
 import zodToJsonSchema from 'zod-to-json-schema';
+
+import { getConnectedTools } from '@utils/helpers';
 
 import type {
 	GenerateContentRequest,
@@ -18,8 +21,10 @@ import type {
 	Tool,
 	GenerateContentGenerationConfig,
 	BuiltInTools,
+	FunctionCallPart,
+	TextPart,
 } from '../../helpers/interfaces';
-import { apiRequest } from '../../transport';
+import { apiRequest, modelPath } from '../../transport';
 import { modelRLC } from '../descriptions';
 
 const properties: INodeProperties[] = [
@@ -346,8 +351,16 @@ const displayOptions = {
 
 export const description = updateDisplayOptions(displayOptions, properties);
 
+function isFunctionCallPart(part: unknown): part is FunctionCallPart {
+	return !!part && typeof part === 'object' && 'functionCall' in part;
+}
+
+function isTextPart(part: unknown): part is TextPart {
+	return !!part && typeof part === 'object' && 'text' in part;
+}
+
 function getToolCalls(response: GenerateContentResponse) {
-	return response.candidates.flatMap((c) => c.content.parts).filter((p) => 'functionCall' in p);
+	return response.candidates.flatMap((c) => c?.content?.parts ?? []).filter(isFunctionCallPart);
 }
 
 export async function execute(this: IExecuteFunctions, i: number): Promise<INodeExecutionData[]> {
@@ -498,7 +511,13 @@ export async function execute(this: IExecuteFunctions, i: number): Promise<INode
 		}
 	}
 
-	const contents: Content[] = messages.map((m) => ({
+	const nonEmptyMessages = messages.filter((m) => m.content.trim() !== '');
+	if (!nonEmptyMessages.length) {
+		throw new NodeOperationError(this.getNode(), 'A non-empty prompt is required.', {
+			itemIndex: i,
+		});
+	}
+	const contents: Content[] = nonEmptyMessages.map((m) => ({
 		parts: [{ text: m.content }],
 		role: m.role,
 	}));
@@ -512,9 +531,14 @@ export async function execute(this: IExecuteFunctions, i: number): Promise<INode
 		...(toolConfig && { toolConfig }),
 	};
 
-	let response = (await apiRequest.call(this, 'POST', `/v1beta/${model}:generateContent`, {
-		body,
-	})) as GenerateContentResponse;
+	let response = (await apiRequest.call(
+		this,
+		'POST',
+		requestPath`/v1beta${modelPath.call(this, model)}:generateContent`,
+		{
+			body,
+		},
+	)) as GenerateContentResponse;
 
 	const captureUsage = () => {
 		const usageMetadata = (response as unknown as Record<string, unknown>).usageMetadata as
@@ -528,7 +552,6 @@ export async function execute(this: IExecuteFunctions, i: number): Promise<INode
 			);
 		}
 	};
-
 	captureUsage();
 
 	const maxToolsIterations = this.getNodeParameter('options.maxToolsIterations', i, 15) as number;
@@ -543,7 +566,10 @@ export async function execute(this: IExecuteFunctions, i: number): Promise<INode
 			break;
 		}
 
-		contents.push(...response.candidates.map((c) => c.content));
+		contents.push.apply(
+			contents,
+			response.candidates.map((c) => c.content),
+		);
 
 		for (const { functionCall } of toolCalls) {
 			let toolResponse;
@@ -569,9 +595,14 @@ export async function execute(this: IExecuteFunctions, i: number): Promise<INode
 			});
 		}
 
-		response = (await apiRequest.call(this, 'POST', `/v1beta/${model}:generateContent`, {
-			body,
-		})) as GenerateContentResponse;
+		response = (await apiRequest.call(
+			this,
+			'POST',
+			requestPath`/v1beta${modelPath.call(this, model)}:generateContent`,
+			{
+				body,
+			},
+		)) as GenerateContentResponse;
 		captureUsage();
 		toolCalls = getToolCalls(response);
 		currentIteration++;
@@ -580,9 +611,9 @@ export async function execute(this: IExecuteFunctions, i: number): Promise<INode
 	const candidates = options.includeMergedResponse
 		? response.candidates.map((candidate) => ({
 				...candidate,
-				mergedResponse: candidate.content.parts
-					.filter((part) => 'text' in part)
-					.map((part) => (part as { text: string }).text)
+				mergedResponse: (candidate?.content?.parts ?? [])
+					.filter(isTextPart)
+					.map((part) => part.text)
 					.join(''),
 			}))
 		: response.candidates;

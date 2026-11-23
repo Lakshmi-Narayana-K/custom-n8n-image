@@ -1,3 +1,4 @@
+import { EventService, JwtService } from '@n8n/backend-services';
 import { randomValidPassword, testDb } from '@n8n/backend-test-utils';
 import type { User } from '@n8n/db';
 import { GLOBAL_MEMBER_ROLE, GLOBAL_OWNER_ROLE, UserRepository } from '@n8n/db';
@@ -6,15 +7,13 @@ import validator from 'validator';
 
 import config from '@/config';
 import { AUTH_COOKIE_NAME } from '@/constants';
+import type { RelayEventMap } from '@/events/maps/relay.event-map';
 import { MfaService } from '@/mfa/mfa.service';
-import { JwtService } from '@/services/jwt.service';
 
 import { LOGGED_OUT_RESPONSE_BODY } from './shared/constants';
 import { createUser, createUserShell } from './shared/db/users';
 import type { SuperAgentTest } from './shared/types';
 import * as utils from './shared/utils/';
-import { EventService } from '@/events/event.service';
-import type { RelayEventMap } from '@/events/maps/relay.event-map';
 
 let owner: User;
 let authOwnerAgent: SuperAgentTest;
@@ -336,6 +335,7 @@ describe('GET /resolve-signup-token', () => {
 	test('should validate invite token', async () => {
 		const memberShell = await createUserShell(GLOBAL_MEMBER_ROLE);
 		const token = Container.get(JwtService).sign(
+			'invite',
 			{ inviterId: owner.id, inviteeId: memberShell.id },
 			{ expiresIn: '90d' },
 		);
@@ -357,6 +357,7 @@ describe('GET /resolve-signup-token', () => {
 		license.setQuota('quota:users', 0);
 		const memberShell = await createUserShell(GLOBAL_MEMBER_ROLE);
 		const token = Container.get(JwtService).sign(
+			'invite',
 			{ inviterId: owner.id, inviteeId: memberShell.id },
 			{ expiresIn: '90d' },
 		);
@@ -369,6 +370,7 @@ describe('GET /resolve-signup-token', () => {
 	test('should fail with invalid inputs', async () => {
 		const { id: inviteeId } = await createUser({ role: { slug: 'global:member' } });
 		const validToken = Container.get(JwtService).sign(
+			'invite',
 			{ inviterId: owner.id, inviteeId },
 			{ expiresIn: '90d' },
 		);
@@ -397,12 +399,13 @@ describe('GET /resolve-signup-token', () => {
 	test('should send roles for user-invite-email-click event', async () => {
 		const memberShell = await createUserShell(GLOBAL_MEMBER_ROLE);
 		const token = Container.get(JwtService).sign(
+			'invite',
 			{ inviterId: owner.id, inviteeId: memberShell.id },
 			{ expiresIn: '90d' },
 		);
 
 		const eventService = Container.get(EventService);
-		const emitSpy = jest.spyOn(eventService, 'emit');
+		const emitSpy = vi.spyOn(eventService, 'emit');
 
 		await authOwnerAgent.get('/resolve-signup-token').query({ token }).expect(200);
 

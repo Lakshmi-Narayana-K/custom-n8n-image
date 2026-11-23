@@ -5,7 +5,7 @@ import type pg from 'pg-promise/typescript/pg-subset';
 
 export type QueryMode = 'single' | 'transaction' | 'independently';
 
-export type QueryValue = string | number | IDataObject | string[];
+export type QueryValue = string | number | boolean | null | IDataObject | string[];
 export type QueryValues = QueryValue[];
 export type QueryWithValues = { query: string; values?: QueryValues; options?: IFormattingOptions };
 
@@ -60,6 +60,9 @@ export type PostgresNodeCredentials = {
 	maxConnections: number;
 	allowUnauthorizedCerts?: boolean;
 	ssl?: 'disable' | 'allow' | 'require' | 'verify' | 'verify-full';
+	caCertificate?: string;
+	clientCertificate?: string;
+	clientPrivateKey?: string;
 } & (
 	| { sshTunnel: false }
 	| ({

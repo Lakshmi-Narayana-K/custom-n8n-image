@@ -4,9 +4,10 @@ import type {
 	INodeExecutionData,
 	INodeProperties,
 } from 'n8n-workflow';
-import { NodeOperationError, updateDisplayOptions } from 'n8n-workflow';
+import { NodeOperationError, requestPath, updateDisplayOptions } from 'n8n-workflow';
 import { apiRequest, pollTaskResult } from '../../transport';
 import type { IModelStudioRequestBody } from '../../helpers/interfaces';
+import { modelRLC } from '../descriptions';
 
 export const properties: INodeProperties[] = [
 	{
@@ -22,6 +23,15 @@ export const properties: INodeProperties[] = [
 		],
 		default: 'wan2.6-t2v',
 		description: 'The model to use for text-to-video generation',
+		displayOptions: {
+			show: { '@version': [1] },
+		},
+	},
+	{
+		...modelRLC('textToVideoModelSearch'),
+		displayOptions: {
+			show: { '@version': [{ _cnd: { gte: 1.1 } }] },
+		},
 	},
 	{
 		displayName: 'Prompt',
@@ -178,7 +188,11 @@ export async function execute(
 	this: IExecuteFunctions,
 	itemIndex: number,
 ): Promise<INodeExecutionData> {
-	const model = this.getNodeParameter('modelId', itemIndex) as string;
+	const nodeVersion = this.getNode().typeVersion;
+	const model =
+		nodeVersion >= 1.1
+			? (this.getNodeParameter('modelId', itemIndex, '', { extractValue: true }) as string)
+			: (this.getNodeParameter('modelId', itemIndex) as string);
 	const prompt = this.getNodeParameter('prompt', itemIndex) as string;
 	const resolution = this.getNodeParameter('resolution', itemIndex) as string;
 	const duration = this.getNodeParameter('duration', itemIndex) as number;
@@ -221,7 +235,7 @@ export async function execute(
 	const createResponse = await apiRequest.call(
 		this,
 		'POST',
-		'/api/v1/services/aigc/video-generation/video-synthesis',
+		requestPath`/api/v1/services/aigc/video-generation/video-synthesis`,
 		{
 			headers: {
 				'X-DashScope-Async': 'enable',

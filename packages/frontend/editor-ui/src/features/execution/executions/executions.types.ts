@@ -7,6 +7,7 @@ import type {
 } from 'n8n-workflow';
 import type { IWorkflowDb } from '@/Interface';
 import type { Scope } from '@n8n/permissions';
+import type { ExecutionListPagination } from '@n8n/api-types';
 
 export type ExecutionFilterMetadata = {
 	key: string;
@@ -22,7 +23,6 @@ export type ExecutionFilterType = {
 	workflowId: 'all' | string;
 	startDate: string | Date;
 	endDate: string | Date;
-	tags: string[];
 	annotationTags: string[];
 	vote: ExecutionFilterVote;
 	metadata: ExecutionFilterMetadata[];
@@ -63,11 +63,14 @@ export interface IExecutionFlatted extends IExecutionBase {
 
 export interface IExecutionFlattedResponse extends IExecutionFlatted {
 	id: string;
+	/** See {@link IExecutionResponse.dataTooLargeToDisplay}. When true, `data` is empty. */
+	dataTooLargeToDisplay?: boolean;
 }
 
 export interface IExecutionPushResponse {
 	executionId?: string;
 	waitingForWebhook?: boolean;
+	formTestUrls?: string[];
 }
 
 export interface IExecutionResponse extends IExecutionBase {
@@ -76,11 +79,13 @@ export interface IExecutionResponse extends IExecutionBase {
 	workflowData: IWorkflowDb;
 	executedNode?: string;
 	triggerNode?: string;
+	/** Set when the backend skipped loading oversized run data; `data` is then empty. */
+	dataTooLargeToDisplay?: boolean;
 }
 
 export type ExecutionSummaryWithScopes = ExecutionSummary & { scopes: Scope[] };
 
-export interface IExecutionsListResponse {
+export interface IExecutionsListResponse extends ExecutionListPagination {
 	count: number;
 	results: ExecutionSummaryWithScopes[];
 	estimated: boolean;

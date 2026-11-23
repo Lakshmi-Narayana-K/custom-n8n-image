@@ -2,10 +2,12 @@ import { testDb, createTeamProject, linkUserToProject } from '@n8n/backend-test-
 import type { Project, User } from '@n8n/db';
 import { ProjectRelationRepository, ProjectRepository } from '@n8n/db';
 import { Container } from '@n8n/di';
+import { DATA_TABLE_SYSTEM_COLUMNS } from 'n8n-workflow';
 
-import type { DataTable } from '@/modules/data-table/data-table.entity';
+import { DataTableSizeValidator, type DataTable } from '@n8n/backend-module-data-table';
 
 import { createDataTable } from '../shared/db/data-tables';
+import { createCustomRoleWithScopeSlugs } from '../shared/db/roles';
 import { createOwnerWithApiKey, createMemberWithApiKey } from '../shared/db/users';
 import type { SuperAgentTest } from '../shared/types';
 import * as utils from '../shared/utils/';
@@ -64,18 +66,46 @@ beforeEach(async () => {
 	authMemberAgent = testServer.publicApiAgentFor(member);
 });
 
-const testWithAPIKey =
-	(method: 'get' | 'post' | 'put' | 'patch' | 'delete', url: string, apiKey: string | null) =>
-	async () => {
-		void authOwnerAgent.set({ 'X-N8N-API-KEY': apiKey });
-		const response = await authOwnerAgent[method](url);
-		expect(response.statusCode).toBe(401);
-	};
+// The API key scope check runs before RBAC, so a key scoped to an unrelated resource is rejected
+// even for an instance owner.
+const createUnscopedAgent = async () => {
+	const unscopedOwner = await createOwnerWithApiKey({ scopes: ['tag:list'] });
+	return testServer.publicApiAgentFor(unscopedOwner);
+};
 
 describe('GET /data-tables', () => {
-	test('should fail due to missing API Key', testWithAPIKey('get', '/data-tables', null));
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer.publicApiAgentWithoutApiKey().get('/data-tables');
 
-	test('should fail due to invalid API Key', testWithAPIKey('get', '/data-tables', 'abcXYZ'));
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer.publicApiAgentWithApiKey('abcXYZ').get('/data-tables');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject listing without dataTable:list', async () => {
+		const unscopedAgent = await createUnscopedAgent();
+		const response = await unscopedAgent.get('/data-tables');
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('should reject an undecodable cursor', async () => {
+		const response = await authOwnerAgent.get('/data-tables').query({ cursor: 'not-a-cursor' });
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body).toHaveProperty('message', 'An invalid cursor was provided');
+	});
+
+	test('should reject a filter that is not valid JSON', async () => {
+		const response = await authOwnerAgent.get('/data-tables').query({ filter: '{not json' });
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body).toHaveProperty('message');
+	});
 
 	test('should list data tables', async () => {
 		await createDataTable(ownerPersonalProject, {
@@ -90,13 +120,48 @@ describe('GET /data-tables', () => {
 		const response = await authOwnerAgent.get('/data-tables');
 
 		expect(response.statusCode).toBe(200);
-		expect(response.body).toHaveProperty('data');
-		expect(response.body).toHaveProperty('nextCursor');
-		expect(response.body.data).toHaveLength(2);
-		expect(response.body.nextCursor).toBeNull();
-		expect(response.body.data[0]).toHaveProperty('id');
-		expect(response.body.data[0]).toHaveProperty('name');
-		expect(response.body.data[0]).toHaveProperty('columns');
+		// Default order is updatedAt DESC, so the most recently created table comes first.
+		expect(response.body).toStrictEqual({
+			data: [
+				{
+					id: expect.any(String),
+					name: 'table2',
+					columns: [
+						{
+							id: expect.any(String),
+							name: 'age',
+							type: 'number',
+							index: expect.any(Number),
+							createdAt: expect.any(String),
+							updatedAt: expect.any(String),
+						},
+					],
+					projectId: expect.any(String),
+					createdAt: expect.any(String),
+					updatedAt: expect.any(String),
+					sizeBytes: expect.any(Number),
+				},
+				{
+					id: expect.any(String),
+					name: 'table1',
+					columns: [
+						{
+							id: expect.any(String),
+							name: 'name',
+							type: 'string',
+							index: expect.any(Number),
+							createdAt: expect.any(String),
+							updatedAt: expect.any(String),
+						},
+					],
+					projectId: expect.any(String),
+					createdAt: expect.any(String),
+					updatedAt: expect.any(String),
+					sizeBytes: expect.any(Number),
+				},
+			],
+			nextCursor: null,
+		});
 	});
 
 	test('should paginate data tables', async () => {
@@ -338,9 +403,35 @@ describe('GET /data-tables', () => {
 });
 
 describe('POST /data-tables', () => {
-	test('should fail due to missing API Key', testWithAPIKey('post', '/data-tables', null));
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer.publicApiAgentWithoutApiKey().post('/data-tables');
 
-	test('should fail due to invalid API Key', testWithAPIKey('post', '/data-tables', 'abcXYZ'));
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer.publicApiAgentWithApiKey('abcXYZ').post('/data-tables');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject creating without dataTable:create', async () => {
+		const unscopedAgent = await createUnscopedAgent();
+		const response = await unscopedAgent
+			.post('/data-tables')
+			.send({ name: 'blocked', columns: [{ name: 'col1', type: 'string' }] });
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('should reject a create body with no name', async () => {
+		const response = await authOwnerAgent
+			.post('/data-tables')
+			.send({ columns: [{ name: 'col1', type: 'string' }] });
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toContain("request/body must have required property 'name'");
+	});
 
 	test('should create a data table', async () => {
 		const response = await authOwnerAgent.post('/data-tables').send({
@@ -352,11 +443,34 @@ describe('POST /data-tables', () => {
 		});
 
 		expect(response.statusCode).toBe(201);
-		expect(response.body).toHaveProperty('id');
-		expect(response.body).toHaveProperty('name', 'my-table');
-		expect(response.body).toHaveProperty('columns');
-		expect(response.body.columns).toHaveLength(2);
-		expect(response.body).toHaveProperty('projectId', ownerPersonalProject.id);
+		// Columns aren't guaranteed to come back in index order, so sort before comparing.
+		const columns = [...response.body.columns].sort((a, b) => a.index - b.index);
+		expect({ ...response.body, columns }).toStrictEqual({
+			id: expect.any(String),
+			name: 'my-table',
+			columns: [
+				{
+					id: expect.any(String),
+					name: 'email',
+					type: 'string',
+					index: 0,
+					createdAt: expect.any(String),
+					updatedAt: expect.any(String),
+				},
+				{
+					id: expect.any(String),
+					name: 'age',
+					type: 'number',
+					index: 1,
+					createdAt: expect.any(String),
+					updatedAt: expect.any(String),
+				},
+			],
+			projectId: ownerPersonalProject.id,
+			createdAt: expect.any(String),
+			updatedAt: expect.any(String),
+			sizeBytes: expect.any(Number),
+		});
 	});
 
 	test('should fail with duplicate name', async () => {
@@ -384,6 +498,21 @@ describe('POST /data-tables', () => {
 		expect(response.body).toHaveProperty('message');
 	});
 
+	test('should fail when the project does not exist', async () => {
+		const missingProjectId = 'non-existent-project-id';
+		const response = await authOwnerAgent.post('/data-tables').send({
+			name: 'my-table',
+			projectId: missingProjectId,
+			columns: [{ name: 'email', type: 'string' }],
+		});
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body).toHaveProperty(
+			'message',
+			`Project with ID "${missingProjectId}" not found`,
+		);
+	});
+
 	test('should reject unsupported column type (json)', async () => {
 		const response = await authOwnerAgent.post('/data-tables').send({
 			name: 'test-table',
@@ -393,12 +522,54 @@ describe('POST /data-tables', () => {
 		expect(response.statusCode).toBe(400);
 		expect(response.body).toHaveProperty('message');
 	});
+
+	test('forwards fileId to the import', async () => {
+		const response = await authOwnerAgent.post('/data-tables').send({
+			name: 'csv-table',
+			columns: [{ name: 'email', type: 'string', csvColumnName: 'Email Address' }],
+			fileId: 'no-such-file',
+			hasHeaders: true,
+		});
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toContain('Error uploading file');
+	});
+
+	test('does not keep the table when the import fails', async () => {
+		await authOwnerAgent.post('/data-tables').send({
+			name: 'csv-table',
+			columns: [{ name: 'email', type: 'string' }],
+			fileId: 'no-such-file',
+		});
+
+		const response = await authOwnerAgent.get('/data-tables');
+
+		expect(response.body.data).toHaveLength(0);
+	});
+
+	test('accepts csvColumnName on a create that has no fileId', async () => {
+		const response = await authOwnerAgent.post('/data-tables').send({
+			name: 'plain-table',
+			columns: [{ name: 'email', type: 'string', csvColumnName: 'Email Address' }],
+		});
+
+		expect(response.statusCode).toBe(201);
+		expect(response.body.columns).toHaveLength(1);
+	});
 });
 
 describe('GET /data-tables/:dataTableId', () => {
-	test('should fail due to missing API Key', testWithAPIKey('get', '/data-tables/123', null));
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer.publicApiAgentWithoutApiKey().get('/data-tables/123');
 
-	test('should fail due to invalid API Key', testWithAPIKey('get', '/data-tables/123', 'abcXYZ'));
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer.publicApiAgentWithApiKey('abcXYZ').get('/data-tables/123');
+
+		expect(response.statusCode).toBe(401);
+	});
 
 	test('should return 404 for non-existing data table', async () => {
 		const nonExistentId = 'abcd1234efgh5678';
@@ -409,6 +580,25 @@ describe('GET /data-tables/:dataTableId', () => {
 			'message',
 			`Could not find the data table: '${nonExistentId}'`,
 		);
+	});
+
+	test('should reject a malformed data table id', async () => {
+		const response = await authOwnerAgent.get('/data-tables/not-a-nanoid');
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body).toHaveProperty('message');
+	});
+
+	test('should reject reading without dataTable:read', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'scope-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent.get(`/data-tables/${dataTable.id}`);
+
+		expect(response.statusCode).toBe(403);
 	});
 
 	test('should get a data table', async () => {
@@ -423,10 +613,34 @@ describe('GET /data-tables/:dataTableId', () => {
 		const response = await authOwnerAgent.get(`/data-tables/${dataTable.id}`);
 
 		expect(response.statusCode).toBe(200);
-		expect(response.body).toHaveProperty('id', dataTable.id);
-		expect(response.body).toHaveProperty('name', 'test-table');
-		expect(response.body).toHaveProperty('columns');
-		expect(response.body.columns).toHaveLength(2);
+		// Columns aren't guaranteed to come back in index order, so sort before comparing.
+		const columns = [...response.body.columns].sort((a, b) => a.index - b.index);
+		expect({ ...response.body, columns }).toStrictEqual({
+			id: dataTable.id,
+			name: 'test-table',
+			columns: [
+				{
+					id: expect.any(String),
+					name: 'name',
+					type: 'string',
+					index: 0,
+					createdAt: expect.any(String),
+					updatedAt: expect.any(String),
+				},
+				{
+					id: expect.any(String),
+					name: 'age',
+					type: 'number',
+					index: 1,
+					createdAt: expect.any(String),
+					updatedAt: expect.any(String),
+				},
+			],
+			projectId: ownerPersonalProject.id,
+			createdAt: expect.any(String),
+			updatedAt: expect.any(String),
+			sizeBytes: expect.any(Number),
+		});
 	});
 
 	test('should return 403 when user does not have access to the data table', async () => {
@@ -456,9 +670,17 @@ describe('GET /data-tables/:dataTableId', () => {
 });
 
 describe('PATCH /data-tables/:dataTableId', () => {
-	test('should fail due to missing API Key', testWithAPIKey('patch', '/data-tables/123', null));
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer.publicApiAgentWithoutApiKey().patch('/data-tables/123');
 
-	test('should fail due to invalid API Key', testWithAPIKey('patch', '/data-tables/123', 'abcXYZ'));
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer.publicApiAgentWithApiKey('abcXYZ').patch('/data-tables/123');
+
+		expect(response.statusCode).toBe(401);
+	});
 
 	test('should return 404 for non-existing data table', async () => {
 		const nonExistentId = 'abcd1234efgh5678';
@@ -473,6 +695,41 @@ describe('PATCH /data-tables/:dataTableId', () => {
 		);
 	});
 
+	test('should reject a malformed data table id', async () => {
+		const response = await authOwnerAgent
+			.patch('/data-tables/not-a-nanoid')
+			.send({ name: 'whatever' });
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body).toHaveProperty('message');
+	});
+
+	test('should reject an update body with an empty name', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'validation-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+
+		const response = await authOwnerAgent.patch(`/data-tables/${dataTable.id}`).send({ name: '' });
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body).toHaveProperty('message');
+	});
+
+	test('should reject updating without dataTable:update', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'scope-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent
+			.patch(`/data-tables/${dataTable.id}`)
+			.send({ name: 'blocked' });
+
+		expect(response.statusCode).toBe(403);
+	});
+
 	test('should update a data table name', async () => {
 		const dataTable = await createDataTable(ownerPersonalProject, {
 			name: 'old-name',
@@ -484,8 +741,24 @@ describe('PATCH /data-tables/:dataTableId', () => {
 		});
 
 		expect(response.statusCode).toBe(200);
-		expect(response.body).toHaveProperty('id', dataTable.id);
-		expect(response.body).toHaveProperty('name', 'new-name');
+		expect(response.body).toStrictEqual({
+			id: dataTable.id,
+			name: 'new-name',
+			columns: [
+				{
+					id: expect.any(String),
+					name: 'col1',
+					type: 'string',
+					index: expect.any(Number),
+					createdAt: expect.any(String),
+					updatedAt: expect.any(String),
+				},
+			],
+			projectId: ownerPersonalProject.id,
+			createdAt: expect.any(String),
+			updatedAt: expect.any(String),
+			sizeBytes: expect.any(Number),
+		});
 	});
 
 	test('should fail with duplicate name', async () => {
@@ -522,12 +795,17 @@ describe('PATCH /data-tables/:dataTableId', () => {
 });
 
 describe('DELETE /data-tables/:dataTableId', () => {
-	test('should fail due to missing API Key', testWithAPIKey('delete', '/data-tables/123', null));
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer.publicApiAgentWithoutApiKey().delete('/data-tables/123');
 
-	test(
-		'should fail due to invalid API Key',
-		testWithAPIKey('delete', '/data-tables/123', 'abcXYZ'),
-	);
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer.publicApiAgentWithApiKey('abcXYZ').delete('/data-tables/123');
+
+		expect(response.statusCode).toBe(401);
+	});
 
 	test('should return 404 for non-existing data table', async () => {
 		const nonExistentId = 'abcd1234efgh5678';
@@ -538,6 +816,25 @@ describe('DELETE /data-tables/:dataTableId', () => {
 			'message',
 			`Could not find the data table: '${nonExistentId}'`,
 		);
+	});
+
+	test('should reject a malformed data table id', async () => {
+		const response = await authOwnerAgent.delete('/data-tables/not-a-nanoid');
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body).toHaveProperty('message');
+	});
+
+	test('should reject deleting without dataTable:delete', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'scope-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent.delete(`/data-tables/${dataTable.id}`);
+
+		expect(response.statusCode).toBe(403);
 	});
 
 	test('should delete a data table', async () => {
@@ -574,12 +871,30 @@ describe('DELETE /data-tables/:dataTableId', () => {
 });
 
 describe('GET /data-tables/:dataTableId/rows', () => {
-	test('should fail due to missing API Key', testWithAPIKey('get', '/data-tables/123/rows', null));
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer.publicApiAgentWithoutApiKey().get('/data-tables/123/rows');
 
-	test(
-		'should fail due to invalid API Key',
-		testWithAPIKey('get', '/data-tables/123/rows', 'abcXYZ'),
-	);
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithApiKey('abcXYZ')
+			.get('/data-tables/123/rows');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject reading rows without dataTableRow:read', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'name', type: 'string' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent.get(`/data-tables/${dataTable.id}/rows`);
+
+		expect(response.statusCode).toBe(403);
+	});
 
 	test('should return 404 for non-existing data table', async () => {
 		const nonExistentId = 'abcd1234efgh5678'; // Valid nanoid format but doesn't exist
@@ -607,15 +922,25 @@ describe('GET /data-tables/:dataTableId/rows', () => {
 		const response = await authOwnerAgent.get(`/data-tables/${dataTable.id}/rows`);
 
 		expect(response.statusCode).toBe(200);
-		expect(response.body.data).toHaveLength(2);
-		expect(response.body.nextCursor).toBeNull();
-
-		const row = response.body.data[0];
-		expect(row).toHaveProperty('id');
-		expect(row).toHaveProperty('name');
-		expect(row).toHaveProperty('age');
-		expect(row).toHaveProperty('createdAt');
-		expect(row).toHaveProperty('updatedAt');
+		expect(response.body).toStrictEqual({
+			data: [
+				{
+					id: expect.any(Number),
+					name: 'Alice',
+					age: 30,
+					createdAt: expect.any(String),
+					updatedAt: expect.any(String),
+				},
+				{
+					id: expect.any(Number),
+					name: 'Bob',
+					age: 25,
+					createdAt: expect.any(String),
+					updatedAt: expect.any(String),
+				},
+			],
+			nextCursor: null,
+		});
 	});
 
 	test('should sort rows by column ascending', async () => {
@@ -677,7 +1002,9 @@ describe('GET /data-tables/:dataTableId/rows', () => {
 			.query({ sortBy: 'invalid_format' });
 
 		expect(response.statusCode).toBe(400);
-		expect(response.body.message).toBe('Invalid sort format, expected <columnName>:<asc/desc>');
+		expect(response.body.message).toBe(
+			'request/query/sortBy Invalid sort format, expected <columnName>:<asc/desc>',
+		);
 	});
 
 	test('should reject invalid sort direction', async () => {
@@ -691,7 +1018,23 @@ describe('GET /data-tables/:dataTableId/rows', () => {
 			.query({ sortBy: 'name:invalid' });
 
 		expect(response.statusCode).toBe(400);
-		expect(response.body.message).toBe('Invalid sort direction');
+		expect(response.body.message).toBe('request/query/sortBy Invalid sort direction');
+	});
+
+	test('should reject an unknown sort column', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'name', type: 'string' }],
+			data: [{ name: 'Alice' }],
+		});
+
+		const response = await authOwnerAgent
+			.get(`/data-tables/${dataTable.id}/rows`)
+			.query({ sortBy: 'bogusCol:asc' });
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toBe(
+			"Validation error with data table request: unknown column name 'bogusCol'",
+		);
 	});
 
 	test('should sort by system column (id)', async () => {
@@ -816,12 +1159,45 @@ describe('GET /data-tables/:dataTableId/rows', () => {
 });
 
 describe('POST /data-tables/:dataTableId/rows', () => {
-	test('should fail due to missing API Key', testWithAPIKey('post', '/data-tables/123/rows', null));
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer.publicApiAgentWithoutApiKey().post('/data-tables/123/rows');
 
-	test(
-		'should fail due to invalid API Key',
-		testWithAPIKey('post', '/data-tables/123/rows', 'abcXYZ'),
-	);
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithApiKey('abcXYZ')
+			.post('/data-tables/123/rows');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject inserting rows without dataTableRow:create', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'name', type: 'string' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent
+			.post(`/data-tables/${dataTable.id}/rows`)
+			.send({ data: [{ name: 'Alice' }] });
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('should return 404 for non-existing data table', async () => {
+		const nonExistentId = 'abcd1234efgh5678'; // Valid nanoid format but doesn't exist
+		const response = await authOwnerAgent
+			.post(`/data-tables/${nonExistentId}/rows`)
+			.send({ data: [{ name: 'Alice' }] });
+
+		expect(response.statusCode).toBe(404);
+		expect(response.body).toHaveProperty(
+			'message',
+			`Could not find the data table: '${nonExistentId}'`,
+		);
+	});
 
 	test('should insert rows with returnType count', async () => {
 		const dataTable = await createDataTable(ownerPersonalProject, {
@@ -880,13 +1256,22 @@ describe('POST /data-tables/:dataTableId/rows', () => {
 		});
 
 		expect(response.statusCode).toBe(200);
-		expect(Array.isArray(response.body)).toBe(true);
-		expect(response.body).toHaveLength(2);
-		expect(response.body[0]).toHaveProperty('id');
-		expect(response.body[0]).toHaveProperty('name', 'Alice');
-		expect(response.body[0]).toHaveProperty('age', 30);
-		expect(response.body[1]).toHaveProperty('name', 'Bob');
-		expect(response.body[1]).toHaveProperty('age', 25);
+		expect(response.body).toStrictEqual([
+			{
+				id: expect.any(Number),
+				name: 'Alice',
+				age: 30,
+				createdAt: expect.any(String),
+				updatedAt: expect.any(String),
+			},
+			{
+				id: expect.any(Number),
+				name: 'Bob',
+				age: 25,
+				createdAt: expect.any(String),
+				updatedAt: expect.any(String),
+			},
+		]);
 	});
 
 	test('should use default returnType when not provided', async () => {
@@ -904,15 +1289,88 @@ describe('POST /data-tables/:dataTableId/rows', () => {
 });
 
 describe('PATCH /data-tables/:dataTableId/rows/update', () => {
-	test(
-		'should fail due to missing API Key',
-		testWithAPIKey('patch', '/data-tables/123/rows/update', null),
-	);
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithoutApiKey()
+			.patch('/data-tables/123/rows/update');
 
-	test(
-		'should fail due to invalid API Key',
-		testWithAPIKey('patch', '/data-tables/123/rows/update', 'abcXYZ'),
-	);
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithApiKey('abcXYZ')
+			.patch('/data-tables/123/rows/update');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject updating rows without dataTableRow:update', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: 'pending' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent.patch(`/data-tables/${dataTable.id}/rows/update`).send({
+			filter: {
+				type: 'and',
+				filters: [{ columnName: 'status', condition: 'eq', value: 'pending' }],
+			},
+			data: { status: 'completed' },
+		});
+
+		expect(response.statusCode).toBe(403);
+		expect(response.body).toHaveProperty('message', 'Forbidden');
+	});
+
+	test('should reject a filter entry missing condition', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: 'pending' }],
+		});
+
+		const response = await authOwnerAgent.patch(`/data-tables/${dataTable.id}/rows/update`).send({
+			filter: {
+				type: 'and',
+				filters: [{ columnName: 'status', value: 'pending' }],
+			},
+			data: { status: 'completed' },
+		});
+
+		expect(response.statusCode).toBe(400);
+	});
+
+	test('should reject an empty filters array', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: 'pending' }],
+		});
+
+		const response = await authOwnerAgent.patch(`/data-tables/${dataTable.id}/rows/update`).send({
+			filter: { type: 'and', filters: [] },
+			data: { status: 'completed' },
+		});
+
+		expect(response.statusCode).toBe(400);
+	});
+
+	test('should reject isEmpty and isNotEmpty conditions', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: 'pending' }],
+		});
+
+		const response = await authOwnerAgent.patch(`/data-tables/${dataTable.id}/rows/update`).send({
+			filter: {
+				type: 'and',
+				filters: [{ columnName: 'status', condition: 'isEmpty', value: null }],
+			},
+			data: { status: 'completed' },
+		});
+
+		expect(response.statusCode).toBe(400);
+	});
 
 	test('should update rows with returnData false', async () => {
 		const dataTable = await createDataTable(ownerPersonalProject, {
@@ -1004,15 +1462,87 @@ describe('PATCH /data-tables/:dataTableId/rows/update', () => {
 });
 
 describe('POST /data-tables/:dataTableId/rows/upsert', () => {
-	test(
-		'should fail due to missing API Key',
-		testWithAPIKey('post', '/data-tables/123/rows/upsert', null),
-	);
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithoutApiKey()
+			.post('/data-tables/123/rows/upsert');
 
-	test(
-		'should fail due to invalid API Key',
-		testWithAPIKey('post', '/data-tables/123/rows/upsert', 'abcXYZ'),
-	);
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithApiKey('abcXYZ')
+			.post('/data-tables/123/rows/upsert');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject upsert without dataTableRow:upsert', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'email', type: 'string' }],
+			data: [{ email: 'test@example.com' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent.post(`/data-tables/${dataTable.id}/rows/upsert`).send({
+			filter: {
+				type: 'and',
+				filters: [{ columnName: 'email', condition: 'eq', value: 'test@example.com' }],
+			},
+			data: { email: 'updated@example.com' },
+		});
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('should reject a filter entry missing condition', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'email', type: 'string' }],
+			data: [{ email: 'test@example.com' }],
+		});
+
+		const response = await authOwnerAgent.post(`/data-tables/${dataTable.id}/rows/upsert`).send({
+			filter: {
+				type: 'and',
+				filters: [{ columnName: 'email', value: 'test@example.com' }],
+			},
+			data: { email: 'updated@example.com' },
+		});
+
+		expect(response.statusCode).toBe(400);
+	});
+
+	test('should reject an empty filters array', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'email', type: 'string' }],
+			data: [{ email: 'test@example.com' }],
+		});
+
+		const response = await authOwnerAgent.post(`/data-tables/${dataTable.id}/rows/upsert`).send({
+			filter: { type: 'and', filters: [] },
+			data: { email: 'updated@example.com' },
+		});
+
+		expect(response.statusCode).toBe(400);
+	});
+
+	test('should reject isEmpty and isNotEmpty conditions', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'email', type: 'string' }],
+			data: [{ email: 'test@example.com' }],
+		});
+
+		const response = await authOwnerAgent.post(`/data-tables/${dataTable.id}/rows/upsert`).send({
+			filter: {
+				type: 'and',
+				filters: [{ columnName: 'email', condition: 'isNotEmpty', value: null }],
+			},
+			data: { email: 'updated@example.com' },
+		});
+
+		expect(response.statusCode).toBe(400);
+	});
 
 	test('should upsert row with returnData false', async () => {
 		const dataTable = await createDataTable(ownerPersonalProject, {
@@ -1055,10 +1585,15 @@ describe('POST /data-tables/:dataTableId/rows/upsert', () => {
 		});
 
 		expect(response.statusCode).toBe(200);
-		expect(Array.isArray(response.body)).toBe(true);
-		expect(response.body).toHaveLength(1);
-		expect(response.body[0]).toHaveProperty('email', 'existing@example.com');
-		expect(response.body[0]).toHaveProperty('status', 'updated');
+		expect(response.body).toStrictEqual([
+			{
+				id: expect.any(Number),
+				email: 'existing@example.com',
+				status: 'updated',
+				createdAt: expect.any(String),
+				updatedAt: expect.any(String),
+			},
+		]);
 	});
 
 	test('should preview upsert with dryRun true', async () => {
@@ -1096,15 +1631,100 @@ describe('POST /data-tables/:dataTableId/rows/upsert', () => {
 });
 
 describe('DELETE /data-tables/:dataTableId/rows/delete', () => {
-	test(
-		'should fail due to missing API Key',
-		testWithAPIKey('delete', '/data-tables/123/rows/delete', null),
-	);
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithoutApiKey()
+			.delete('/data-tables/123/rows/delete');
 
-	test(
-		'should fail due to invalid API Key',
-		testWithAPIKey('delete', '/data-tables/123/rows/delete', 'abcXYZ'),
-	);
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithApiKey('abcXYZ')
+			.delete('/data-tables/123/rows/delete');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject deleting rows without dataTableRow:delete', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: 'old' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const filter = JSON.stringify({
+			type: 'and',
+			filters: [{ columnName: 'status', condition: 'eq', value: 'old' }],
+		});
+
+		const response = await unscopedAgent
+			.delete(`/data-tables/${dataTable.id}/rows/delete`)
+			.query({ filter });
+
+		expect(response.statusCode).toBe(403);
+		expect(response.body).toHaveProperty('message', 'Forbidden');
+	});
+
+	test('should default a filter entry missing condition to eq', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: 'old' }, { status: 'active' }],
+		});
+
+		const filter = JSON.stringify({
+			type: 'and',
+			filters: [{ columnName: 'status', value: 'old' }],
+		});
+
+		const response = await authOwnerAgent
+			.delete(`/data-tables/${dataTable.id}/rows/delete`)
+			.query({ filter, returnData: 'true' });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toHaveLength(1);
+		expect(response.body[0]).toHaveProperty('status', 'old');
+	});
+
+	test('should accept isEmpty condition', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: null }, { status: 'archived' }],
+		});
+
+		const filter = JSON.stringify({
+			type: 'and',
+			filters: [{ columnName: 'status', condition: 'isEmpty', value: null }],
+		});
+
+		const response = await authOwnerAgent
+			.delete(`/data-tables/${dataTable.id}/rows/delete`)
+			.query({ filter, returnData: 'true' });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toHaveLength(1);
+	});
+
+	test('should accept isNotEmpty condition', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: null }, { status: 'archived' }],
+		});
+
+		const filter = JSON.stringify({
+			type: 'and',
+			filters: [{ columnName: 'status', condition: 'isNotEmpty', value: null }],
+		});
+
+		const response = await authOwnerAgent
+			.delete(`/data-tables/${dataTable.id}/rows/delete`)
+			.query({ filter, returnData: 'true' });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toHaveLength(1);
+		expect(response.body[0]).toHaveProperty('status', 'archived');
+	});
 
 	test('should delete rows with returnData false', async () => {
 		const dataTable = await createDataTable(ownerPersonalProject, {
@@ -1200,6 +1820,252 @@ describe('DELETE /data-tables/:dataTableId/rows/delete', () => {
 			'message',
 			"request/query must have required property 'filter'",
 		);
+	});
+
+	test('should reject a non-boolean dryRun value instead of coercing it', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: 'old' }],
+		});
+
+		const filter = JSON.stringify({
+			type: 'and',
+			filters: [{ columnName: 'status', condition: 'eq', value: 'old' }],
+		});
+
+		const response = await authOwnerAgent
+			.delete(`/data-tables/${dataTable.id}/rows/delete`)
+			.query({ filter, dryRun: '1' });
+
+		expect(response.statusCode).toBe(400);
+
+		// Verify data was not actually deleted
+		const getResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/rows`);
+		expect(getResponse.body.data).toHaveLength(1);
+	});
+
+	test('should reject an empty filters array with the delete-specific message', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: 'old' }],
+		});
+
+		const filter = JSON.stringify({ type: 'and', filters: [] });
+
+		const response = await authOwnerAgent
+			.delete(`/data-tables/${dataTable.id}/rows/delete`)
+			.query({ filter });
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toContain(
+			'At least one filter condition is required for delete operations',
+		);
+	});
+});
+
+describe('DELETE /data-tables/:dataTableId/rows/clear', () => {
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithoutApiKey()
+			.delete('/data-tables/123/rows/clear');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithApiKey('abcXYZ')
+			.delete('/data-tables/123/rows/clear');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject clearing rows without dataTableRow:delete', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent.delete(`/data-tables/${dataTable.id}/rows/clear`);
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('should return 404 for non-existing data table', async () => {
+		const nonExistentId = 'abcd1234efgh5678'; // Valid nanoid format but doesn't exist
+		const response = await authOwnerAgent.delete(`/data-tables/${nonExistentId}/rows/clear`);
+
+		expect(response.statusCode).toBe(404);
+		expect(response.body).toHaveProperty(
+			'message',
+			`Could not find the data table: '${nonExistentId}'`,
+		);
+	});
+
+	test('should clear all rows from a data table', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			columns: [{ name: 'status', type: 'string' }],
+			data: [{ status: 'active' }, { status: 'archived' }, { status: 'active' }],
+		});
+
+		const response = await authOwnerAgent.delete(`/data-tables/${dataTable.id}/rows/clear`);
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toStrictEqual({ deletedCount: 3 });
+
+		const getResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/rows`);
+		expect(getResponse.body.data).toHaveLength(0);
+	});
+});
+
+describe('row-content authorization on write endpoints', () => {
+	const SECRET = 'payroll-token-123';
+	const MATCH_ALL_FILTER = {
+		type: 'and',
+		filters: [{ columnName: 'id', condition: 'gte', value: 0 }],
+	};
+
+	let project: Project;
+	let dataTable: DataTable;
+	let writeOnlyRoleSlug: string;
+	let readWriteRoleSlug: string;
+	let writerAgent: SuperAgentTest;
+	let readWriterAgent: SuperAgentTest;
+
+	beforeAll(async () => {
+		// roles survive the per-test truncation of `Project`/`ProjectRelation`
+		const writeOnlyRole = await createCustomRoleWithScopeSlugs(['dataTable:writeRow'], {
+			roleType: 'project',
+		});
+		writeOnlyRoleSlug = writeOnlyRole.slug;
+
+		const readWriteRole = await createCustomRoleWithScopeSlugs(
+			['dataTable:writeRow', 'dataTable:readRow'],
+			{ roleType: 'project' },
+		);
+		readWriteRoleSlug = readWriteRole.slug;
+	});
+
+	beforeEach(async () => {
+		project = await createTeamProject('write-only project', owner);
+		dataTable = await createDataTable(project, {
+			columns: [{ name: 'secret', type: 'string' }],
+			data: [{ secret: SECRET }],
+		});
+
+		const writeOnlyUser = await createMemberWithApiKey();
+		await linkUserToProject(writeOnlyUser, project, writeOnlyRoleSlug);
+		writerAgent = testServer.publicApiAgentFor(writeOnlyUser);
+
+		const readWriteUser = await createMemberWithApiKey();
+		await linkUserToProject(readWriteUser, project, readWriteRoleSlug);
+		readWriterAgent = testServer.publicApiAgentFor(readWriteUser);
+	});
+
+	test('rejects update dryRun without dataTable:readRow scope', async () => {
+		const response = await writerAgent.patch(`/data-tables/${dataTable.id}/rows/update`).send({
+			filter: MATCH_ALL_FILTER,
+			data: { secret: 'overwritten' },
+			dryRun: true,
+		});
+
+		expect(response.statusCode).toBe(403);
+		expect(JSON.stringify(response.body)).not.toContain(SECRET);
+	});
+
+	test('rejects update returnData without dataTable:readRow scope', async () => {
+		const response = await writerAgent.patch(`/data-tables/${dataTable.id}/rows/update`).send({
+			filter: MATCH_ALL_FILTER,
+			data: { secret: 'overwritten' },
+			returnData: true,
+		});
+
+		expect(response.statusCode).toBe(403);
+		expect(JSON.stringify(response.body)).not.toContain(SECRET);
+	});
+
+	test('returns update row contents with dataTable:readRow scope', async () => {
+		const response = await readWriterAgent.patch(`/data-tables/${dataTable.id}/rows/update`).send({
+			filter: MATCH_ALL_FILTER,
+			data: { secret: 'overwritten' },
+			dryRun: true,
+		});
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toMatchObject([
+			{ secret: SECRET, dryRunState: 'before' },
+			{ secret: 'overwritten', dryRunState: 'after' },
+		]);
+	});
+
+	test('allows a plain update without dataTable:readRow scope', async () => {
+		const response = await writerAgent
+			.patch(`/data-tables/${dataTable.id}/rows/update`)
+			.send({ filter: MATCH_ALL_FILTER, data: { secret: 'overwritten' } });
+
+		expect(response.statusCode).toBe(200);
+	});
+
+	test('rejects upsert dryRun without dataTable:readRow scope', async () => {
+		const response = await writerAgent.post(`/data-tables/${dataTable.id}/rows/upsert`).send({
+			filter: MATCH_ALL_FILTER,
+			data: { secret: 'overwritten' },
+			dryRun: true,
+		});
+
+		expect(response.statusCode).toBe(403);
+		expect(JSON.stringify(response.body)).not.toContain(SECRET);
+	});
+
+	test('rejects upsert returnData without dataTable:readRow scope', async () => {
+		const response = await writerAgent.post(`/data-tables/${dataTable.id}/rows/upsert`).send({
+			filter: MATCH_ALL_FILTER,
+			data: { secret: 'overwritten' },
+			returnData: true,
+		});
+
+		expect(response.statusCode).toBe(403);
+		expect(JSON.stringify(response.body)).not.toContain(SECRET);
+	});
+
+	test('rejects delete returnData without dataTable:readRow scope', async () => {
+		const response = await writerAgent
+			.delete(`/data-tables/${dataTable.id}/rows/delete`)
+			.query({ filter: JSON.stringify(MATCH_ALL_FILTER), returnData: 'true' });
+
+		expect(response.statusCode).toBe(403);
+		expect(JSON.stringify(response.body)).not.toContain(SECRET);
+	});
+
+	test('allows a plain delete without dataTable:readRow scope', async () => {
+		const response = await writerAgent
+			.delete(`/data-tables/${dataTable.id}/rows/delete`)
+			.query({ filter: JSON.stringify(MATCH_ALL_FILTER) });
+
+		expect(response.statusCode).toBe(200);
+	});
+
+	test('returns upsert row contents with dataTable:readRow scope', async () => {
+		const response = await readWriterAgent.post(`/data-tables/${dataTable.id}/rows/upsert`).send({
+			filter: MATCH_ALL_FILTER,
+			data: { secret: 'overwritten' },
+			dryRun: true,
+		});
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toMatchObject([
+			{ secret: SECRET, dryRunState: 'before' },
+			{ secret: 'overwritten', dryRunState: 'after' },
+		]);
+	});
+
+	test('returns deleted row contents with dataTable:readRow scope', async () => {
+		const response = await readWriterAgent
+			.delete(`/data-tables/${dataTable.id}/rows/delete`)
+			.query({ filter: JSON.stringify(MATCH_ALL_FILTER), returnData: 'true' });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toMatchObject([{ secret: SECRET }]);
 	});
 });
 
@@ -1539,4 +2405,677 @@ describe('Filter Parameter Validation', () => {
 			expect(getResponse.body.data.length).toBe(4); // Bob (75) should be deleted
 		});
 	});
+});
+
+describe('POST /data-tables with projectId', () => {
+	beforeEach(() => {
+		testServer.license.setQuota('quota:maxTeamProjects', -1);
+		testServer.license.enable('feat:projectRole:admin');
+	});
+
+	test('should create a table in the specified team project when user is a member', async () => {
+		const teamProject = await createTeamProject('Team Create');
+		await linkUserToProject(member, teamProject, 'project:editor');
+
+		const response = await authMemberAgent.post('/data-tables').send({
+			name: 'team-table',
+			columns: [{ name: 'col1', type: 'string' }],
+			projectId: teamProject.id,
+		});
+
+		expect(response.statusCode).toBe(201);
+		expect(response.body).toHaveProperty('id');
+		expect(response.body).toHaveProperty('name', 'team-table');
+		expect(response.body).toHaveProperty('projectId', teamProject.id);
+		expect(response.body).not.toHaveProperty('project');
+	});
+
+	test('should return 403 when user is not a member of the specified project', async () => {
+		const teamProject = await createTeamProject('Team No Access');
+		// member is NOT added to teamProject
+
+		const response = await authMemberAgent.post('/data-tables').send({
+			name: 'unauthorized-table',
+			columns: [{ name: 'col1', type: 'string' }],
+			projectId: teamProject.id,
+		});
+
+		expect(response.statusCode).toBe(403);
+		expect(response.body).toHaveProperty('message', 'Forbidden');
+	});
+});
+
+describe('GET /data-tables with projectId filter', () => {
+	beforeEach(() => {
+		testServer.license.setQuota('quota:maxTeamProjects', -1);
+		testServer.license.enable('feat:projectRole:admin');
+	});
+
+	test('should return only tables from the specified team project when user is a member', async () => {
+		const teamProject = await createTeamProject('Team Filter');
+		await linkUserToProject(member, teamProject, 'project:viewer');
+
+		await createDataTable(memberPersonalProject, {
+			name: 'personal-table',
+			columns: [{ name: 'col', type: 'string' }],
+		});
+		await createDataTable(teamProject, {
+			name: 'team-table',
+			columns: [{ name: 'col', type: 'string' }],
+		});
+
+		const filter = JSON.stringify({ projectId: teamProject.id });
+		const response = await authMemberAgent.get('/data-tables').query({ filter });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data).toHaveLength(1);
+		expect(response.body.data[0].name).toBe('team-table');
+	});
+
+	test('should return empty results when filtering by a project the user is not a member of', async () => {
+		const teamProject = await createTeamProject('Team No Filter Access');
+		// member is NOT added to teamProject
+
+		const filter = JSON.stringify({ projectId: teamProject.id });
+		const response = await authMemberAgent.get('/data-tables').query({ filter });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data).toHaveLength(0);
+	});
+
+	test('should allow filtering by the user personal project id', async () => {
+		await createDataTable(memberPersonalProject, {
+			name: 'personal-only-table',
+			columns: [{ name: 'col', type: 'string' }],
+		});
+
+		const filter = JSON.stringify({ projectId: memberPersonalProject.id });
+		const response = await authMemberAgent.get('/data-tables').query({ filter });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body.data).toHaveLength(1);
+		expect(response.body.data[0].name).toBe('personal-only-table');
+	});
+});
+
+describe('GET /data-tables/:dataTableId/columns', () => {
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer.publicApiAgentWithoutApiKey().get('/data-tables/123/columns');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithApiKey('abcXYZ')
+			.get('/data-tables/123/columns');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject listing without dataTableColumn:read', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'scope-columns-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent.get(`/data-tables/${dataTable.id}/columns`);
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('should reject a malformed data table id', async () => {
+		const response = await authOwnerAgent.get('/data-tables/not-a-nanoid/columns');
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toBe('request/params/dataTableId must match format "nanoid"');
+	});
+
+	test('should list columns for a data table', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'columns-test',
+			columns: [
+				{ name: 'name', type: 'string' },
+				{ name: 'age', type: 'number' },
+				{ name: 'active', type: 'boolean' },
+				{ name: 'signedUpAt', type: 'date' },
+			],
+		});
+
+		const response = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+
+		expect(response.statusCode).toBe(200);
+
+		// Columns aren't guaranteed to come back in index order, so sort before comparing.
+		const columns = [...response.body].sort((a, b) => a.index - b.index);
+		expect(columns).toStrictEqual([
+			{
+				id: expect.any(String),
+				name: 'name',
+				type: 'string',
+				index: 0,
+				dataTableId: dataTable.id,
+				createdAt: expect.any(String),
+				updatedAt: expect.any(String),
+			},
+			{
+				id: expect.any(String),
+				name: 'age',
+				type: 'number',
+				index: 1,
+				dataTableId: dataTable.id,
+				createdAt: expect.any(String),
+				updatedAt: expect.any(String),
+			},
+			{
+				id: expect.any(String),
+				name: 'active',
+				type: 'boolean',
+				index: 2,
+				dataTableId: dataTable.id,
+				createdAt: expect.any(String),
+				updatedAt: expect.any(String),
+			},
+			{
+				id: expect.any(String),
+				name: 'signedUpAt',
+				type: 'date',
+				index: 3,
+				dataTableId: dataTable.id,
+				createdAt: expect.any(String),
+				updatedAt: expect.any(String),
+			},
+		]);
+	});
+
+	test('should return 404 for non-existing data table', async () => {
+		const nonExistentId = 'abcd1234efgh5678';
+		const response = await authOwnerAgent.get(`/data-tables/${nonExistentId}/columns`);
+
+		expect(response.statusCode).toBe(404);
+	});
+
+	test('should return 403 when user does not have access', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'owner-columns-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+
+		const response = await authMemberAgent.get(`/data-tables/${dataTable.id}/columns`);
+
+		expect(response.statusCode).toBe(403);
+	});
+});
+
+describe('POST /data-tables/:dataTableId/columns', () => {
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithoutApiKey()
+			.post('/data-tables/123/columns');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithApiKey('abcXYZ')
+			.post('/data-tables/123/columns');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject adding a column without dataTableColumn:create', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'scope-add-column-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent.post(`/data-tables/${dataTable.id}/columns`).send({
+			name: 'email',
+			type: 'string',
+		});
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('should reject a malformed data table id', async () => {
+		const response = await authOwnerAgent.post('/data-tables/not-a-nanoid/columns').send({
+			name: 'email',
+			type: 'string',
+		});
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toBe('request/params/dataTableId must match format "nanoid"');
+	});
+
+	test('should add a column', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'add-column-test',
+			columns: [{ name: 'name', type: 'string' }],
+		});
+
+		const response = await authOwnerAgent.post(`/data-tables/${dataTable.id}/columns`).send({
+			name: 'email',
+			type: 'string',
+		});
+
+		expect(response.statusCode).toBe(201);
+		expect(response.body).toStrictEqual({
+			id: expect.any(String),
+			name: 'email',
+			type: 'string',
+			index: 1,
+			dataTableId: dataTable.id,
+			createdAt: expect.any(String),
+			updatedAt: expect.any(String),
+		});
+
+		const listResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		expect(listResponse.body).toHaveLength(2);
+	});
+
+	test('should fail with invalid column type', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'invalid-type-test',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+
+		const response = await authOwnerAgent.post(`/data-tables/${dataTable.id}/columns`).send({
+			name: 'data',
+			type: 'json',
+		});
+
+		expect(response.statusCode).toBe(400);
+	});
+
+	test('should fail with duplicate column name', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'dup-column-test',
+			columns: [{ name: 'existing', type: 'string' }],
+		});
+
+		const response = await authOwnerAgent.post(`/data-tables/${dataTable.id}/columns`).send({
+			name: 'existing',
+			type: 'number',
+		});
+
+		expect(response.statusCode).toBe(409);
+	});
+
+	test('should fail with system column name', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'system-col-test',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+
+		const response = await authOwnerAgent.post(`/data-tables/${dataTable.id}/columns`).send({
+			name: 'createdAt',
+			type: 'date',
+		});
+
+		expect(response.statusCode).toBe(409);
+	});
+
+	test('should return 403 when user does not have access', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'no-access-add-col',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+
+		const response = await authMemberAgent.post(`/data-tables/${dataTable.id}/columns`).send({
+			name: 'newcol',
+			type: 'string',
+		});
+
+		expect(response.statusCode).toBe(403);
+	});
+});
+
+describe('DELETE /data-tables/:dataTableId/columns/:columnId', () => {
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithoutApiKey()
+			.delete('/data-tables/123/columns/456');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithApiKey('abcXYZ')
+			.delete('/data-tables/123/columns/456');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject deleting without dataTableColumn:delete', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'scope-delete-column-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+		const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		const columnId = columnsResponse.body[0].id;
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent.delete(`/data-tables/${dataTable.id}/columns/${columnId}`);
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('should reject a malformed data table id', async () => {
+		const response = await authOwnerAgent.delete(
+			'/data-tables/not-a-nanoid/columns/AAAAAAAAAAAAAAAA',
+		);
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toBe('request/params/dataTableId must match format "nanoid"');
+	});
+
+	test('should reject a malformed column id', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'malformed-column-id-delete-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+
+		const response = await authOwnerAgent.delete(
+			`/data-tables/${dataTable.id}/columns/not-a-nanoid`,
+		);
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toBe('request/params/columnId must match format "nanoid"');
+	});
+
+	test('should delete a column', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'delete-col-test',
+			columns: [
+				{ name: 'keep', type: 'string' },
+				{ name: 'remove', type: 'string' },
+			],
+		});
+
+		const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		const columnId = columnsResponse.body.find((c: any) => c.name === 'remove').id;
+
+		const response = await authOwnerAgent.delete(
+			`/data-tables/${dataTable.id}/columns/${columnId}`,
+		);
+
+		expect(response.statusCode).toBe(204);
+		expect(response.body).toEqual({});
+
+		const afterResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		expect(afterResponse.body).toHaveLength(1);
+		expect(afterResponse.body[0].name).toBe('keep');
+	});
+
+	test('should return 404 for non-existing column', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'delete-missing-col',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+
+		const response = await authOwnerAgent.delete(
+			`/data-tables/${dataTable.id}/columns/AAAAAAAAAAAAAAAA`,
+		);
+
+		expect(response.statusCode).toBe(404);
+	});
+
+	test('should return 403 when user does not have access', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'no-access-delete-col',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+
+		const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		const columnId = columnsResponse.body[0].id;
+
+		const response = await authMemberAgent.delete(
+			`/data-tables/${dataTable.id}/columns/${columnId}`,
+		);
+
+		expect(response.statusCode).toBe(403);
+
+		const afterResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		expect(afterResponse.body).toHaveLength(1);
+	});
+});
+
+describe('PATCH /data-tables/:dataTableId/columns/:columnId', () => {
+	test('should fail due to missing API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithoutApiKey()
+			.patch('/data-tables/123/columns/456');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should fail due to invalid API Key', async () => {
+		const response = await testServer
+			.publicApiAgentWithApiKey('abcXYZ')
+			.patch('/data-tables/123/columns/456');
+
+		expect(response.statusCode).toBe(401);
+	});
+
+	test('should reject updating without dataTableColumn:update', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'scope-update-column-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+		const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		const columnId = columnsResponse.body[0].id;
+		const unscopedAgent = await createUnscopedAgent();
+
+		const response = await unscopedAgent
+			.patch(`/data-tables/${dataTable.id}/columns/${columnId}`)
+			.send({ name: 'renamed' });
+
+		expect(response.statusCode).toBe(403);
+	});
+
+	test('should reject a malformed data table id', async () => {
+		const response = await authOwnerAgent
+			.patch('/data-tables/not-a-nanoid/columns/AAAAAAAAAAAAAAAA')
+			.send({ name: 'renamed' });
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toBe('request/params/dataTableId must match format "nanoid"');
+	});
+
+	test('should reject a malformed column id', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'malformed-column-id-patch-table',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+
+		const response = await authOwnerAgent
+			.patch(`/data-tables/${dataTable.id}/columns/not-a-nanoid`)
+			.send({ name: 'renamed' });
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toBe('request/params/columnId must match format "nanoid"');
+	});
+
+	test('should rename a column', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'rename-column-test',
+			columns: [{ name: 'old_name', type: 'string' }],
+		});
+
+		const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		const columnId = columnsResponse.body[0].id;
+
+		const response = await authOwnerAgent
+			.patch(`/data-tables/${dataTable.id}/columns/${columnId}`)
+			.send({
+				name: 'new_name',
+			});
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toStrictEqual({
+			id: columnId,
+			name: 'new_name',
+			type: 'string',
+			index: 0,
+			dataTableId: dataTable.id,
+			createdAt: expect.any(String),
+			updatedAt: expect.any(String),
+		});
+	});
+
+	test('should move a column', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'move-column-test',
+			columns: [
+				{ name: 'first', type: 'string' },
+				{ name: 'second', type: 'string' },
+				{ name: 'third', type: 'string' },
+			],
+		});
+
+		const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		const secondColumn = columnsResponse.body.find((column: any) => column.name === 'second');
+
+		const response = await authOwnerAgent
+			.patch(`/data-tables/${dataTable.id}/columns/${secondColumn.id}`)
+			.send({ index: 0 });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toHaveProperty('id', secondColumn.id);
+		expect(response.body).toHaveProperty('name', 'second');
+		expect(response.body).toHaveProperty('index', 0);
+
+		const afterResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		expect(afterResponse.body[0]).toHaveProperty('id', secondColumn.id);
+	});
+
+	test('should rename and move a column in one request', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'rename-move-column-test',
+			columns: [
+				{ name: 'alpha', type: 'string' },
+				{ name: 'beta', type: 'string' },
+				{ name: 'gamma', type: 'string' },
+			],
+		});
+
+		const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		const betaColumn = columnsResponse.body.find((column: any) => column.name === 'beta');
+
+		const response = await authOwnerAgent
+			.patch(`/data-tables/${dataTable.id}/columns/${betaColumn.id}`)
+			.send({ name: 'beta_renamed', index: 2 });
+
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toHaveProperty('id', betaColumn.id);
+		expect(response.body).toHaveProperty('name', 'beta_renamed');
+		expect(response.body).toHaveProperty('index', 2);
+
+		const afterResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		expect(afterResponse.body[2]).toHaveProperty('id', betaColumn.id);
+		expect(afterResponse.body[2]).toHaveProperty('name', 'beta_renamed');
+	});
+
+	test('should fail when no update fields are provided', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'empty-patch-column-test',
+			columns: [{ name: 'name', type: 'string' }],
+		});
+
+		const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		const columnId = columnsResponse.body[0].id;
+
+		const response = await authOwnerAgent
+			.patch(`/data-tables/${dataTable.id}/columns/${columnId}`)
+			.send({});
+
+		expect(response.statusCode).toBe(400);
+		expect(response.body.message).toBe('request/body At least one field is required');
+	});
+
+	test('should fail with duplicate column name', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'duplicate-name-column-test',
+			columns: [
+				{ name: 'email', type: 'string' },
+				{ name: 'phone', type: 'string' },
+			],
+		});
+
+		const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		const phoneColumn = columnsResponse.body.find((column: any) => column.name === 'phone');
+
+		const response = await authOwnerAgent
+			.patch(`/data-tables/${dataTable.id}/columns/${phoneColumn.id}`)
+			.send({ name: 'email' });
+
+		expect(response.statusCode).toBe(409);
+		expect(response.body.message).toBe(
+			"Data table column with name 'email' already exists in data table 'duplicate-name-column-test'",
+		);
+	});
+
+	test.each(DATA_TABLE_SYSTEM_COLUMNS)(
+		'should fail with reserved system column name %s',
+		async (systemColumnName) => {
+			const dataTable = await createDataTable(ownerPersonalProject, {
+				name: `reserved-name-column-test-${systemColumnName}`,
+				columns: [{ name: 'custom_name', type: 'string' }],
+			});
+
+			const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+			const columnId = columnsResponse.body[0].id;
+
+			const response = await authOwnerAgent
+				.patch(`/data-tables/${dataTable.id}/columns/${columnId}`)
+				.send({ name: systemColumnName });
+
+			expect(response.statusCode).toBe(409);
+			expect(response.body.message).toBe(
+				`Column name "${systemColumnName}" is reserved as a system column name.`,
+			);
+		},
+	);
+
+	test('should return 403 when user does not have access', async () => {
+		const dataTable = await createDataTable(ownerPersonalProject, {
+			name: 'no-access-update-col',
+			columns: [{ name: 'col1', type: 'string' }],
+		});
+
+		const columnsResponse = await authOwnerAgent.get(`/data-tables/${dataTable.id}/columns`);
+		const columnId = columnsResponse.body[0].id;
+
+		const response = await authMemberAgent
+			.patch(`/data-tables/${dataTable.id}/columns/${columnId}`)
+			.send({
+				name: 'updated_by_member',
+			});
+
+		expect(response.statusCode).toBe(403);
+	});
+});
+
+test('should report a non-zero size for a table holding rows', async () => {
+	const dataTable = await createDataTable(ownerPersonalProject, {
+		name: 'sized-with-rows',
+		columns: [{ name: 'name', type: 'string' }],
+	});
+
+	await authOwnerAgent.post(`/data-tables/${dataTable.id}/rows`).send({
+		data: Array.from({ length: 50 }, (_, index) => ({ name: `row-${index}` })),
+		returnType: 'count',
+	});
+
+	// The rows landed after the last refresh, so re-measure before reading.
+	Container.get(DataTableSizeValidator).reset();
+
+	const response = await authOwnerAgent.get(`/data-tables/${dataTable.id}`);
+
+	expect(response.statusCode).toBe(200);
+	expect(response.body.sizeBytes).toBeGreaterThan(0);
 });

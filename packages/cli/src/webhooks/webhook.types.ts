@@ -1,11 +1,17 @@
+import type { OperationContext } from '@n8n/db';
 import type { Request, Response } from 'express';
 import type { IDataObject, IHttpRequestMethods } from 'n8n-workflow';
+
+import type { ExpectedWebhookNodeType } from './node-type-matcher';
+import type { WebhookResponse } from './webhook-response';
 
 export type WebhookOptionsRequest = Request & { method: 'OPTIONS' };
 
 export type WebhookRequest = Request<{ path: string }> & {
 	method: IHttpRequestMethods;
 	params: Record<string, string>;
+	/** Set by the authentication edge once the caller is identified; absent before that. */
+	ctx?: OperationContext;
 };
 
 export type WaitingWebhookRequest = WebhookRequest & {
@@ -26,7 +32,11 @@ export interface IWebhookManager {
 		httpMethod: IHttpRequestMethods,
 	) => Promise<WebhookAccessControlOptions | undefined>;
 
-	executeWebhook(req: WebhookRequest, res: Response): Promise<IWebhookResponseCallbackData>;
+	executeWebhook(
+		req: WebhookRequest,
+		res: Response,
+		expectedNodeType?: ExpectedWebhookNodeType,
+	): Promise<IWebhookResponseCallbackData | WebhookResponse>;
 }
 
 export interface IWebhookResponseCallbackData {
@@ -37,3 +47,10 @@ export interface IWebhookResponseCallbackData {
 }
 
 export type Method = NonNullable<IHttpRequestMethods>;
+
+export interface RegisteredTestWebhooks {
+	/** Unique names of the nodes whose test webhooks were registered, in registration order. */
+	nodeNames: string[];
+	/** Test URL of each registered Form Trigger, for the editor to open in a popup. */
+	formTestUrls: string[];
+}

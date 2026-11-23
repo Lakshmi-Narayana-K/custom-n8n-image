@@ -1,31 +1,20 @@
-import { Agent } from '@mastra/core/agent';
-import type { ToolsInput } from '@mastra/core/agent';
-
-import { buildAgentTraceInputs, mergeTraceRunInputs } from '../tracing/langsmith-tracing';
-import type { InstanceAiTraceRun, ModelConfig } from '../types';
-
-export interface SubAgentOptions {
-	/** Unique ID for this sub-agent instance (e.g., "agent-V1StGX") */
-	agentId: string;
-	/** Free-form role description */
-	role: string;
-	/** Task-specific system prompt written by the orchestrator */
-	instructions: string;
-	/** Validated subset of domain tools */
-	tools: ToolsInput;
-	/** Model config (same as orchestrator) */
-	modelId: ModelConfig;
-	/** Optional trace run to annotate with the sub-agent's static config */
-	traceRun?: InstanceAiTraceRun;
-}
+import {
+	SCOPE_GROUNDING_GUARDRAIL,
+	SECRET_ASK_GUARDRAIL,
+	SECRET_PASTE_GUARDRAIL,
+} from './credential-guardrails.prompt';
+import {
+	ASK_USER_FALLBACK,
+	SUBAGENT_OUTPUT_CONTRACT,
+	UNTRUSTED_CONTENT_DOCTRINE,
+} from './shared-prompts';
+import { getDateTimeSection } from './system-prompt';
 
 /** Hard protocol injected into every sub-agent — cannot be overridden by orchestrator instructions. */
-const SUB_AGENT_PROTOCOL = `## Output Protocol (MANDATORY)
-You are reporting to a parent agent, NOT a human user. Your output is machine-consumed.
+const SUB_AGENT_PROTOCOL = `${SUBAGENT_OUTPUT_CONTRACT}
 
-### Structured Result (required)
+### Structured Result
 Return a concise result summary: IDs created, statuses, counts, errors encountered.
-No emojis, no markdown headers, no filler phrases.
 
 ### Diagnostic Context (when relevant)
 If you encountered errors, retried operations, or made non-obvious decisions, add a brief
@@ -36,50 +25,26 @@ diagnostic section at the end explaining:
 
 Keep diagnostics to 2-3 sentences maximum. Omit entirely when the task succeeded cleanly.
 
-### Rules
+### Delegate Rules
 - One tool call at a time unless truly independent. Minimum tool calls needed.
 - You cannot delegate to other agents or create plans.
-- If you are stuck or need information only a human can provide, use the ask-user tool.
-- Do NOT retry the same failing approach more than twice — ask the user instead.`;
+- ${ASK_USER_FALLBACK}
+- ${UNTRUSTED_CONTENT_DOCTRINE}
+- ${SECRET_ASK_GUARDRAIL}
+- ${SECRET_PASTE_GUARDRAIL}
+- ${SCOPE_GROUNDING_GUARDRAIL}`;
 
 export { SUB_AGENT_PROTOCOL };
 
-function buildSubAgentPrompt(role: string, instructions: string): string {
+export function buildSubAgentPrompt(role: string, instructions: string, timeZone?: string): string {
 	return `${SUB_AGENT_PROTOCOL}
+
+## Current Date and Time
+
+${getDateTimeSection(timeZone)}
 
 You are a sub-agent with the role: ${role}.
 
 ## Task
 ${instructions}`;
-}
-
-export function createSubAgent(options: SubAgentOptions): Agent {
-	const { agentId, role, instructions, tools, modelId, traceRun } = options;
-
-	const systemPrompt = buildSubAgentPrompt(role, instructions);
-
-	const agent = new Agent({
-		id: agentId,
-		name: `Sub-Agent: ${role}`,
-		instructions: {
-			role: 'system' as const,
-			content: systemPrompt,
-			providerOptions: {
-				anthropic: { cacheControl: { type: 'ephemeral' } },
-			},
-		},
-		model: modelId,
-		tools,
-	});
-
-	mergeTraceRunInputs(
-		traceRun,
-		buildAgentTraceInputs({
-			systemPrompt,
-			tools,
-			modelId,
-		}),
-	);
-
-	return agent;
 }

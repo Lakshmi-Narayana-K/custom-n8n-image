@@ -1,9 +1,9 @@
-import { UnexpectedError } from 'n8n-workflow';
+import { UnexpectedError } from '@n8n/errors';
 
 import type { ExecutionRef } from './types';
 
 /**
- * Thrown when the filesystem store fails to persist execution data,
+ * Thrown when a blob store fails to persist execution data,
  * e.g. due to permission issues or disk space.
  */
 export class ExecutionDataWriteError extends UnexpectedError {

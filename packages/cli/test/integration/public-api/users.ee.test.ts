@@ -1,14 +1,9 @@
-import {
-	createTeamProject,
-	linkUserToProject,
-	testDb,
-	mockInstance,
-} from '@n8n/backend-test-utils';
+import { createTeamProject, linkUserToProject, testDb } from '@n8n/backend-test-utils';
 import { GLOBAL_MEMBER_ROLE, type User } from '@n8n/db';
 import { v4 as uuid } from 'uuid';
 import validator from 'validator';
 
-import { License } from '@/license';
+import { USER_QUOTA_FORBIDDEN_MESSAGE } from '@/public-api/constants';
 
 import {
 	createMember,
@@ -19,10 +14,6 @@ import {
 } from '../shared/db/users';
 import type { SuperAgentTest } from '../shared/types';
 import * as utils from '../shared/utils/';
-
-mockInstance(License, {
-	getUsersLimit: jest.fn().mockReturnValue(-1),
-});
 
 const testServer = utils.setupTestServer({ endpointGroups: ['publicApi'] });
 
@@ -48,11 +39,13 @@ describe('With license unlimited quota:users', () => {
 			await authOwnerAgent.get('/users').expect(401);
 		});
 
-		test('should forbid global user list for a member API key', async () => {
+		test('should allow global user list for a member API key with user:list scope', async () => {
 			const member = await createMemberWithApiKey();
 			await createUser();
 
-			await testServer.publicApiAgentFor(member).get('/users').expect(403);
+			const response = await testServer.publicApiAgentFor(member).get('/users').expect(200);
+
+			expect(response.body.data.length).toBe(2);
 		});
 
 		test('should allow member to list users of a project they belong to', async () => {
@@ -208,7 +201,11 @@ describe('With license unlimited quota:users', () => {
 		test('should return 404 for non-existing id ', async () => {
 			const owner = await createOwnerWithApiKey();
 			const authOwnerAgent = testServer.publicApiAgentFor(owner);
-			await authOwnerAgent.get(`/users/${uuid()}`).expect(404);
+			const missingId = uuid();
+
+			const response = await authOwnerAgent.get(`/users/${missingId}`).expect(404);
+
+			expect(response.body).toStrictEqual({ message: `Could not find user with id: ${missingId}` });
 		});
 
 		test('should return a pending user', async () => {
@@ -289,17 +286,30 @@ describe('With license without quota:users', () => {
 	let authOwnerAgent: SuperAgentTest;
 
 	beforeEach(async () => {
-		mockInstance(License, { getUsersLimit: jest.fn().mockReturnValue(null) });
+		testServer.license.setQuota('quota:users', 0);
 
 		const owner = await createOwnerWithApiKey();
 		authOwnerAgent = testServer.publicApiAgentFor(owner);
 	});
 
 	test('GET /users should fail due to invalid license', async () => {
-		await authOwnerAgent.get('/users').expect(403);
+		const response = await authOwnerAgent.get('/users').expect(403);
+
+		expect(response.body).toHaveProperty('message', USER_QUOTA_FORBIDDEN_MESSAGE);
 	});
 
 	test('GET /users/:id should fail due to invalid license', async () => {
-		await authOwnerAgent.get(`/users/${uuid()}`).expect(403);
+		const response = await authOwnerAgent.get(`/users/${uuid()}`).expect(403);
+
+		expect(response.body).toHaveProperty('message', USER_QUOTA_FORBIDDEN_MESSAGE);
+	});
+
+	test('GET /users/:id answers the generic Forbidden message when scope and license both fail', async () => {
+		const member = await createMemberWithApiKey();
+
+		const response = await testServer.publicApiAgentFor(member).get(`/users/${member.id}`);
+
+		expect(response.status).toBe(403);
+		expect(response.body).toHaveProperty('message', 'Forbidden');
 	});
 });

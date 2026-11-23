@@ -1,8 +1,12 @@
+import type { CreateProjectPublicDto, CreatedProjectPublicDto } from '@n8n/api-types';
+import { makePublicApiRequest, type PublicApiContext } from '@n8n/rest-api-client';
 import type { IRestApiContext } from '@n8n/rest-api-client';
 import { getFullApiResponse, makeRestApiRequest } from '@n8n/rest-api-client';
 import type { Project, ProjectListItem, ProjectsCount } from './projects.types';
 import type { CreateProjectDto, UpdateProjectDto } from '@n8n/api-types';
 import type { AssignableProjectRole } from '@n8n/permissions';
+
+export { getProject } from '@n8n/rest-api-client';
 
 export const getAllProjects = async (context: IRestApiContext): Promise<ProjectListItem[]> => {
 	return await makeRestApiRequest(context, 'GET', '/projects');
@@ -21,16 +25,33 @@ export const searchProjects = async (
 	return await getFullApiResponse<ProjectListItem[]>(context, 'GET', '/projects', params);
 };
 
+// Returns projects the caller can pick as share targets, including peer
+// personal projects so the workflow / credential share dropdowns can list
+// other users. Backed by `GET /rest/projects/sharing-candidates`.
+export const searchShareableProjects = async (
+	context: IRestApiContext,
+	params: {
+		search?: string;
+		take?: number;
+		skip?: number;
+		type?: 'personal' | 'team';
+		activated?: boolean;
+	},
+): Promise<{ count: number; data: ProjectListItem[] }> => {
+	return await getFullApiResponse<ProjectListItem[]>(
+		context,
+		'GET',
+		'/projects/sharing-candidates',
+		params,
+	);
+};
+
 export const getMyProjects = async (context: IRestApiContext): Promise<ProjectListItem[]> => {
 	return await makeRestApiRequest(context, 'GET', '/projects/my-projects');
 };
 
 export const getPersonalProject = async (context: IRestApiContext): Promise<Project> => {
 	return await makeRestApiRequest(context, 'GET', '/projects/personal');
-};
-
-export const getProject = async (context: IRestApiContext, id: string): Promise<Project> => {
-	return await makeRestApiRequest(context, 'GET', `/projects/${id}`);
 };
 
 export const createProject = async (
@@ -89,3 +110,10 @@ export const deleteProjectMember = async (
 ): Promise<void> => {
 	await makeRestApiRequest(context, 'DELETE', `/projects/${projectId}/users/${userId}`);
 };
+
+export async function createPublicProject(
+	context: PublicApiContext,
+	data: CreateProjectPublicDto,
+): Promise<CreatedProjectPublicDto> {
+	return await makePublicApiRequest(context, 'POST', '/projects', data);
+}
