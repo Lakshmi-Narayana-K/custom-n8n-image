@@ -1,5 +1,8 @@
 import type { Scope } from '../../types.ee';
 
+// Agents are limited to global owners and admins, who get the agent scopes
+// globally. Project roles carry no agent scopes, so members cannot use Agents.
+
 /**
  * Diff between admin in personal project and admin in other projects:
  * - You cannot rename your personal project.
@@ -12,16 +15,6 @@ export const REGULAR_PROJECT_ADMIN_SCOPES: Scope[] = [
 	'app:update',
 	'app:delete',
 	'app:list',
-	'agent:create',
-	'agent:read',
-	'agent:export',
-	'agent:import',
-	'agent:update',
-	'agent:delete',
-	'agent:list',
-	'agent:execute',
-	'agent:publish',
-	'agent:unpublish',
 	'workflow:create',
 	'workflow:read',
 	'workflow:export',
@@ -97,15 +90,6 @@ export const PERSONAL_PROJECT_OWNER_SCOPES: Scope[] = [
 	'app:update',
 	'app:delete',
 	'app:list',
-	'agent:create',
-	'agent:read',
-	'agent:export',
-	'agent:import',
-	'agent:update',
-	'agent:delete',
-	'agent:list',
-	'agent:execute',
-	'agent:unpublish',
 	'workflow:create',
 	'workflow:read',
 	'workflow:export',
@@ -169,16 +153,6 @@ export const PROJECT_EDITOR_SCOPES: Scope[] = [
 	'app:update',
 	'app:delete',
 	'app:list',
-	'agent:create',
-	'agent:read',
-	'agent:export',
-	'agent:import',
-	'agent:update',
-	'agent:delete',
-	'agent:list',
-	'agent:execute',
-	'agent:publish',
-	'agent:unpublish',
 	'workflow:create',
 	'workflow:read',
 	'workflow:export',
@@ -236,10 +210,6 @@ export const PROJECT_EDITOR_SCOPES: Scope[] = [
 export const PROJECT_VIEWER_SCOPES: Scope[] = [
 	'app:read',
 	'app:list',
-	'agent:read',
-	'agent:export',
-	'agent:list',
-	'agent:execute',
 	'credential:list',
 	'credential:read',
 	'project:list',

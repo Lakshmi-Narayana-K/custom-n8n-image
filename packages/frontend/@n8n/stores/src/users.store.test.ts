@@ -98,6 +98,35 @@ describe('users.store', () => {
 		});
 	});
 
+	describe('Agents access', () => {
+		it.each([
+			{ role: 'global:owner', expected: true },
+			{ role: 'global:admin', expected: true },
+			{ role: 'global:member', expected: false },
+		] as const)('allows Agents for $role: $expected', async ({ role, expected }) => {
+			const usersStore = useUsersStore();
+			const settingsStore = useSettingsStore();
+			settingsStore.settings.activeModules = ['agents'];
+			loginCurrentUser.mockResolvedValueOnce({ ...mockUser, role });
+
+			await usersStore.loginWithCookie();
+
+			expect(settingsStore.isAgentsEnabled).toBe(expected);
+		});
+
+		it('resets Agents access on sign-out', async () => {
+			const usersStore = useUsersStore();
+			const settingsStore = useSettingsStore();
+			settingsStore.settings.activeModules = ['agents'];
+			loginCurrentUser.mockResolvedValueOnce({ ...mockUser, role: 'global:member' });
+			await usersStore.loginWithCookie();
+
+			await usersStore.logout();
+
+			expect(settingsStore.isAgentsEnabled).toBe(true);
+		});
+	});
+
 	describe('inviteUsers', () => {
 		it('should add pending user to the store', async () => {
 			const usersStore = useUsersStore();

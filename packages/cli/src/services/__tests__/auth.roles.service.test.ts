@@ -438,7 +438,6 @@ describe('AuthRolesService', () => {
 					const scopes = roleDef.scopes.map((scopeSlug) => createMinimalScope(scopeSlug));
 					if (roleDef.slug === PROJECT_OWNER_ROLE_SLUG) {
 						scopes.push(createMinimalScope('workflow:publish'));
-						scopes.push(createMinimalScope('agent:publish'));
 						scopes.push(createMinimalScope('workflow:share'));
 						scopes.push(createMinimalScope('credential:share'));
 						scopes.push(createMinimalScope('credential:move'));
@@ -651,7 +650,10 @@ describe('AuthRolesService', () => {
 
 					const scopeSlugs = await syncedPersonalOwnerScopes();
 
-					expect(scopeSlugs).toEqual(expect.arrayContaining(DENIABLE_SCOPES));
+					// Agents are limited to global owners and admins, so the personal owner never has agent scopes.
+					expect(scopeSlugs).toEqual(
+						expect.arrayContaining(DENIABLE_SCOPES.filter((scope) => !scope.startsWith('agent:'))),
+					);
 				});
 
 				test('should remove the denied scopes when canvas-only mode is on', async () => {
@@ -662,7 +664,6 @@ describe('AuthRolesService', () => {
 
 					expect(scopeSlugs).not.toContain('credential:create');
 					expect(scopeSlugs).toContain('dataTable:create');
-					expect(scopeSlugs).toContain('agent:create');
 					expect(scopeSlugs).toContain('workflow:create');
 				});
 

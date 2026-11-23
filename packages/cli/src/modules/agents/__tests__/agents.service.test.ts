@@ -1033,7 +1033,7 @@ describe('AgentsService', () => {
 	});
 
 	describe('findChatReachableByUserPaginated', () => {
-		const user = { id: 'user-1' } as unknown as User;
+		const user = { id: 'user-1', role: { scopes: [] } } as unknown as User;
 
 		function makeReachableAgent() {
 			return makeAgent({
@@ -1098,6 +1098,19 @@ describe('AgentsService', () => {
 				undefined,
 			);
 			expect(projectRelationRepository.findAllByUser).not.toHaveBeenCalled();
+		});
+
+		it('lists drafts from every member project for a user with global Agent scopes', async () => {
+			const { service, agentRepository, projectScopeService } = makeService();
+			const owner = {
+				id: 'owner-1',
+				role: { scopes: [{ slug: 'agent:update' }, { slug: 'agent:publish' }] },
+			} as unknown as User;
+			agentRepository.findN8nChatListPaginated.mockResolvedValue({ count: 0, data: [] });
+
+			await service.findChatReachableByUserPaginated(owner, { skip: 0, take: 10 } as never);
+
+			expect(projectScopeService.getMemberProjectIds).toHaveBeenCalledWith(owner, ['project:read']);
 		});
 
 		it('fetches usage counts only when sorted by usage', async () => {

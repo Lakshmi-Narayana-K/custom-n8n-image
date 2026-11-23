@@ -1,4 +1,5 @@
 import type { SelfHealingLocation } from '@n8n/frontend-constants/self-healing';
+import { hasPermission } from '@/app/utils/rbac/permissions';
 import { getResourcePermissions } from '@n8n/permissions';
 import { useSettingsStore } from '@n8n/stores/settings.store';
 import { useUsersStore } from '@n8n/stores/users.store';
@@ -107,6 +108,8 @@ export function canConfigureSelfHealing(
 	if (!project || !useSettingsStore().moduleSettings['instance-ai']?.workflowSuggestionsEnabled) {
 		return false;
 	}
+	// Self-healing runs n8n Assistant, which needs this scope.
+	if (!hasPermission(['rbac'], { rbac: { scope: 'instanceAi:message' } })) return false;
 	if (project.type !== ProjectTypes.Personal) {
 		return !!getResourcePermissions(project.scopes).project.update;
 	}

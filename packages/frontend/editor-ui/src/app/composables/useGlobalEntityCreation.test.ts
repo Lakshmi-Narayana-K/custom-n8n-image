@@ -294,6 +294,7 @@ describe('useGlobalEntityCreation', () => {
 				settingsStore.isModuleActive.mockImplementation(
 					(name: string) => name === AGENTS_MODULE_NAME,
 				);
+				settingsStore.isAgentsEnabled = true;
 				const usersStore = mockedStore(useUsersStore);
 				usersStore.currentUser = {
 					globalScopes: ['variable:create'],
@@ -475,8 +476,20 @@ describe('useGlobalEntityCreation', () => {
 			settingsStore.isModuleActive.mockImplementation(
 				(name: string) => name === AGENTS_MODULE_NAME,
 			);
+			settingsStore.isAgentsEnabled = true;
 			return settingsStore;
 		};
+
+		it('omits the agent entry when the module is active but Agents are off for the user', () => {
+			enableAgentsModule().isAgentsEnabled = false;
+			const projectsStore = mockedStore(useProjectsStore);
+			projectsStore.isTeamProjectFeatureEnabled = false;
+			projectsStore.personalProject = { id: 'personal-project' } as Project;
+
+			const { menu } = useGlobalEntityCreation();
+
+			expect(menu.value.find((item) => item.id === 'agent')).toBeUndefined();
+		});
 
 		it('omits the agent entry from the community shape when the module is inactive', () => {
 			const projectsStore = mockedStore(useProjectsStore);

@@ -174,6 +174,7 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 	const setCurrentUser = async (user: CurrentUserResponse) => {
 		addUsers([user]);
 		currentUserId.value = user.id;
+		settingsStore.setAgentsAllowedForCurrentUser(isAdminOrOwner.value);
 
 		for (const hook of loginHooks.value) {
 			try {
@@ -209,6 +210,7 @@ export const useUsersStore = defineStore(STORES.USERS, () => {
 
 	const unsetCurrentUser = () => {
 		currentUserId.value = null;
+		settingsStore.setAgentsAllowedForCurrentUser(true);
 	};
 
 	const deleteUserById = (userId: string) => {

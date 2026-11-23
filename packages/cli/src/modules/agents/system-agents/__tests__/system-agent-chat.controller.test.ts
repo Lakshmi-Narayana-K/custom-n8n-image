@@ -76,6 +76,37 @@ async function listThreads(
 }
 
 describe('SystemAgentChatController', () => {
+	describe('checkAccess', () => {
+		function accessRequest(scopes: string[]) {
+			return {
+				user: { role: { scopes: scopes.map((slug) => ({ slug })) } },
+			} as unknown as AuthenticatedRequest;
+		}
+
+		it('rejects a user without the agent:execute global scope', () => {
+			const { controller } = setup();
+			const res = mock<Response>();
+			res.status.mockReturnValue(res);
+			const next = vi.fn();
+
+			controller.checkAccess(accessRequest(['workflow:read']), res, next);
+
+			expect(res.status).toHaveBeenCalledWith(403);
+			expect(next).not.toHaveBeenCalled();
+		});
+
+		it('allows a user with the agent:execute global scope', () => {
+			const { controller } = setup();
+			const res = mock<Response>();
+			const next = vi.fn();
+
+			controller.checkAccess(accessRequest(['agent:execute']), res, next);
+
+			expect(next).toHaveBeenCalledOnce();
+			expect(res.status).not.toHaveBeenCalled();
+		});
+	});
+
 	it('prepares a chat message with the working project from the query', async () => {
 		const { controller, systemAgents, chatRelay } = setup();
 		chatRelay.relayQueuedMessage.mockImplementation(async (_res, accept) => {

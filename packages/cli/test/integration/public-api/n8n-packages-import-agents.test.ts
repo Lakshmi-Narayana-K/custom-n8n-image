@@ -65,7 +65,10 @@ import { serializedSkillSchema } from '@/modules/n8n-packages/spec/serialized/sk
 import { AiGatewayService } from '@/services/ai-gateway.service';
 import { Telemetry } from '@/telemetry';
 import { createCredentials } from '@test-integration/db/credentials';
-import { createCustomRoleWithScopeSlugs } from '@test-integration/db/roles';
+import {
+	createCustomRoleWithScopeSlugs,
+	createProjectRoleWithAgentScopes,
+} from '@test-integration/db/roles';
 import { createMemberWithApiKey, createOwnerWithApiKey } from '@test-integration/db/users';
 import { createProjectVariable } from '@test-integration/db/variables';
 import { initNodeTypes, setupTestServer } from '@test-integration/utils';
@@ -776,7 +779,8 @@ it('imports with Agent and skill grants and skips with no write grants', async (
 	const member = await createMemberWithApiKey({
 		scopes: ['agent:import', 'agent:read', 'agent:create', 'skill:create'],
 	});
-	await linkUserToProject(member, destination, 'project:editor');
+	const editorRole = await createProjectRoleWithAgentScopes('project:editor');
+	await linkUserToProject(member, destination, editorRole.slug);
 	const created = await upload(archive, {}, member);
 	expect(created.statusCode).toBe(200);
 	const reader = await createMemberWithApiKey({ scopes: ['agent:import', 'agent:read'] });

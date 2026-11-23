@@ -11,7 +11,14 @@ import { VIEWS } from '@/app/constants';
 import { usePostHog } from '@/app/stores/posthog.store';
 import { useSettingsStore } from '@n8n/stores/settings.store';
 
+import { canMessageInstanceAi } from '@/features/ai/instanceAi/instanceAiPermissions';
+
 import { ContextModule } from './module.descriptor';
+
+vi.mock('@/features/ai/instanceAi/instanceAiPermissions', async (importOriginal) => ({
+	...(await importOriginal()),
+	canMessageInstanceAi: vi.fn(() => true),
+}));
 
 const stub = { render: () => null };
 
@@ -87,6 +94,18 @@ describe('ContextModule routes', () => {
 			expect(router.currentRoute.value.name).toBe(VIEWS.HOMEPAGE);
 		});
 
+		it('redirects to the homepage when Agents are off for the user', async () => {
+			setup(undefined, true);
+			useSettingsStore().setAgentsAllowedForCurrentUser(false);
+			const router = createTestRouter();
+
+			for (const path of ['/settings/context/skills', '/settings/context']) {
+				await router.push(path);
+
+				expect(router.currentRoute.value.name).toBe(VIEWS.HOMEPAGE);
+			}
+		});
+
 		it('keeps the preferences page closed when only the agents module is active', async () => {
 			setup(undefined, true);
 			const router = createTestRouter();
@@ -95,6 +114,16 @@ describe('ContextModule routes', () => {
 
 			expect(router.currentRoute.value.name).toBe(VIEWS.HOMEPAGE);
 		});
+	});
+
+	it('redirects users without n8n Assistant access away from preferences', async () => {
+		setup(CONTEXT_PREFERENCES_ENABLED_VARIANT);
+		vi.mocked(canMessageInstanceAi).mockReturnValue(false);
+		const router = createTestRouter();
+
+		await router.push('/settings/context/preferences');
+
+		expect(router.currentRoute.value.name).toBe(VIEWS.HOMEPAGE);
 	});
 
 	it('lists no custom middleware, so the initializer does not gate it on a backend module', () => {

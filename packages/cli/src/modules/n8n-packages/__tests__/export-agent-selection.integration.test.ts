@@ -17,7 +17,10 @@ import { AgentHistory } from '@/modules/agents/entities/agent-history.entity';
 import { AgentRepository } from '@/modules/agents/repositories/agent.repository';
 import { ProjectService } from '@/services/project.service.ee';
 import { createFolder } from '@test-integration/db/folders';
-import { createCustomRoleWithScopeSlugs } from '@test-integration/db/roles';
+import {
+	createCustomRoleWithScopeSlugs,
+	createProjectRoleWithAgentScopes,
+} from '@test-integration/db/roles';
 import { createMember, createOwner } from '@test-integration/db/users';
 
 import { AgentSelectionExporter } from '../entities/agent/agent-selection.exporter';
@@ -115,7 +118,11 @@ it.each(['loose', 'project'] as const)(
 	'exports a %s selection with Agent and workflow cycles',
 	async (placement) => {
 		const user = await createMember();
-		await linkUserToProject(user, project, 'project:viewer');
+		await linkUserToProject(
+			user,
+			project,
+			(await createProjectRoleWithAgentScopes('project:viewer')).slug,
+		);
 		const dependencyRole = await createCustomRoleWithScopeSlugs([
 			'agent:export',
 			'workflow:export',
@@ -258,7 +265,12 @@ it.each(['read-only', 'chat-only', 'custom-export', 'viewer', 'nonmember'] as co
 	'checks export access for a %s user',
 	async (role) => {
 		const user = await createMember();
-		if (role === 'viewer') await linkUserToProject(user, project, 'project:viewer');
+		if (role === 'viewer')
+			await linkUserToProject(
+				user,
+				project,
+				(await createProjectRoleWithAgentScopes('project:viewer')).slug,
+			);
 		if (role === 'chat-only') await linkUserToProject(user, project, 'project:chatUser');
 		if (role === 'read-only' || role === 'custom-export') {
 			const custom = await createCustomRoleWithScopeSlugs(
@@ -281,7 +293,11 @@ it.each(['reference-only', 'include-in-package'] as const)(
 	'handles an inaccessible Agent dependency with %s',
 	async (policy) => {
 		const user = await createMember();
-		await linkUserToProject(user, project, 'project:viewer');
+		await linkUserToProject(
+			user,
+			project,
+			(await createProjectRoleWithAgentScopes('project:viewer')).slug,
+		);
 		await setConfig(parent, { subAgents: { agents: [{ agentId: child.id }] } });
 		const run = exporter.export({
 			user,

@@ -5,6 +5,7 @@ import { ForbiddenError } from '@n8n/errors';
 
 import { AgentTaskRepository } from '@/modules/agents/repositories/agent-task.repository';
 import { AgentRepository } from '@/modules/agents/repositories/agent.repository';
+import { createProjectRoleWithAgentScopes } from '@test-integration/db/roles';
 import { createMember, createOwner } from '@test-integration/db/users';
 
 import { looseAgentsFixture } from './fixtures/agent-package-fixtures';
@@ -133,7 +134,11 @@ it('restricts destination matching to projects the user can read', async () => {
 		service.findBySourceAgentIds({ user: member, projectId: project.id }, ['support_source']),
 	).rejects.toThrow(ForbiddenError);
 	expect(read).not.toHaveBeenCalled();
-	await linkUserToProject(member, project, 'project:viewer');
+	await linkUserToProject(
+		member,
+		project,
+		(await createProjectRoleWithAgentScopes('project:viewer')).slug,
+	);
 	const matches = await service.findBySourceAgentIds({ user: member, projectId: project.id }, [
 		'support_source',
 	]);

@@ -30,7 +30,7 @@ import {
 	type User,
 } from '@n8n/db';
 import { Container, Service } from '@n8n/di';
-import { hasGlobalScope } from '@n8n/permissions';
+import { hasGlobalScope, type Scope } from '@n8n/permissions';
 import { generateNanoId } from '@n8n/utils/generate-nano-id';
 import { v4 as uuid } from 'uuid';
 
@@ -628,9 +628,16 @@ export class AgentsService {
 		options: ListAgentsQueryDto,
 	): Promise<AgentChatListResponse> {
 		if (!(await this.settingsService.getEnabled())) return { count: 0, data: [] };
+		// Project roles carry no Agent scopes, so global owners and admins qualify
+		// through every project they are a member of.
+		const manageScopes: Scope[] = hasGlobalScope(user, ['agent:update', 'agent:publish'], {
+			mode: 'allOf',
+		})
+			? ['project:read']
+			: ['agent:update', 'agent:publish'];
 		const [projectIds, ownedProjectIds] = await Promise.all([
 			this.projectScopeService.getProjectIds(user, ['agent:execute']),
-			this.projectScopeService.getMemberProjectIds(user, ['agent:update', 'agent:publish']),
+			this.projectScopeService.getMemberProjectIds(user, manageScopes),
 		]);
 		// Usage counts are only meaningful (and only needed) for the usage sort.
 		const usageCounts =

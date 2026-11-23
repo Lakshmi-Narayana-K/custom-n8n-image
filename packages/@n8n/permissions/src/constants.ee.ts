@@ -183,7 +183,8 @@ export const IMPLICIT_TEAM_PROJECT_MEMBER_ROLE_SLUGS = [
 ];
 export const PERSONAL_SPACE_PUBLISHING_SETTING = {
 	key: 'security.personalSpacePublishing',
-	scopes: ['workflow:publish', 'agent:publish'],
+	// No agent:publish: Agents are limited to global owners and admins.
+	scopes: ['workflow:publish'],
 };
 export const PERSONAL_SPACE_SHARING_SETTING = {
 	key: 'security.personalSpaceSharing',

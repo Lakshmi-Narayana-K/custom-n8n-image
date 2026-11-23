@@ -726,7 +726,19 @@ it('completes a committed update when the setup check fails', async () => {
 
 it('applies and publishes a project package after authorized project creation', async () => {
 	const input = publishableFixture(true);
-	const role = await createCustomRoleWithScopeSlugs(['project:create'], { roleType: 'global' });
+	// The creator becomes project admin, which carries no Agent scopes, so the role grants them globally.
+	const role = await createCustomRoleWithScopeSlugs(
+		[
+			'project:create',
+			'agent:import',
+			'agent:read',
+			'agent:create',
+			'agent:update',
+			'agent:publish',
+			'agent:unpublish',
+		],
+		{ roleType: 'global' },
+	);
 	const user = await createUser({ role });
 	const result = await Container.get(ProjectPackageImporter).import(
 		request({

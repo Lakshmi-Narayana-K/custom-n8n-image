@@ -1,11 +1,16 @@
+import { useSettingsStore } from '@n8n/stores/settings.store';
 import { createPinia, setActivePinia } from 'pinia';
+import { hasPermission } from '@/app/utils/rbac/permissions';
 import {
+	canConfigureSelfHealing,
 	compareSharingEntries,
 	splitName,
 	useRemoteProjectSearch,
 	DEFAULT_PROJECT_SEARCH_PAGE_SIZE,
 } from './projects.utils';
 import { useProjectsStore } from './projects.store';
+
+vi.mock('@/app/utils/rbac/permissions', () => ({ hasPermission: vi.fn(() => true) }));
 
 describe('compareSharingEntries', () => {
 	it('puts people before projects, and orders each by name', () => {
@@ -135,6 +140,32 @@ describe('useRemoteProjectSearch', () => {
 			search: 'alice',
 			take: DEFAULT_PROJECT_SEARCH_PAGE_SIZE,
 			type: 'personal',
+		});
+	});
+});
+
+describe('canConfigureSelfHealing', () => {
+	const teamProject = { type: 'team' as const, scopes: ['project:update' as const] };
+
+	beforeEach(() => {
+		setActivePinia(createPinia());
+		useSettingsStore().moduleSettings['instance-ai'] = {
+			workflowSuggestionsEnabled: true,
+		} as never;
+	});
+
+	it('allows a user with n8n Assistant access who can update the project', () => {
+		vi.mocked(hasPermission).mockReturnValue(true);
+
+		expect(canConfigureSelfHealing(teamProject)).toBe(true);
+	});
+
+	it('denies a user without n8n Assistant access', () => {
+		vi.mocked(hasPermission).mockReturnValue(false);
+
+		expect(canConfigureSelfHealing(teamProject)).toBe(false);
+		expect(hasPermission).toHaveBeenCalledWith(['rbac'], {
+			rbac: { scope: 'instanceAi:message' },
 		});
 	});
 });

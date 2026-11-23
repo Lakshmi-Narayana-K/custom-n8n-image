@@ -141,8 +141,18 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 		return activeModules.value?.includes(moduleName);
 	};
 
+	// Agents are limited to global owners and admins. The users store sets this on sign-in,
+	// because this store cannot import the users store.
+	const isAgentsAllowedForCurrentUser = ref(true);
+	const setAgentsAllowedForCurrentUser = (allowed: boolean) => {
+		isAgentsAllowedForCurrentUser.value = allowed;
+	};
+
 	const isAgentsEnabled = computed(
-		() => isModuleActive('agents') && moduleSettings.value.agents?.enabled !== false,
+		() =>
+			isAgentsAllowedForCurrentUser.value &&
+			isModuleActive('agents') &&
+			moduleSettings.value.agents?.enabled !== false,
 	);
 	const isAppsEnabled = computed(() => isModuleActive('apps'));
 
@@ -550,6 +560,7 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 		activeModules,
 		isModuleActive,
 		isAgentsEnabled,
+		setAgentsAllowedForCurrentUser,
 		isAppsEnabled,
 		isAgentModuleActive,
 		isDataTableFeatureEnabled,

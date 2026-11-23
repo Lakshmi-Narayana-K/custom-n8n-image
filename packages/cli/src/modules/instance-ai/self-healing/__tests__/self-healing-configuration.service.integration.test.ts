@@ -16,6 +16,7 @@ import {
 	UserRepository,
 	type User,
 	WorkflowRepository,
+	type Role,
 	postgresMigrations,
 	sqliteMigrations,
 	wrapMigration,
@@ -32,14 +33,17 @@ import { ControllerRegistry } from '@/controller.registry';
 import { UserService } from '@/services/user.service';
 import { EnterpriseWorkflowService } from '@/workflows/workflow.service.ee';
 import { createFolder } from '@test-integration/db/folders';
-import { createCustomRoleWithScopeSlugs } from '@test-integration/db/roles';
+import {
+	createCustomRoleWithScopeSlugs,
+	createMemberRoleWithAssistantScopes,
+} from '@test-integration/db/roles';
 import {
 	createAdmin,
 	createChatUser,
 	createMember,
 	createOwner,
 	createServiceAccountWithProject,
-	createUser,
+	createUser as createUserRecord,
 } from '@test-integration/db/users';
 import { setupTestServer } from '@test-integration/utils';
 
@@ -60,6 +64,12 @@ const server = setupTestServer({
 });
 let configurations: SelfHealingConfigurationService;
 let repository: SelfHealingConfigurationRepository;
+let assistantMemberRole: Role;
+
+/** Members have no n8n Assistant scope, so these users get a member role that adds it. */
+async function createUser(attributes: Parameters<typeof createUserRecord>[0] = {}) {
+	return await createUserRecord({ role: assistantMemberRole, ...attributes });
+}
 
 beforeAll(async () => {
 	await import('../self-healing-configurations.controller.js');
@@ -67,6 +77,7 @@ beforeAll(async () => {
 	await Container.get(AuthHandlerRegistry).init();
 	configurations = Container.get(SelfHealingConfigurationService);
 	repository = Container.get(SelfHealingConfigurationRepository);
+	assistantMemberRole = await createMemberRoleWithAssistantScopes();
 	Container.get(WorkflowMutationHooksProxy).registerProvider(configurations);
 });
 
@@ -489,8 +500,22 @@ it('denies a chat user access to their personal project for every operation', as
 	await expectNoConfigurationAccess(chatUser, project.id, config.id);
 });
 
-it('denies a user downgraded to chat user access to their personal project', async () => {
+it('denies a member without n8n Assistant access to their personal project', async () => {
 	const member = await createMember();
+	const project = await getPersonalProject(member);
+	const config = await configurations.save(member, project.id, {
+		scope: 'all',
+		workflowIds: [],
+		reviewerIds: [],
+		includeAllProjectMembers: true,
+		enabled: false,
+	});
+
+	await expectNoConfigurationAccess(member, project.id, config.id);
+});
+
+it('denies a user downgraded to chat user access to their personal project', async () => {
+	const member = await createUser();
 	const project = await getPersonalProject(member);
 	const config = await configurations.save(member, project.id, {
 		scope: 'all',

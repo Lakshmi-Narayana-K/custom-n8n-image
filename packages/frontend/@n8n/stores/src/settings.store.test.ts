@@ -30,6 +30,16 @@ it.each([
 	},
 );
 
+it('disables Agents when the current user is not allowed to use them', () => {
+	setActivePinia(createPinia());
+	const store = useSettingsStore();
+	store.settings.activeModules = ['agents'];
+
+	store.setAgentsAllowedForCurrentUser(false);
+
+	expect(store.isAgentsEnabled).toBe(false);
+});
+
 const mockRootStore = {
 	restApiContext: {},
 	setUrlBaseWebhook: vi.fn(),

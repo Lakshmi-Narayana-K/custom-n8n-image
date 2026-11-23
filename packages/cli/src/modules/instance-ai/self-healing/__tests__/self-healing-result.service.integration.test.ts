@@ -40,7 +40,10 @@ import { WorkflowPublishGuardProxy } from '@n8n/backend-services';
 import { WorkflowValidationService } from '@/workflows/workflow-validation.service';
 import { WorkflowService } from '@/workflows/workflow.service';
 import { createExecution } from '@test-integration/db/executions';
-import { createCustomRoleWithScopeSlugs } from '@test-integration/db/roles';
+import {
+	createCustomRoleWithScopeSlugs,
+	createMemberRoleWithAssistantScopes,
+} from '@test-integration/db/roles';
 import { createUser } from '@test-integration/db/users';
 import { initNodeTypes, setupTestServer } from '@test-integration/utils';
 
@@ -1387,7 +1390,7 @@ it.each([
 			outcome === 'fix_ready',
 			{ inTeamProject: true },
 		);
-		const editor = await createUser();
+		const editor = await createUser({ role: await createMemberRoleWithAssistantScopes() });
 		await addReviewer(result.configurationId, editor.id);
 		await linkUserToProject(editor, project, 'project:viewer');
 		const team = await createTeamProject(undefined, user);

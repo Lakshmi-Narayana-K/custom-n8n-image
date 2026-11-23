@@ -17,7 +17,7 @@ import {
 } from '@n8n/db';
 import { Container, Service } from '@n8n/di';
 import { BadRequestError, ForbiddenError, NotFoundError } from '@n8n/errors';
-import { PROJECT_OWNER_ROLE_SLUG, type Scope } from '@n8n/permissions';
+import { hasGlobalScope, PROJECT_OWNER_ROLE_SLUG, type Scope } from '@n8n/permissions';
 
 import { userHasScopes } from '@/permissions.ee/check-access';
 import { WorkflowFinderService } from '@/workflows/workflow-finder.service';
@@ -52,6 +52,8 @@ export class SelfHealingConfigurationService {
 	}
 
 	async canConfigure(user: User, projectId: string) {
+		if (!hasGlobalScope(user, 'instanceAi:message')) return false;
+
 		const [project] = await this.projects.findTypesByIds([projectId]);
 		if (project?.type !== 'personal') {
 			return await userHasScopes(user, ['project:update'], false, { projectId });

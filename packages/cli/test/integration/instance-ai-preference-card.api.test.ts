@@ -11,7 +11,8 @@ import { Container } from '@n8n/di';
 import { InstanceAiMemoryService } from '@/modules/instance-ai/instance-ai-memory.service';
 import { InstanceAiSettingsService } from '@/modules/instance-ai/instance-ai-settings.service';
 
-import { createMember } from './shared/db/users';
+import { createMemberRoleWithAssistantScopes } from './shared/db/roles';
+import { createUser } from './shared/db/users';
 import type { SuperAgentTest } from './shared/types';
 import * as utils from './shared/utils/';
 
@@ -53,8 +54,9 @@ async function seedPreference(userId: string, content: string) {
 }
 
 beforeAll(async () => {
-	owner = await createMember();
-	otherUser = await createMember();
+	const role = await createMemberRoleWithAssistantScopes();
+	owner = await createUser({ role });
+	otherUser = await createUser({ role });
 	ownerAgent = testServer.authAgentFor(owner);
 
 	const personalProject = await getPersonalProject(owner);

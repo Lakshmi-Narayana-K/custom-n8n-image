@@ -20,7 +20,10 @@ import { createSkill } from '../../testing';
 import { linkSkill } from '../test-utils/skill-source-fixtures';
 import { PostHogClient } from '@/posthog';
 
-import { createCustomRoleWithScopeSlugs } from '@test-integration/db/roles';
+import {
+	createCustomRoleWithScopeSlugs,
+	createProjectRoleWithAgentScopes,
+} from '@test-integration/db/roles';
 import { createMember, createOwner, createUser } from '@test-integration/db/users';
 import type { SuperAgentTest } from '@test-integration/types';
 import { setupTestServer } from '@test-integration/utils';
@@ -55,8 +58,10 @@ describe('SkillsController', () => {
 		viewer = server.authAgentFor(viewerUser);
 		outsider = server.authAgentFor(await createMember());
 		project = await createTeamProject('Team');
-		await linkUserToProject(editorUser, project, 'project:editor');
-		await linkUserToProject(viewerUser, project, 'project:viewer');
+		const editorRole = await createProjectRoleWithAgentScopes('project:editor');
+		const viewerRole = await createProjectRoleWithAgentScopes('project:viewer');
+		await linkUserToProject(editorUser, project, editorRole.slug);
+		await linkUserToProject(viewerUser, project, viewerRole.slug);
 	});
 
 	beforeEach(async () => {

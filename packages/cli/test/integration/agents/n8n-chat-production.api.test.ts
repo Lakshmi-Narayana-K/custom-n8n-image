@@ -15,6 +15,7 @@ import { hashAgentSandboxPrincipal } from '@/modules/agents/agent-sandbox-princi
 import { productionChatMemoryResourceId } from '@/modules/agents/utils/agent-memory-scope';
 import { buildInboundUserMessage } from '@/modules/agents/utils/inbound-attachments';
 
+import { createProjectRoleWithAgentScopes } from '../shared/db/roles';
 import { createMember, createOwner } from '../shared/db/users';
 import { setupTestServer } from '../shared/utils';
 
@@ -195,7 +196,11 @@ describe('production n8n Chat HTTP route', () => {
 		const owner = await createOwner();
 		const other = await createMember();
 		const { project, agent } = await createAgent(owner.id);
-		await linkUserToProject(other, project, 'project:editor');
+		await linkUserToProject(
+			other,
+			project,
+			(await createProjectRoleWithAgentScopes('project:editor')).slug,
+		);
 		await activateChat(agent.id);
 		const mine = await createThread(agent.id, project.id, owner.id, 'n8n_chat_production');
 		// A shared session stays visible to the whole project, so only `scope` filters it out.
@@ -223,7 +228,11 @@ describe('production n8n Chat HTTP route', () => {
 		const owner = await createOwner();
 		const other = await createMember();
 		const { project, agent } = await createAgent(owner.id);
-		await linkUserToProject(other, project, 'project:editor');
+		await linkUserToProject(
+			other,
+			project,
+			(await createProjectRoleWithAgentScopes('project:editor')).slug,
+		);
 		await activateChat(agent.id);
 		const { thread, execution } = await createThread(
 			agent.id,
@@ -343,7 +352,11 @@ describe('production n8n Chat HTTP route', () => {
 		const owner = await createOwner();
 		const other = await createMember();
 		const { project, agent } = await createAgent(owner.id);
-		await linkUserToProject(other, project, 'project:editor');
+		await linkUserToProject(
+			other,
+			project,
+			(await createProjectRoleWithAgentScopes('project:editor')).slug,
+		);
 		await activateChat(agent.id);
 		const { thread } = await createThread(agent.id, project.id, owner.id, 'n8n_chat_production');
 

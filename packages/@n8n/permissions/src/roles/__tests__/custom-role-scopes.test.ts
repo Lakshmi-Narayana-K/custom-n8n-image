@@ -40,13 +40,21 @@ describe('Agent package export scope', () => {
 		Object.entries({
 			owner: GLOBAL_OWNER_SCOPES,
 			admin: GLOBAL_ADMIN_SCOPES,
+		}),
+	)('grants Agent export to %s', (_role, scopes) => {
+		expect(scopes).toContain('agent:export');
+	});
+	it.each(
+		Object.entries({
 			personalOwner: PERSONAL_PROJECT_OWNER_SCOPES,
 			projectAdmin: REGULAR_PROJECT_ADMIN_SCOPES,
 			editor: PROJECT_EDITOR_SCOPES,
 			viewer: PROJECT_VIEWER_SCOPES,
+			memberApiKey: MEMBER_API_KEY_SCOPES,
+			personalProjectApiKey: API_KEY_SCOPES_FOR_IMPLICIT_PERSONAL_PROJECT,
 		}),
-	)('grants Agent export to %s', (_role, scopes) => {
-		expect(scopes).toContain('agent:export');
+	)('grants no Agent scopes to %s', (_role, scopes) => {
+		expect(scopes.filter((scope) => scope.startsWith('agent:'))).toEqual([]);
 	});
 	it('keeps export separate from chat access', () => {
 		expect(PROJECT_CHAT_USER_SCOPES).not.toContain('agent:export');
@@ -67,8 +75,6 @@ describe('Agent package export scope', () => {
 		Object.entries({
 			owner: OWNER_API_KEY_SCOPES,
 			admin: ADMIN_API_KEY_SCOPES,
-			member: MEMBER_API_KEY_SCOPES,
-			personalProject: API_KEY_SCOPES_FOR_IMPLICIT_PERSONAL_PROJECT,
 		}),
 	)('allows Agent export on a %s API key', (_role, scopes) => {
 		expect(scopes).toContain('agent:export');
@@ -76,15 +82,12 @@ describe('Agent package export scope', () => {
 });
 
 it('grants Agent import to editors and owners, with selectable action grants', () => {
+	for (const scopes of [GLOBAL_OWNER_SCOPES, GLOBAL_ADMIN_SCOPES])
+		expect(scopes).toContain('agent:import');
 	for (const scopes of [
-		GLOBAL_OWNER_SCOPES,
-		GLOBAL_ADMIN_SCOPES,
 		PERSONAL_PROJECT_OWNER_SCOPES,
 		REGULAR_PROJECT_ADMIN_SCOPES,
 		PROJECT_EDITOR_SCOPES,
-	])
-		expect(scopes).toContain('agent:import');
-	for (const scopes of [
 		PROJECT_VIEWER_SCOPES,
 		PROJECT_CHAT_USER_SCOPES,
 		CHAT_USER_API_KEY_SCOPES,
@@ -100,12 +103,7 @@ it('grants Agent import to editors and owners, with selectable action grants', (
 		'agent:publish',
 		'agent:unpublish',
 	];
-	for (const scopes of [
-		OWNER_API_KEY_SCOPES,
-		ADMIN_API_KEY_SCOPES,
-		MEMBER_API_KEY_SCOPES,
-		API_KEY_SCOPES_FOR_IMPLICIT_PERSONAL_PROJECT,
-	]) {
+	for (const scopes of [OWNER_API_KEY_SCOPES, ADMIN_API_KEY_SCOPES]) {
 		expect(scopes).toEqual(expect.arrayContaining(importScopes));
 	}
 });
@@ -194,13 +192,12 @@ describe('custom role scope whitelists', () => {
 		expect(manage).toContain('instanceAi:gateway');
 	});
 
-	it('"AiAssistant use" matches GLOBAL_MEMBER_SCOPES\' instanceAi:* grants exactly', () => {
-		// Member's baseline n8n Assistant access is `instanceAi:message` +
-		// `instanceAi:gateway` (Browser Use pairing). A custom role built
-		// to mirror Member must get both, or it ends up strictly weaker than Member.
+	it('grants Member no n8n Assistant scopes, while "AiAssistant use" still offers them', () => {
 		const use = GLOBAL_CUSTOM_ROLE_SCOPE_GROUPS.settings['AiAssistant use'];
 		const memberInstanceAiScopes = GLOBAL_MEMBER_SCOPES.filter((s) => s.startsWith('instanceAi:'));
-		expect(new Set(use)).toEqual(new Set(memberInstanceAiScopes));
+
+		expect(memberInstanceAiScopes).toEqual([]);
+		expect(new Set(use)).toEqual(new Set(['instanceAi:message', 'instanceAi:gateway']));
 	});
 
 	it('exposes instance-level MCP scopes as their own use/manage options', () => {

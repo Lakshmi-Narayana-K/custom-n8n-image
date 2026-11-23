@@ -14,6 +14,7 @@ import { AuthHandlerRegistry } from '@/auth/auth-handler.registry';
 import { ControllerRegistry } from '@/controller.registry';
 import { WorkflowPublicationNotifier } from '@/workflows/publication/workflow-publication-notifier';
 import { createExecution } from '@test-integration/db/executions';
+import { createMemberRoleWithAssistantScopes } from '@test-integration/db/roles';
 import { createUser } from '@test-integration/db/users';
 import { initNodeTypes, setupTestServer } from '@test-integration/utils';
 
@@ -90,8 +91,9 @@ async function savedResult() {
 
 it('continues a saved report in a new private chat owned by the current editor', async () => {
 	const { backgroundUser, workflow, ownerProject, execution, result, url } = await savedResult();
-	const editor = await createUser();
-	const otherEditor = await createUser();
+	const assistantRole = await createMemberRoleWithAssistantScopes();
+	const editor = await createUser({ role: assistantRole });
+	const otherEditor = await createUser({ role: assistantRole });
 	await linkUserToProject(editor, ownerProject, 'project:editor');
 	await linkUserToProject(otherEditor, ownerProject, 'project:editor');
 	await addReviewer(result.configurationId, editor.id);

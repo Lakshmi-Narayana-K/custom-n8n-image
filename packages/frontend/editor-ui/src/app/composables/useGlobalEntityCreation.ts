@@ -1,6 +1,5 @@
 import { computed, ref } from 'vue';
 import { EnterpriseEditionFeature, VIEWS } from '@/app/constants';
-import { AGENTS_MODULE_NAME } from '@/features/agents/constants';
 import { useCreateAgent } from '@/features/agents/composables/useCreateAgent';
 import { INSTANCE_AI_VIEW } from '@/features/ai/instanceAi/constants';
 import { useInstanceAiAvailable } from '@/features/ai/instanceAi/composables/useInstanceAiAvailability';
@@ -106,7 +105,7 @@ export const useGlobalEntityCreation = () => {
 	const disabledAgent = (scopes: Scope[] = []): boolean =>
 		sourceControlStore.preferences.branchReadOnly || !getResourcePermissions(scopes).agent?.create;
 
-	const isAgentsModuleActive = computed(() => settingsStore.isModuleActive(AGENTS_MODULE_NAME));
+	const isAgentsModuleActive = computed(() => settingsStore.isAgentsEnabled);
 
 	const isInstanceAiAvailable = useInstanceAiAvailable();
 

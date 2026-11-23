@@ -16,10 +16,23 @@ import {
 	type SystemAgentThreadsResponse,
 } from '@n8n/api-types';
 import type { AuthenticatedRequest } from '@n8n/db';
-import { Body, Delete, Get, Param, Patch, Post, Query, RestController } from '@n8n/decorators';
+import {
+	Body,
+	Delete,
+	Get,
+	Middleware,
+	Param,
+	Patch,
+	Post,
+	Query,
+	RestController,
+} from '@n8n/decorators';
 import { BadRequestError, NotFoundError } from '@n8n/errors';
+import { hasGlobalScope } from '@n8n/permissions';
 import { isRecord } from '@n8n/utils/is-record';
-import type { Response } from 'express';
+import type { NextFunction, Response } from 'express';
+
+import { RESPONSE_ERROR_MESSAGES } from '@/constants';
 
 import { AgentChatAttachmentService } from '../agent-chat-attachment.service';
 import { AgentChatExecutionService } from '../agent-chat-execution.service';
@@ -60,6 +73,16 @@ export class SystemAgentChatController {
 		private readonly attachments: AgentChatAttachmentService,
 		private readonly memory: N8nMemory,
 	) {}
+
+	/** System agents are limited to global owners and admins, like project agents. */
+	@Middleware()
+	checkAccess(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+		if (!hasGlobalScope(req.user, 'agent:execute')) {
+			res.status(403).json({ status: 'error', message: RESPONSE_ERROR_MESSAGES.MISSING_SCOPE });
+			return;
+		}
+		next();
+	}
 
 	/**
 	 * Queue a message. An existing session keeps its working project. A new

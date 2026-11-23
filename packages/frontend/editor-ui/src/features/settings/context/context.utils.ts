@@ -14,6 +14,7 @@ import { getResourcePermissions } from '@n8n/permissions';
 import { ResponseError } from '@n8n/rest-api-client';
 
 import { usePostHog, waitForFeatureFlagsWithTimeout } from '@/app/stores/posthog.store';
+import { canMessageInstanceAi } from '@/features/ai/instanceAi/instanceAiPermissions';
 import { useProjectsStore } from '@/features/collaboration/projects/projects.store';
 import { splitName } from '@/features/collaboration/projects/projects.utils';
 import { useSettingsStore } from '@n8n/stores/settings.store';
@@ -27,6 +28,8 @@ import type { Preference, PreferencePermissions } from './context.types';
  * Local override: `window.featureFlags.override('111_context_preferences', 'variant')`
  */
 export function isContextPreferencesEnabled(): boolean {
+	// Preferences shape n8n Assistant replies, so users without n8n Assistant access do not see them.
+	if (!canMessageInstanceAi()) return false;
 	return usePostHog().isVariantEnabled(
 		CONTEXT_PREFERENCES_FLAG,
 		CONTEXT_PREFERENCES_ENABLED_VARIANT,
@@ -163,11 +166,11 @@ export function canWriteInstanceSkillScope(): boolean {
 }
 
 /**
- * Skills are on while the agents module is on. The skills module cannot be
+ * Skills are on while Agents are on for the current user. The skills module cannot be
  * disabled then. The skills routes answer 404 while skills are off.
  */
 export function isContextSkillsEnabled(): boolean {
-	return useSettingsStore().isModuleActive('agents');
+	return useSettingsStore().isAgentsEnabled;
 }
 
 /** The service builds the cap message from the scope and the number, so match the fixed part. */

@@ -33,7 +33,7 @@ import {
 } from './composables/useInstanceAiAvailability';
 import { useSettingsStore } from '@n8n/stores/settings.store';
 import { useCloudPlanStore } from '@n8n/stores/cloudPlan.store';
-import { canManageInstanceAi } from './instanceAiPermissions';
+import { canManageInstanceAi, canMessageInstanceAi } from './instanceAiPermissions';
 
 /**
  * The settings page renders its sections only for a viewer who can manage
@@ -53,7 +53,9 @@ function hasInstanceAiSettingsContent(): boolean {
 	// settings is the flag the view falls back to for them.
 	const isAssistantEnabled = useSettingsStore().moduleSettings['instance-ai']?.enabled === true;
 
-	return isAssistantEnabled && useOpenWorkflowInAssistantStore().isTreatment;
+	return (
+		isAssistantEnabled && canMessageInstanceAi() && useOpenWorkflowInAssistantStore().isTreatment
+	);
 }
 
 /** `?team=` on the onboarding handoff URL answers the survey's team question, on any deployment. */

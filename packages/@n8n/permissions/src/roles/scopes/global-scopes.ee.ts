@@ -248,8 +248,7 @@ export const GLOBAL_MEMBER_SCOPES: Scope[] = [
 	'apiKey:create',
 	'apiKey:update',
 	'credentialResolver:list',
-	'instanceAi:message',
-	'instanceAi:gateway',
+	// No instanceAi scopes: n8n Assistant is limited to global owners and admins.
 	'trustedSource:list',
 ];
 

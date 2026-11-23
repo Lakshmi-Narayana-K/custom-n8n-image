@@ -82,6 +82,66 @@ export async function createCustomRoleWithScopeSlugs(
 	});
 }
 
+const ALL_AGENT_SCOPES: ScopeType[] = [
+	'agent:create',
+	'agent:read',
+	'agent:export',
+	'agent:import',
+	'agent:update',
+	'agent:delete',
+	'agent:list',
+	'agent:execute',
+	'agent:publish',
+	'agent:unpublish',
+];
+
+/** The Agent scopes that upstream n8n gives each project role. */
+const UPSTREAM_PROJECT_AGENT_SCOPES = {
+	'project:admin': ALL_AGENT_SCOPES,
+	'project:editor': ALL_AGENT_SCOPES,
+	'project:viewer': ['agent:read', 'agent:export', 'agent:list', 'agent:execute'],
+} satisfies Record<string, ScopeType[]>;
+
+async function getSystemRoleScopeSlugs(slug: string) {
+	const role = await Container.get(RoleRepository).findOneOrFail({
+		where: { slug },
+		relations: ['scopes'],
+	});
+	return role.scopes.map((scope) => scope.slug);
+}
+
+/**
+ * Creates a project role with the scopes of a system project role plus upstream's
+ * Agent scopes. System project roles carry no Agent scopes, because Agents are
+ * limited to global owners and admins.
+ */
+export async function createProjectRoleWithAgentScopes(
+	baseRoleSlug: keyof typeof UPSTREAM_PROJECT_AGENT_SCOPES,
+): Promise<Role> {
+	return await createCustomRoleWithScopeSlugs(
+		[
+			...(await getSystemRoleScopeSlugs(baseRoleSlug)),
+			...UPSTREAM_PROJECT_AGENT_SCOPES[baseRoleSlug],
+		],
+		{ roleType: 'project' },
+	);
+}
+
+/**
+ * Creates a global role with the member scopes plus n8n Assistant access.
+ * The member role carries no n8n Assistant scopes.
+ */
+export async function createMemberRoleWithAssistantScopes(): Promise<Role> {
+	return await createCustomRoleWithScopeSlugs(
+		[
+			...(await getSystemRoleScopeSlugs('global:member')),
+			'instanceAi:message',
+			'instanceAi:gateway',
+		],
+		{ roleType: 'global' },
+	);
+}
+
 /**
  * Creates a test scope with given parameters
  */
